@@ -354,7 +354,7 @@ jobs:
             -c `
             --file-allocation=none `
             --connect-timeout=30 `
-            --timeout=0 `
+            --timeout=600 `
             --max-tries=3 `
             --retry-wait=10 `
             --console-log-level=notice `

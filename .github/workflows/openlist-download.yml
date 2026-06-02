@@ -86,7 +86,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $twoGB = 2147483648  # 2 * 1024^3
+          $threshold = 524288000  # 500 * 1024^2
           $files = Get-Content -Path 'D:\tasks\all_files.json' -Raw | ConvertFrom-Json
 
           # 使用 ConvertTo-Json 安全构建 JSON（正确处理所有特殊字符）
@@ -99,14 +99,14 @@ jobs:
           $largeFiles = @()
 
           foreach ($f in $files) {
-            if ($f.size -gt $twoGB) {
+            if ($f.size -gt $threshold) {
               $largeFiles += $f
             } else {
               $smallFiles += $f
             }
           }
 
-          Write-Host "总计 $($files.Count) 个文件: $($smallFiles.Count) 个小文件(<=2G), $($largeFiles.Count) 个大文件(>2G)"
+          Write-Host "总计 $($files.Count) 个文件: $($smallFiles.Count) 个小文件(<=500M), $($largeFiles.Count) 个大文件(>500M)"
 
           # 单次写入整个 GITHUB_OUTPUT 文件
           $out = $env:GITHUB_OUTPUT
@@ -123,7 +123,7 @@ jobs:
           [System.IO.File]::ReadAllText($out) | Write-Host
 
   # ============================================================
-  # Job 2: 下载并推送所有 <=2GB 的文件（单个 runner 处理全部）
+  # Job 2: 下载并推送所有 <=500MB 的文件（单个 runner 处理全部）
   # ============================================================
   dl-small:
     needs: list-files
@@ -266,7 +266,7 @@ jobs:
           Write-Host "推送完成"
 
   # ============================================================
-  # Job 3: 下载并推送单个 >2GB 的文件（每个文件单独一个 runner）
+  # Job 3: 下载并推送单个 >500MB 的文件（每个文件单独一个 runner）
   # ============================================================
   dl-large:
     needs: list-files

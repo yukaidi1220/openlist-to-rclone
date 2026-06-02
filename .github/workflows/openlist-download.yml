@@ -240,6 +240,7 @@ jobs:
           Write-Host "aria2c 退出码: $exitCode"
           if ($exitCode -ne 0) {
             Write-Warning "部分文件下载失败（退出码 $exitCode），继续推送已下载的文件..."
+            $global:LASTEXITCODE = 0
           }
           Write-Host "下载完成"
 

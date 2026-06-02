@@ -247,8 +247,8 @@ jobs:
       - name: rclone 推送到 remote
         shell: pwsh
         run: |
-          $sourcePath = "${{ github.event.inputs.source_path }}"
-          $rcloneSource = "${{ env.DL_DIR }}\"
+          $ErrorActionPreference = 'Continue'
+          $dlDir = "${{ env.DL_DIR }}"
           $rcloneTarget = "${{ github.event.inputs.remote_path }}"
 
           # 确保 remote_path 以 / 结尾（目录模式）
@@ -256,8 +256,53 @@ jobs:
             $rcloneTarget += '/'
           }
 
+          # 清理远程文件/目录冲突
+          Write-Host "检查远程文件/目录冲突..."
+          $localDirs = Get-ChildItem -Path $dlDir -Directory -Recurse
+          foreach ($dir in $localDirs) {
+            $relDir = $dir.FullName.Substring($dlDir.Length).TrimStart('\').Replace('\', '/')
+            if (-not $relDir) { continue }
+
+            $dirName = Split-Path $relDir -Leaf
+            $parentRelDir = Split-Path $relDir -Parent
+            if ($parentRelDir) {
+              $parentRemote = "$rcloneTarget$parentRelDir"
+            } else {
+              $parentRemote = $rcloneTarget.TrimEnd('/')
+            }
+
+            # 列出远程父目录，检查是否有同名文件
+            try {
+              $json = rclone lsjson "$parentRemote" --config rclone.conf --no-modtime 2>$null | Out-String
+              if (-not $json.Trim()) { continue }
+              $items = $json | ConvertFrom-Json
+            } catch {
+              continue
+            }
+
+            if (-not $items) { continue }
+            if ($items -isnot [array]) { $items = @($items) }
+
+            $conflictFile = $items | Where-Object { $_.Name -eq $dirName -and -not $_.IsDir }
+            if (-not $conflictFile) { continue }
+
+            # 远程有同名文件！必须删除才能创建目录
+            $localFiles = Get-ChildItem -Path $dir.FullName -File
+            $match = $localFiles | Where-Object { $_.Length -eq $conflictFile.Size }
+            if ($match) {
+              Write-Host "  删除远程冲突文件: $($conflictFile.Path) ($($conflictFile.Size) bytes) [与本地文件大小一致，数据可能已存在]"
+            } else {
+              Write-Host "  删除远程冲突文件: $($conflictFile.Path) ($($conflictFile.Size) bytes)"
+            }
+            rclone deletefile "$parentRemote/$dirName" --config rclone.conf --onedrive-hard-delete
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "  删除失败，将在 copy 时重试处理"
+            }
+          }
+          Write-Host "冲突检查完成"
+
           Write-Host "推送到 $rcloneTarget ..."
-          rclone copy $rcloneSource $rcloneTarget `
+          rclone copy "$dlDir\" "$rcloneTarget" `
             --config rclone.conf `
             --progress `
             --transfers=8 `
@@ -386,6 +431,8 @@ jobs:
           if (-not $sourcePath.StartsWith('/')) { $sourcePath = "/$sourcePath" }
           $relativePath = $filePath.Substring($sourcePath.Length).TrimStart('/')
           $localDir = Join-Path "${{ env.DL_DIR }}" (Split-Path $relativePath -Parent)
+          $fileName = Split-Path $relativePath -Leaf
+          $localFile = Join-Path $localDir $fileName
           $rcloneTarget = "${{ github.event.inputs.remote_path }}"
 
           # 如果文件在子目录下，追加到 remote 目标路径
@@ -402,8 +449,9 @@ jobs:
             }
           }
 
-          Write-Host "推送 $filePath -> $rcloneTarget"
-          rclone copy "$localDir" "$rcloneTarget" `
+          $remoteFile = "$rcloneTarget$fileName"
+          Write-Host "推送 $localFile -> $remoteFile"
+          rclone copyto "$localFile" "$remoteFile" `
             --config rclone.conf `
             --progress `
             --transfers=4 `

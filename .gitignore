@@ -1,0 +1,33 @@
+# OS 文件
+Thumbs.db
+Desktop.ini
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# 日志文件
+*.log
+rclone.log
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*.old
+rclone-current-linux-amd64.zip
+rclone-*-linux-amd64/
+
+# Claude
+.claude/
+
+# Spec Workflow
+.spec-workflow/

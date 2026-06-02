@@ -165,7 +165,7 @@ jobs:
       - name: 创建目录结构并下载
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $baseUrl = "${{ env.OPENLIST_URL }}"
           $dlDir = "${{ env.DL_DIR }}"
           $files = '${{ needs.list-files.outputs.matrix-small }}' | ConvertFrom-Json
@@ -176,6 +176,7 @@ jobs:
 
           # 按子目录分组，预创建所有目录，同时拼接 aria2c 输入文件
           $urlsContent = [System.Text.StringBuilder]::new()
+          $skippedCount = 0
           foreach ($f in $files) {
             # 只保留源目录内的相对路径，避免推送时嵌套
             $relativePath = $f.path.Substring($sourcePath.Length).TrimStart('/')
@@ -183,21 +184,32 @@ jobs:
             if (-not (Test-Path $localDir)) { New-Item -ItemType Directory -Force -Path $localDir | Out-Null }
 
             # 获取下载链接
-            $body = @{ path = $f.path; password = '' } | ConvertTo-Json
-            $resp = Invoke-RestMethod -Uri "$baseUrl/api/fs/get" `
-              -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 60
-            if ($resp.code -ne 200) { throw "获取下载链接失败 [$($f.path)]: $($resp.message)" }
+            try {
+              $body = @{ path = $f.path; password = '' } | ConvertTo-Json
+              $resp = Invoke-RestMethod -Uri "$baseUrl/api/fs/get" `
+                -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 60
+              if ($resp.code -ne 200) {
+                Write-Warning "获取下载链接失败 [$($f.path)]: $($resp.message)，跳过此文件"
+                $skippedCount++
+                continue
+              }
 
-            $rawUrl = $resp.data.raw_url
-            $outFile = Split-Path $f.path -Leaf
+              $rawUrl = $resp.data.raw_url
+              $outFile = Split-Path $f.path -Leaf
 
-            # 拼接到 aria2c 输入文件内容（后续一次性写入）
-            [void]$urlsContent.AppendLine($rawUrl)
-            [void]$urlsContent.AppendLine("  dir=$localDir")
-            [void]$urlsContent.AppendLine("  out=$outFile")
+              # 拼接到 aria2c 输入文件内容（后续一次性写入）
+              [void]$urlsContent.AppendLine($rawUrl)
+              [void]$urlsContent.AppendLine("  dir=$localDir")
+              [void]$urlsContent.AppendLine("  out=$outFile")
 
-            Write-Host "  [$($f.path)] $($f.size) bytes -> $rawUrl"
+              Write-Host "  [$($f.path)] $($f.size) bytes -> $rawUrl"
+            } catch {
+              Write-Warning "获取下载链接异常 [$($f.path)]: $_，跳过此文件"
+              $skippedCount++
+            }
           }
+
+          Write-Host "共跳过 $skippedCount 个文件，待下载 $($files.Count - $skippedCount) 个文件"
 
           # 一次性写入 aria2c 输入文件
           [System.IO.File]::WriteAllText("$dlDir\urls.txt", $urlsContent.ToString(), [System.Text.UTF8Encoding]::new($false))
@@ -210,8 +222,8 @@ jobs:
           aria2c `
             --input-file="${{ env.DL_DIR }}\urls.txt" `
             --max-connection-per-server=16 `
-            --split=8 `
-            --min-split-size=10M `
+            --split=16 `
+            --min-split-size=5M `
             --continue=true `
             --auto-file-renaming=false `
             --allow-overwrite=true `
@@ -220,8 +232,15 @@ jobs:
             --file-allocation=none `
             --connect-timeout=30 `
             --timeout=600 `
+            --max-tries=3 `
+            --retry-wait=10 `
             --console-log-level=notice `
             --summary-interval=10
+          $exitCode = $LASTEXITCODE
+          Write-Host "aria2c 退出码: $exitCode"
+          if ($exitCode -ne 0) {
+            Write-Warning "部分文件下载失败（退出码 $exitCode），继续推送已下载的文件..."
+          }
           Write-Host "下载完成"
 
       - name: rclone 推送到 remote
@@ -336,13 +355,31 @@ jobs:
             --file-allocation=none `
             --connect-timeout=30 `
             --timeout=0 `
+            --max-tries=3 `
+            --retry-wait=10 `
             --console-log-level=notice `
             --summary-interval=30
+          $exitCode = $LASTEXITCODE
+          Write-Host "aria2c 退出码: $exitCode"
+          if ($exitCode -ne 0) {
+            Write-Warning "下载失败（退出码 $exitCode），跳过推送..."
+            # 标记下载失败，后续推送 step 跳过
+            "failed" | Out-File -FilePath "$dlDir\large_dl_failed.txt" -Encoding utf8
+            exit 0
+          }
+          # 标记下载成功，供后续 step 判断
+          "success" | Out-File -FilePath "$dlDir\large_dl_status.txt" -Encoding utf8
           Write-Host "大文件下载完成"
 
       - name: rclone 推送到 remote
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
+          # 检查下载是否成功
+          if (Test-Path "${{ env.DL_DIR }}\large_dl_failed.txt") {
+            Write-Host "下载失败，跳过推送..."
+            exit 0
+          }
           $filePath = '${{ matrix.file.path }}'
           $sourcePath = "${{ github.event.inputs.source_path }}"
           if (-not $sourcePath.StartsWith('/')) { $sourcePath = "/$sourcePath" }

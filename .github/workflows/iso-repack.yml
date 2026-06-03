@@ -32,8 +32,6 @@ jobs:
     outputs:
       iso-count: ${{ steps.build-matrix.outputs.iso-count }}
       matrix: ${{ steps.build-matrix.outputs.matrix }}
-      zip-name: ${{ steps.find-zip.outputs.zip-name }}
-      zip-path: ${{ steps.find-zip.outputs.zip-path }}
     steps:
       - name: 获取 rclone.conf
         shell: pwsh
@@ -105,6 +103,48 @@ jobs:
           $content = "zip-name=$($latest.Name)$nl"
           $content += "zip-path=$($latest.Path)$nl"
           [System.IO.File]::WriteAllText($out, $content, [System.Text.UTF8Encoding]::new($false))
+
+      - name: 下载并解压驱动包 ZIP
+        shell: pwsh
+        env:
+          ZIP_NAME: ${{ steps.find-zip.outputs.zip-name }}
+          ZIP_PATH: ${{ steps.find-zip.outputs.zip-path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zipSource = "${{ github.event.inputs.drvzip_path }}"
+          $zipName = $env:ZIP_NAME
+          $zipPath = $env:ZIP_PATH
+
+          $remoteZip = if ($zipSource.EndsWith(':') -or $zipSource.EndsWith('/')) {
+            "$zipSource$zipPath"
+          } else {
+            "$zipSource/$zipPath"
+          }
+
+          $localZip = "D:\tasks\drvzip\$zipName"
+          New-Item -ItemType Directory -Force -Path "D:\tasks\drvzip" | Out-Null
+
+          Write-Host "下载驱动包 ZIP: $remoteZip -> $localZip"
+          rclone copyto "$remoteZip" "$localZip" `
+            --config rclone.conf `
+            --progress `
+            --onedrive-chunk-size 250M `
+            --low-level-retries=3 `
+            --retries=3
+          Write-Host "下载完成"
+
+          Write-Host "解压驱动包 ZIP..."
+          & "C:\Program Files\7-Zip\7z.exe" x "$localZip" -o"D:\tasks\drvzip\extracted" -y | Write-Host
+          if ($LASTEXITCODE -ne 0) { throw "ZIP 解压失败，退出码: $LASTEXITCODE" }
+          Remove-Item $localZip -Force
+          Write-Host "解压完成，已删除 ZIP 原文件"
+
+      - name: 上传驱动包到 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: drvzip-content
+          path: D:\tasks\drvzip\extracted
+          retention-days: 1
 
       - name: 列出所有 ISO 文件
         id: build-matrix
@@ -329,43 +369,25 @@ jobs:
           }
           Write-Host "共提取 $foundCount/$($targetDirs.Count) 个目录"
 
-      - name: 下载并解压驱动包 ZIP（覆盖 ISO 同名文件）
+      - name: 下载驱动包 Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: drvzip-content
+          path: D:\tasks\drvzip
+
+      - name: 合并驱动包到输出目录（覆盖 ISO 同名文件）
         shell: pwsh
         env:
           ISO_NAME: ${{ matrix.iso.name }}
-          ZIP_NAME: ${{ needs.list-isos.outputs.zip-name }}
-          ZIP_PATH: ${{ needs.list-isos.outputs.zip-path }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $zipSource = "${{ github.event.inputs.drvzip_path }}"
-          $zipName = $env:ZIP_NAME
-          $zipPath = $env:ZIP_PATH
           $isoName = $env:ISO_NAME
           $dlDir = "${{ env.DL_DIR }}\$isoName"
-
-          # 构造远程完整路径
-          $remoteZip = if ($zipSource.EndsWith(':') -or $zipSource.EndsWith('/')) {
-            "$zipSource$zipPath"
-          } else {
-            "$zipSource/$zipPath"
-          }
-
-          $localZip = "$dlDir\$zipName"
-          Write-Host "下载驱动包 ZIP: $remoteZip -> $localZip"
-          rclone copyto "$remoteZip" "$localZip" `
-            --config rclone.conf `
-            --progress `
-            --onedrive-chunk-size 250M `
-            --low-level-retries=3 `
-            --retries=3
-          Write-Host "驱动包 ZIP 下载完成: $zipName"
-
-          # 解压 ZIP 到输出目录，覆盖 ISO 提取的同名文件
           $outDir = "$dlDir\output"
-          Write-Host "解压驱动包 ZIP 到输出目录（覆盖模式）..."
-          & "C:\Program Files\7-Zip\7z.exe" x "$localZip" -o"$outDir" -y | Write-Host
-          if ($LASTEXITCODE -ne 0) { throw "驱动包 ZIP 解压失败，退出码: $LASTEXITCODE" }
-          Write-Host "驱动包 ZIP 解压完成，已覆盖 ISO 中的同名文件"
+
+          Write-Host "复制驱动包内容到输出目录（覆盖模式）..."
+          Copy-Item -Path "D:\tasks\drvzip\*" -Destination $outDir -Recurse -Force
+          Write-Host "驱动包合并完成，已覆盖 ISO 中的同名文件"
 
       - name: 打包新 ISO
         shell: pwsh

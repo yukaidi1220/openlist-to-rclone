@@ -121,18 +121,29 @@ jobs:
 
           echo ">>> 注册 WARP 账户..."
           for i in {1..5}; do
-            wgcf register --accept-tos && break
+            if wgcf register --accept-tos; then
+              echo "注册成功"
+              break
+            fi
             echo "注册失败，重试 $i/5..."
             sleep $((i * 10))
           done
+
+          # 检查注册是否成功
+          if [ ! -f wgcf-account.toml ]; then
+            echo "::error::WARP 注册失败，已重试 5 次"
+            exit 1
+          fi
 
           echo ">>> 生成 WireGuard 配置..."
           wgcf generate
 
           echo ">>> 手动拉起 WARP 接口..."
           PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
-          ADDR_V4=$(grep 'Address' wgcf-profile.conf    | awk '{print $3}' | sed 's/,$//')
-          ADDR_V6=$(grep 'Address' wgcf-profile.conf    | awk '{print $4}')
+          # 更精确的地址解析：按 = 分割后取第二部分，再按逗号分割
+          ADDRESSES=$(grep 'Address' wgcf-profile.conf | awk -F'= ' '{print $2}')
+          ADDR_V4=$(echo "$ADDRESSES" | awk -F', ' '{print $1}' | sed 's/,$//')
+          ADDR_V6=$(echo "$ADDRESSES" | awk -F', ' '{print $2}')
           PEER_KEY=$(grep  'PublicKey' wgcf-profile.conf | awk '{print $NF}')
           ENDPOINT=$(grep  'Endpoint' wgcf-profile.conf  | awk '{print $NF}')
 
@@ -140,6 +151,9 @@ jobs:
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
           sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+
+          # 先启用接口，再添加地址
+          sudo ip link set mtu 1280 up dev $INTERFACE
           sudo ip addr add "$ADDR_V4" dev $INTERFACE
 
           # IPv6 地址非空时才添加
@@ -149,8 +163,6 @@ jobs:
           else
             echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
           fi
-
-          sudo ip link set mtu 1280 up dev $INTERFACE
 
           echo ">>> 验证 IPv6..."
           curl -6 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "::warning::IPv6 不通"

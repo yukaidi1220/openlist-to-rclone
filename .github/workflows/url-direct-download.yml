@@ -386,6 +386,7 @@ jobs:
           rclone copyto "$DL_DIR/$FILENAME" "${RCLONE_TARGET}${FILENAME}" \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --progress \
+            --onedrive-chunk-size 250M \
             --low-level-retries=3 \
             --retries=3
 
@@ -394,6 +395,7 @@ jobs:
           rclone copyto "$DL_DIR/$FILENAME.md5" "${RCLONE_TARGET}${FILENAME}.md5" \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --progress \
+            --onedrive-chunk-size 250M \
             --low-level-retries=3 \
             --retries=3
 

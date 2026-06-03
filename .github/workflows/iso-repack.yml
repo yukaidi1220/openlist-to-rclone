@@ -488,8 +488,8 @@ jobs:
           ISO_NAME: ${{ matrix.iso.name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $outName = $isoName
           $isoName = $env:ISO_NAME
+          $outName = $isoName
           $dlDir = "${{ env.DL_DIR }}\$isoName"
           $newIso = "$dlDir\$outName"
           $rcloneTarget = "${{ github.event.inputs.target_path }}"

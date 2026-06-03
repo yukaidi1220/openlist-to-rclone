@@ -271,8 +271,8 @@ jobs:
           aria2c \
             --dir="$DL_DIR" \
             --out="$FILENAME" \
-            --max-connection-per-server=16 \
-            --split=16 \
+            --max-connection-per-server=24 \
+            --split=24 \
             --min-split-size=5M \
             --continue=true \
             --auto-file-renaming=false \

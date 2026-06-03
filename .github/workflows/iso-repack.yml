@@ -4,14 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       source_path:
-        description: 'rclone 源路径（如 mupan:\Drivers\ISOs）'
+        description: 'rclone 源路径'
         required: true
+        default: 'mupan:/File/DrvCeo_XR'
       target_path:
-        description: 'rclone 目标路径（如 mupan:\Drivers\Filtered）'
+        description: 'rclone 目标路径'
         required: true
+        default: 'mupan:/File/DrvCeo'
       drvzip_path:
-        description: '驱动包 ZIP 所在 rclone 目录（如 mupan:DrvCeo_Main）'
+        description: '驱动包 ZIP 所在 rclone 目录'
         required: true
+        default: 'mupan:/File/DrvCeo_Main'
 
 permissions:
   contents: read

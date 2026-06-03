@@ -148,7 +148,49 @@ jobs:
           curl -sS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E 'warp|ip|colo' || true
 
       # ============================================================
-      # Step 2: 安装工具
+      # Step 2: 网络信息检查
+      # ============================================================
+      - name: 网络信息检查
+        run: |
+          echo "=== 网络信息 ==="
+
+          # Azure IMDS 获取区域
+          METADATA=$(curl -sS -H "Metadata:true" \
+            "http://169.254.169.254/metadata/instance?api-version=2021-02-01" \
+            --max-time 2 2>/dev/null) || true
+          if [ -n "$METADATA" ]; then
+            AZURE_LOCATION=$(echo "$METADATA" | jq -r '.compute.location // "未知"')
+            VM_SIZE=$(echo "$METADATA" | jq -r '.compute.vmSize // "未知"')
+            echo "Azure 区域: $AZURE_LOCATION"
+            echo "VM 大小: $VM_SIZE"
+          else
+            echo "Azure 区域: 不可用"
+          fi
+
+          # 获取 IPv4
+          IPV4=$(curl -sS "https://4.itdog.cn" --max-time 5 2>/dev/null) || true
+          echo "IPv4: ${IPV4:-获取失败}"
+
+          # 获取 IPv6
+          IPV6=$(curl -sS "https://6.itdog.cn" --max-time 5 2>/dev/null) || true
+          echo "IPv6: ${IPV6:-获取失败或不支持}"
+
+          # 获取 IP 归属地
+          GEO=$(curl -sS "https://myip.ipip.net/json" --max-time 5 2>/dev/null) || true
+          if [ -n "$GEO" ]; then
+            RET=$(echo "$GEO" | jq -r '.ret // "fail"')
+            if [ "$RET" = "ok" ]; then
+              LOCATION=$(echo "$GEO" | jq -r '.data.location // [] | join(" ")')
+              echo "归属地: $LOCATION"
+            else
+              echo "归属地: 获取失败"
+            fi
+          else
+            echo "归属地: 获取失败"
+          fi
+
+      # ============================================================
+      # Step 3: 安装工具
       # ============================================================
       - name: 安装 aria2c
         run: |
@@ -161,7 +203,7 @@ jobs:
           rclone version
 
       # ============================================================
-      # Step 3: 获取 rclone.conf
+      # Step 4: 获取 rclone.conf
       # ============================================================
       - name: 获取 rclone.conf
         env:
@@ -178,7 +220,7 @@ jobs:
           echo "rclone.conf 获取成功"
 
       # ============================================================
-      # Step 4: 下载文件
+      # Step 5: 下载文件
       # ============================================================
       - name: 下载文件
         env:
@@ -214,11 +256,10 @@ jobs:
           ls -lh "$DL_DIR/$FILENAME"
 
       # ============================================================
-      # Step 5: 校验文件（如果提供了 md5 或 sha256）
+      # Step 6: 校验文件（如果提供了 md5 或 sha256）
       # ============================================================
       - name: 校验文件
         id: verify
-        continue-on-error: true
         env:
           FILENAME: ${{ matrix.file.filename }}
           # md5 和 sha256 为可选字段
@@ -232,7 +273,7 @@ jobs:
           FILE_PATH="$DL_DIR/$FILENAME"
           VERIFY_PASS=true
 
-          # 校验 MD5
+          # 校验 MD5（忽略大小写）
           if [ -n "$MD5_HASH" ] && [ "$MD5_HASH" != "null" ]; then
             echo ">>> 校验 MD5: $MD5_HASH"
             ACTUAL_MD5=$(md5sum "$FILE_PATH" | awk '{print $1}') || {
@@ -241,7 +282,7 @@ jobs:
             }
             if [ "$VERIFY_PASS" = true ]; then
               echo ">>> 实际 MD5: $ACTUAL_MD5"
-              if [ "$ACTUAL_MD5" != "$MD5_HASH" ]; then
+              if [ "${ACTUAL_MD5,,}" != "${MD5_HASH,,}" ]; then
                 echo "::error::MD5 校验失败"
                 echo "  期望: $MD5_HASH"
                 echo "  实际: $ACTUAL_MD5"
@@ -252,7 +293,7 @@ jobs:
             fi
           fi
 
-          # 校验 SHA256
+          # 校验 SHA256（忽略大小写）
           if [ -n "$SHA256_HASH" ] && [ "$SHA256_HASH" != "null" ]; then
             echo ">>> 校验 SHA256: $SHA256_HASH"
             ACTUAL_SHA256=$(sha256sum "$FILE_PATH" | awk '{print $1}') || {
@@ -261,7 +302,7 @@ jobs:
             }
             if [ "$VERIFY_PASS" = true ]; then
               echo ">>> 实际 SHA256: $ACTUAL_SHA256"
-              if [ "$ACTUAL_SHA256" != "$SHA256_HASH" ]; then
+              if [ "${ACTUAL_SHA256,,}" != "${SHA256_HASH,,}" ]; then
                 echo "::error::SHA256 校验失败"
                 echo "  期望: $SHA256_HASH"
                 echo "  实际: $ACTUAL_SHA256"
@@ -279,7 +320,7 @@ jobs:
           fi
 
       # ============================================================
-      # Step 6: 生成 .md5 文件
+      # Step 7: 生成 .md5 文件
       # ============================================================
       - name: 生成 MD5 文件
         if: steps.verify.outcome == 'success'
@@ -299,7 +340,7 @@ jobs:
           cat "$MD5_FILE"
 
       # ============================================================
-      # Step 7: 上传文件到 rclone
+      # Step 8: 上传文件到 rclone
       # ============================================================
       - name: 上传文件到 rclone
         if: steps.verify.outcome == 'success'

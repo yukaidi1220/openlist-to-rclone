@@ -1,4 +1,4 @@
-name: ISO 驱动包提取与重组
+name: 制作驱动总裁ISO
 
 on:
   workflow_dispatch:

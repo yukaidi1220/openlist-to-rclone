@@ -65,8 +65,10 @@ jobs:
           $zipSource = "${{ github.event.inputs.drvzip_path }}"
 
           Write-Host "正在查找 $zipSource 下的 ZIP 文件..."
-          $json = rclone lsjson "$zipSource" --config rclone.conf --no-modtime --files-only --include "*.zip" 2>$null | Out-String
-          if (-not $json.Trim()) { throw "未找到任何 ZIP 文件: $zipSource" }
+          $raw = rclone lsjson "$zipSource" --config rclone.conf --no-modtime --files-only --include "*.zip" 2>&1 | Out-String
+          Write-Host "rclone 输出: $raw"
+          $json = $raw.Trim()
+          if (-not $json -or $json -notmatch '^\[') { throw "未找到任何 ZIP 文件或 rclone 返回错误: $zipSource`n$raw" }
           $zipFiles = $json | ConvertFrom-Json
           if ($zipFiles -isnot [array]) { $zipFiles = @($zipFiles) }
 
@@ -109,9 +111,11 @@ jobs:
           $rcloneSource = "${{ github.event.inputs.source_path }}"
 
           Write-Host "正在列出 $rcloneSource 下的 ISO 文件..."
-          $json = rclone lsjson "$rcloneSource" --config rclone.conf --no-modtime --files-only --include "*.iso" -R 2>$null | Out-String
-          if (-not $json.Trim()) {
-            Write-Host "未找到任何 ISO 文件"
+          $raw = rclone lsjson "$rcloneSource" --config rclone.conf --no-modtime --files-only --include "*.iso" -R 2>&1 | Out-String
+          Write-Host "rclone 输出: $raw"
+          $json = $raw.Trim()
+          if (-not $json -or $json -notmatch '^\[') {
+            Write-Host "未找到任何 ISO 文件或 rclone 返回错误"
             $isoFiles = @()
           } else {
             $isoFiles = $json | ConvertFrom-Json

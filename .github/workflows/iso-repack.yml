@@ -386,25 +386,25 @@ jobs:
 
           # C# helper: COM IStream 写文件
           Add-Type -CompilerOptions "/unsafe" -TypeDefinition @"
-using System;
-using System.IO;
-using System.Runtime.InteropServices.ComTypes;
-public static class IsoFileUtil {
-    public static void WriteIStreamToFile(object i, string fileName) {
-        IStream inputStream = i as IStream;
-        FileStream fs = File.OpenWrite(fileName);
-        int bytesRead;
-        do {
-            byte[] buf = new byte[65536];
-            int* ptr = &bytesRead;
-            inputStream.Read(buf, buf.Length, (IntPtr)ptr);
-            fs.Write(buf, 0, bytesRead);
-        } while (bytesRead == 65536);
-        fs.Flush();
-        fs.Close();
-    }
-}
-"@
+          using System;
+          using System.IO;
+          using System.Runtime.InteropServices.ComTypes;
+          public static class IsoFileUtil {
+              public static void WriteIStreamToFile(object i, string fileName) {
+                  IStream inputStream = i as IStream;
+                  FileStream fs = File.OpenWrite(fileName);
+                  int bytesRead;
+                  do {
+                      byte[] buf = new byte[65536];
+                      int* ptr = &bytesRead;
+                      inputStream.Read(buf, buf.Length, (IntPtr)ptr);
+                      fs.Write(buf, 0, bytesRead);
+                  } while (bytesRead == 65536);
+                  fs.Flush();
+                  fs.Close();
+              }
+          }
+          "@
 
           # IMAPI2 创建 ISO
           Write-Host "正在创建 ISO: $newIso"
@@ -412,7 +412,6 @@ public static class IsoFileUtil {
           $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
           $fsi.FileSystemsToCreate = 7  # ISO9660 + Joliet + UDF
           $fsi.VolumeName = 'DRIVERS'
-          $fsi.FreeMediaBlocks = 1000000
 
           $fsi.Root.AddTree($sourcePath, $false)
           $result = $fsi.CreateResultImage()

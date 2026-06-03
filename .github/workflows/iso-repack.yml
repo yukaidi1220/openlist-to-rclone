@@ -1,0 +1,420 @@
+name: ISO 驱动包提取与重组
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_path:
+        description: 'rclone 源路径（如 mupan:\Drivers\ISOs）'
+        required: true
+      target_path:
+        description: 'rclone 目标路径（如 mupan:\Drivers\Filtered）'
+        required: true
+      drvzip_path:
+        description: '驱动包 ZIP 所在 rclone 目录（如 mupan:DrvCeo_Main）'
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  DL_DIR: D:\tasks\iso-dl
+  TOOLS_DIR: D:\tasks\tools
+
+jobs:
+  # ============================================================
+  # Job 1: 列出源路径下所有 ISO 文件，构建矩阵
+  # ============================================================
+  list-isos:
+    runs-on: windows-latest
+    outputs:
+      iso-count: ${{ steps.build-matrix.outputs.iso-count }}
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      zip-name: ${{ steps.find-zip.outputs.zip-name }}
+      zip-path: ${{ steps.find-zip.outputs.zip-path }}
+    steps:
+      - name: 获取 rclone.conf
+        shell: pwsh
+        run: |
+          $headers = @{
+            Authorization = "token ${{ secrets.RCLONE_PAT }}"
+            Accept = "application/vnd.github.v3.raw"
+          }
+          $owner = "${{ github.repository_owner }}"
+          $repo = "rclone-action"
+          $url = "https://api.github.com/repos/$owner/$repo/contents/rclone.conf"
+          Write-Host "从 $owner/$repo 获取 rclone.conf..."
+          Invoke-WebRequest -Uri $url -Headers $headers -OutFile "rclone.conf"
+          Write-Host "rclone.conf 获取成功"
+
+      - name: 安装 rclone
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ env.TOOLS_DIR }}" | Out-Null
+          $rcloneZip = "${{ env.TOOLS_DIR }}\rclone.zip"
+          Invoke-WebRequest -Uri 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' -OutFile $rcloneZip
+          Expand-Archive -Path $rcloneZip -DestinationPath "${{ env.TOOLS_DIR }}" -Force
+          $rcloneDir = Get-ChildItem -Path "${{ env.TOOLS_DIR }}" -Directory -Filter 'rclone-*-windows-amd64' | Select-Object -First 1
+          Copy-Item "$($rcloneDir.FullName)\rclone.exe" "${{ env.TOOLS_DIR }}\rclone.exe" -Force
+          "${{ env.TOOLS_DIR }}" >> $env:GITHUB_PATH
+
+      - name: 查找最新驱动包 ZIP
+        id: find-zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zipSource = "${{ github.event.inputs.drvzip_path }}"
+
+          Write-Host "正在查找 $zipSource 下的 ZIP 文件..."
+          $json = rclone lsjson "$zipSource" --config rclone.conf --no-modtime --files-only --include "*.zip" 2>$null | Out-String
+          if (-not $json.Trim()) { throw "未找到任何 ZIP 文件: $zipSource" }
+          $zipFiles = $json | ConvertFrom-Json
+          if ($zipFiles -isnot [array]) { $zipFiles = @($zipFiles) }
+
+          Write-Host "找到 $($zipFiles.Count) 个 ZIP 文件"
+
+          # 从文件名提取版本号，找最新版本
+          # 格式示例：DrvCeo_2.20.0.8_Min
+          $versioned = @()
+          foreach ($z in $zipFiles) {
+            $name = $z.Name
+            if ($name -match '(\d+\.\d+\.\d+\.\d+)') {
+              try {
+                $ver = [version]$Matches[1]
+                $versioned += @{ Name = $name; Path = $z.Path; Version = $ver }
+                Write-Host "  $name -> 版本 $ver"
+              } catch {
+                Write-Warning "  $name -> 版本号解析失败，跳过"
+              }
+            } else {
+              Write-Warning "  $name -> 未找到版本号，跳过"
+            }
+          }
+
+          if ($versioned.Count -eq 0) { throw "未找到包含版本号的 ZIP 文件" }
+
+          $latest = $versioned | Sort-Object { $_.Version } -Descending | Select-Object -First 1
+          Write-Host "选择最新版本: $($latest.Name) (v$($latest.Version))"
+
+          $out = $env:GITHUB_OUTPUT
+          $nl = "`n"
+          $content = "zip-name=$($latest.Name)$nl"
+          $content += "zip-path=$($latest.Path)$nl"
+          [System.IO.File]::WriteAllText($out, $content, [System.Text.UTF8Encoding]::new($false))
+
+      - name: 列出所有 ISO 文件
+        id: build-matrix
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rcloneSource = "${{ github.event.inputs.source_path }}"
+
+          Write-Host "正在列出 $rcloneSource 下的 ISO 文件..."
+          $json = rclone lsjson "$rcloneSource" --config rclone.conf --no-modtime --files-only --include "*.iso" -R 2>$null | Out-String
+          if (-not $json.Trim()) {
+            Write-Host "未找到任何 ISO 文件"
+            $isoFiles = @()
+          } else {
+            $isoFiles = $json | ConvertFrom-Json
+            if ($isoFiles -isnot [array]) { $isoFiles = @($isoFiles) }
+          }
+
+          Write-Host "共找到 $($isoFiles.Count) 个 ISO 文件"
+          foreach ($f in $isoFiles) {
+            Write-Host "  $($f.Path) ($([math]::Round($f.Size / 1GB, 2)) GB)"
+          }
+
+          if ($isoFiles.Count -eq 0) {
+            $out = $env:GITHUB_OUTPUT
+            $nl = "`n"
+            $content = "iso-count=0${nl}matrix=[]${nl}"
+            [System.IO.File]::WriteAllText($out, $content, [System.Text.UTF8Encoding]::new($false))
+            exit 0
+          }
+
+          # 构建矩阵 JSON（强制数组，避免单元素时 ConvertTo-Json 输出对象而非数组）
+          $matrix = @()
+          foreach ($f in $isoFiles) {
+            $matrix += @{
+              name = $f.Name
+              path = $f.Path
+              size = $f.Size
+            }
+          }
+          $matrixJson = if ($matrix.Count -eq 1) {
+            "[${($matrix | ConvertTo-Json -Depth 3 -Compress)}]"
+          } else {
+            ($matrix | ConvertTo-Json -Depth 3 -Compress)
+          }
+
+          $out = $env:GITHUB_OUTPUT
+          $eof = [guid]::NewGuid().ToString()
+          $nl = "`n"
+          $content = "matrix<<$eof$nl$matrixJson$nl$eof$nl"
+          $content += "iso-count=$($isoFiles.Count)$nl"
+          [System.IO.File]::AppendAllText($out, $content, [System.Text.UTF8Encoding]::new($false))
+          Write-Host "GITHUB_OUTPUT 已写入"
+          [System.IO.File]::ReadAllText($out) | Write-Host
+
+  # ============================================================
+  # Job 2: 并行处理每个 ISO（下载 → 解压 → 提取目录 → 重新打包 → 上传）
+  # ============================================================
+  process-iso:
+    needs: list-isos
+    if: ${{ needs.list-isos.outputs.iso-count != '0' }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        iso: ${{ fromJSON(needs.list-isos.outputs.matrix) }}
+    steps:
+      - name: 获取 rclone.conf
+        shell: pwsh
+        run: |
+          $headers = @{
+            Authorization = "token ${{ secrets.RCLONE_PAT }}"
+            Accept = "application/vnd.github.v3.raw"
+          }
+          $owner = "${{ github.repository_owner }}"
+          $repo = "rclone-action"
+          $url = "https://api.github.com/repos/$owner/$repo/contents/rclone.conf"
+          Write-Host "从 $owner/$repo 获取 rclone.conf..."
+          Invoke-WebRequest -Uri $url -Headers $headers -OutFile "rclone.conf"
+          Write-Host "rclone.conf 获取成功"
+
+      - name: 安装 rclone
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ env.TOOLS_DIR }}" | Out-Null
+          $rcloneZip = "${{ env.TOOLS_DIR }}\rclone.zip"
+          Invoke-WebRequest -Uri 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' -OutFile $rcloneZip
+          Expand-Archive -Path $rcloneZip -DestinationPath "${{ env.TOOLS_DIR }}" -Force
+          $rcloneDir = Get-ChildItem -Path "${{ env.TOOLS_DIR }}" -Directory -Filter 'rclone-*-windows-amd64' | Select-Object -First 1
+          Copy-Item "$($rcloneDir.FullName)\rclone.exe" "${{ env.TOOLS_DIR }}\rclone.exe" -Force
+          "${{ env.TOOLS_DIR }}" >> $env:GITHUB_PATH
+
+      - name: 下载 ISO 文件
+        shell: pwsh
+        env:
+          ISO_NAME: ${{ matrix.iso.name }}
+          ISO_PATH: ${{ matrix.iso.path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rcloneSource = "${{ github.event.inputs.source_path }}"
+          $isoPath = $env:ISO_PATH
+          $isoName = $env:ISO_NAME
+          $dlDir = "${{ env.DL_DIR }}\$isoName"
+
+          New-Item -ItemType Directory -Force -Path $dlDir | Out-Null
+
+          $remoteFile = if ($rcloneSource.EndsWith(':') -or $rcloneSource.EndsWith('/')) {
+            "$rcloneSource$isoPath"
+          } else {
+            "$rcloneSource/$isoPath"
+          }
+
+          Write-Host "下载: $remoteFile -> $dlDir\$isoName"
+          rclone copyto "$remoteFile" "$dlDir\$isoName" `
+            --config rclone.conf `
+            --progress `
+            --onedrive-chunk-size 250M `
+            --low-level-retries=3 `
+            --retries=3
+          Write-Host "下载完成: $isoName"
+
+      - name: 计算 MD5
+        id: md5
+        shell: pwsh
+        env:
+          ISO_NAME: ${{ matrix.iso.name }}
+        run: |
+          $isoName = $env:ISO_NAME
+          $isoFile = "${{ env.DL_DIR }}\$isoName\$isoName"
+
+          Write-Host "计算 MD5: $isoFile"
+          $hash = (Get-FileHash -Path $isoFile -Algorithm MD5).Hash
+          $baseName = [System.IO.Path]::GetFileNameWithoutExtension($isoName)
+          $outName = "${baseName}_Mod_${hash}.iso"
+
+          Write-Host "MD5: $hash"
+          Write-Host "输出文件名: $outName"
+
+          $out = $env:GITHUB_OUTPUT
+          $nl = "`n"
+          $content = "hash=$hash${nl}out-name=$outName${nl}"
+          [System.IO.File]::WriteAllText($out, $content, [System.Text.UTF8Encoding]::new($false))
+
+      - name: 解压 ISO 并提取关键目录
+        shell: pwsh
+        env:
+          ISO_NAME: ${{ matrix.iso.name }}
+          ISO_SIZE: ${{ matrix.iso.size }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $isoName = $env:ISO_NAME
+          $dlDir = "${{ env.DL_DIR }}\$isoName"
+          $isoFile = "$dlDir\$isoName"
+          $extractDir = "$dlDir\extracted"
+          $outDir = "$dlDir\output"
+
+          # 磁盘空间预检查
+          $isoSize = [long]$env:ISO_SIZE
+          $drive = Get-Item "$dlDir" -ErrorAction SilentlyContinue
+          if ($drive) {
+            $free = (Get-PSDrive -Name $drive.PSDrive.Name).Free
+            $needBytes = $isoSize * 5  # ISO + 解压 + ZIP + ZIP解压 + 新ISO
+            if ($free -lt $needBytes) {
+              throw "磁盘空间不足: 需要 $([math]::Round($needBytes/1GB,1)) GB，剩余 $([math]::Round($free/1GB,1)) GB"
+            }
+            Write-Host "磁盘空间检查通过: 剩余 $([math]::Round($free/1GB,1)) GB，预计需要 $([math]::Round($needBytes/1GB,1)) GB"
+          }
+
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          # 7-Zip 预装在 windows-latest
+          Write-Host "解压 ISO: $isoFile"
+          & "C:\Program Files\7-Zip\7z.exe" x "$isoFile" -o"$extractDir" -y | Write-Host
+          if ($LASTEXITCODE -ne 0) { throw "7z 解压失败，退出码: $LASTEXITCODE" }
+          Write-Host "解压完成"
+
+          # 列出 ISO 根目录内容
+          Write-Host "ISO 根目录内容:"
+          Get-ChildItem -Path $extractDir | ForEach-Object {
+            $type = if ($_.PSIsContainer) { '[DIR]' } else { '[FILE]' }
+            Write-Host "  $type $($_.Name)"
+          }
+
+          # 提取关键目录
+          $targetDirs = @('PESRS', 'Win7x64', 'Win7x86', 'Win10x64', 'Win10x86', 'WinXPx86')
+          $foundCount = 0
+          foreach ($dir in $targetDirs) {
+            $src = Join-Path $extractDir $dir
+            if (Test-Path $src) {
+              Write-Host "找到目录: $dir"
+              Copy-Item -Path $src -Destination (Join-Path $outDir $dir) -Recurse -Force
+              $foundCount++
+            } else {
+              Write-Warning "目录不存在: $dir"
+            }
+          }
+
+          if ($foundCount -eq 0) {
+            throw "ISO 中未找到任何目标目录（$($targetDirs -join ', ')）"
+          }
+          Write-Host "共提取 $foundCount/$($targetDirs.Count) 个目录"
+
+      - name: 下载并解压驱动包 ZIP（覆盖 ISO 同名文件）
+        shell: pwsh
+        env:
+          ISO_NAME: ${{ matrix.iso.name }}
+          ZIP_NAME: ${{ needs.list-isos.outputs.zip-name }}
+          ZIP_PATH: ${{ needs.list-isos.outputs.zip-path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zipSource = "${{ github.event.inputs.drvzip_path }}"
+          $zipName = $env:ZIP_NAME
+          $zipPath = $env:ZIP_PATH
+          $isoName = $env:ISO_NAME
+          $dlDir = "${{ env.DL_DIR }}\$isoName"
+
+          # 构造远程完整路径
+          $remoteZip = if ($zipSource.EndsWith(':') -or $zipSource.EndsWith('/')) {
+            "$zipSource$zipPath"
+          } else {
+            "$zipSource/$zipPath"
+          }
+
+          $localZip = "$dlDir\$zipName"
+          Write-Host "下载驱动包 ZIP: $remoteZip -> $localZip"
+          rclone copyto "$remoteZip" "$localZip" `
+            --config rclone.conf `
+            --progress `
+            --onedrive-chunk-size 250M `
+            --low-level-retries=3 `
+            --retries=3
+          Write-Host "驱动包 ZIP 下载完成: $zipName"
+
+          # 解压 ZIP 到输出目录，覆盖 ISO 提取的同名文件
+          $outDir = "$dlDir\output"
+          Write-Host "解压驱动包 ZIP 到输出目录（覆盖模式）..."
+          & "C:\Program Files\7-Zip\7z.exe" x "$localZip" -o"$outDir" -y | Write-Host
+          if ($LASTEXITCODE -ne 0) { throw "驱动包 ZIP 解压失败，退出码: $LASTEXITCODE" }
+          Write-Host "驱动包 ZIP 解压完成，已覆盖 ISO 中的同名文件"
+
+      - name: 打包新 ISO
+        shell: pwsh
+        env:
+          ISO_NAME: ${{ matrix.iso.name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $isoName = $env:ISO_NAME
+          $outName = '${{ steps.md5.outputs.out-name }}'
+          $dlDir = "${{ env.DL_DIR }}\$isoName"
+          $outDir = "$dlDir\output"
+          $newIso = "$dlDir\$outName"
+
+          Write-Host "磁盘空间:"
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name,
+            @{N='UsedGB';E={[math]::Round($_.Used/1GB,1)}},
+            @{N='FreeGB';E={[math]::Round($_.Free/1GB,1)}} | Format-Table | Out-Host
+
+          # 优先使用 oscdimg（Windows ADK 自带）
+          $oscdimg = Get-ChildItem -Path 'C:\Program Files (x86)\Windows Kits' -Recurse -Filter 'oscdimg.exe' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          if ($oscdimg) {
+            Write-Host "使用 oscdimg: $($oscdimg.FullName)"
+            & $oscdimg.FullName -m -o -u2 "-lDRIVERS" "$outDir" "$newIso"
+            if ($LASTEXITCODE -ne 0) { throw "oscdimg 失败，退出码: $LASTEXITCODE" }
+          } else {
+            Write-Host "oscdimg 未找到，安装 mkisofs..."
+            choco install cdrtools -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "cdrtools 安装失败" }
+
+            Write-Host "使用 mkisofs 创建 ISO"
+            mkisofs -o "$newIso" -J -R -joliet-long -N "$outDir"
+            if ($LASTEXITCODE -ne 0) { throw "mkisofs 失败，退出码: $LASTEXITCODE" }
+          }
+
+          $isoSize = (Get-Item $newIso).Length
+          Write-Host "新 ISO 创建完成: $outName ($([math]::Round($isoSize / 1GB, 2)) GB)"
+
+      - name: 上传新 ISO
+        shell: pwsh
+        env:
+          ISO_NAME: ${{ matrix.iso.name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $outName = '${{ steps.md5.outputs.out-name }}'
+          $isoName = $env:ISO_NAME
+          $newIso = "${{ env.DL_DIR }}\$isoName\$outName"
+          $rcloneTarget = "${{ github.event.inputs.target_path }}"
+
+          if (-not $rcloneTarget.EndsWith(':') -and -not $rcloneTarget.EndsWith('/')) {
+            $rcloneTarget += '/'
+          }
+
+          $remoteFile = "$rcloneTarget$outName"
+          Write-Host "上传: $newIso -> $remoteFile"
+          rclone copyto "$newIso" "$remoteFile" `
+            --config rclone.conf `
+            --progress `
+            --transfers=4 `
+            --onedrive-chunk-size 250M `
+            --low-level-retries=3 `
+            --retries=3
+          Write-Host "上传完成: $outName"
+
+      - name: 清理工作目录
+        if: always()
+        shell: pwsh
+        env:
+          ISO_NAME: ${{ matrix.iso.name }}
+        run: |
+          $isoName = $env:ISO_NAME
+          $dlDir = "${{ env.DL_DIR }}\$isoName"
+          if (Test-Path $dlDir) {
+            Remove-Item -Path $dlDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "已清理: $dlDir"
+          }

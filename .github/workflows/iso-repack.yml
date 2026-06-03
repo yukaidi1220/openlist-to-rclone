@@ -160,7 +160,8 @@ jobs:
           rclone copyto "$remoteMd5" "$localMd5" --config rclone.conf --low-level-retries=1 --retries=1 2>&1 | Out-Null
           $ErrorActionPreference = $prevEap
           if ((Test-Path $localMd5) -and (Get-Item $localMd5).Length -gt 0) {
-            $expectedHash = (Get-Content $localMd5 -Raw).Trim().Substring(0, 32).ToUpper()
+            $expectedHash = ((Get-Content $localMd5 -Raw).Trim() -replace '\s+.*', '').ToUpper()
+            if ($expectedHash -notmatch '^[0-9A-F]{32}$') { throw "ZIP MD5 文件格式无效" }
             $actualHash = (Get-FileHash -Path $localZip -Algorithm MD5).Hash
             Write-Host "期望 MD5: $expectedHash"
             Write-Host "实际 MD5: $actualHash"
@@ -328,7 +329,8 @@ jobs:
           rclone copyto "$remoteMd5" "$localMd5" --config rclone.conf --low-level-retries=1 --retries=1 2>&1 | Out-Null
           $ErrorActionPreference = $prevEap
           if ((Test-Path $localMd5) -and (Get-Item $localMd5).Length -gt 0) {
-            $expectedHash = (Get-Content $localMd5 -Raw).Trim().Substring(0, 32).ToUpper()
+            $expectedHash = ((Get-Content $localMd5 -Raw).Trim() -replace '\s+.*', '').ToUpper()
+            if ($expectedHash -notmatch '^[0-9A-F]{32}$') { throw "ISO MD5 文件格式无效" }
             $actualHash = (Get-FileHash -Path "$dlDir\$isoName" -Algorithm MD5).Hash
             Write-Host "期望 MD5: $expectedHash"
             Write-Host "实际 MD5: $actualHash"
@@ -471,16 +473,15 @@ jobs:
           public static class IsoFileUtil {
               public static unsafe void WriteIStreamToFile(object i, string fileName) {
                   IStream inputStream = i as IStream;
-                  FileStream fs = File.OpenWrite(fileName);
-                  int bytesRead;
-                  do {
-                      byte[] buf = new byte[65536];
-                      int* ptr = &bytesRead;
-                      inputStream.Read(buf, buf.Length, (IntPtr)ptr);
-                      fs.Write(buf, 0, bytesRead);
-                  } while (bytesRead == 65536);
-                  fs.Flush();
-                  fs.Close();
+                  using (FileStream fs = File.OpenWrite(fileName)) {
+                      int bytesRead;
+                      do {
+                          byte[] buf = new byte[65536];
+                          int* ptr = &bytesRead;
+                          inputStream.Read(buf, buf.Length, (IntPtr)ptr);
+                          fs.Write(buf, 0, bytesRead);
+                      } while (bytesRead == 65536);
+                  }
               }
           }
           "@

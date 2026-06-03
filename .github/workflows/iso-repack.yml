@@ -44,7 +44,16 @@ jobs:
           $repo = "rclone-action"
           $url = "https://api.github.com/repos/$owner/$repo/contents/rclone.conf"
           Write-Host "从 $owner/$repo 获取 rclone.conf..."
-          Invoke-WebRequest -Uri $url -Headers $headers -OutFile "rclone.conf"
+          for ($i = 1; $i -le 3; $i++) {
+            try {
+              Invoke-WebRequest -Uri $url -Headers $headers -OutFile "rclone.conf" -TimeoutSec 60
+              break
+            } catch {
+              if ($i -eq 3) { throw "rclone.conf 下载失败: $_" }
+              Write-Warning "下载失败，重试 $i/3..."
+              Start-Sleep -Seconds 5
+            }
+          }
           Write-Host "rclone.conf 获取成功"
 
       - name: 安装 rclone
@@ -52,7 +61,16 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "${{ env.TOOLS_DIR }}" | Out-Null
           $rcloneZip = "${{ env.TOOLS_DIR }}\rclone.zip"
-          Invoke-WebRequest -Uri 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' -OutFile $rcloneZip
+          for ($i = 1; $i -le 3; $i++) {
+            try {
+              Invoke-WebRequest -Uri 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' -OutFile $rcloneZip -TimeoutSec 120
+              break
+            } catch {
+              if ($i -eq 3) { throw "rclone 下载失败: $_" }
+              Write-Warning "下载失败，重试 $i/3..."
+              Start-Sleep -Seconds 5
+            }
+          }
           Expand-Archive -Path $rcloneZip -DestinationPath "${{ env.TOOLS_DIR }}" -Force
           $rcloneDir = Get-ChildItem -Path "${{ env.TOOLS_DIR }}" -Directory -Filter 'rclone-*-windows-amd64' | Select-Object -First 1
           Copy-Item "$($rcloneDir.FullName)\rclone.exe" "${{ env.TOOLS_DIR }}\rclone.exe" -Force
@@ -226,7 +244,16 @@ jobs:
           $repo = "rclone-action"
           $url = "https://api.github.com/repos/$owner/$repo/contents/rclone.conf"
           Write-Host "从 $owner/$repo 获取 rclone.conf..."
-          Invoke-WebRequest -Uri $url -Headers $headers -OutFile "rclone.conf"
+          for ($i = 1; $i -le 3; $i++) {
+            try {
+              Invoke-WebRequest -Uri $url -Headers $headers -OutFile "rclone.conf" -TimeoutSec 60
+              break
+            } catch {
+              if ($i -eq 3) { throw "rclone.conf 下载失败: $_" }
+              Write-Warning "下载失败，重试 $i/3..."
+              Start-Sleep -Seconds 5
+            }
+          }
           Write-Host "rclone.conf 获取成功"
 
       - name: 安装 rclone
@@ -234,7 +261,16 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "${{ env.TOOLS_DIR }}" | Out-Null
           $rcloneZip = "${{ env.TOOLS_DIR }}\rclone.zip"
-          Invoke-WebRequest -Uri 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' -OutFile $rcloneZip
+          for ($i = 1; $i -le 3; $i++) {
+            try {
+              Invoke-WebRequest -Uri 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' -OutFile $rcloneZip -TimeoutSec 120
+              break
+            } catch {
+              if ($i -eq 3) { throw "rclone 下载失败: $_" }
+              Write-Warning "下载失败，重试 $i/3..."
+              Start-Sleep -Seconds 5
+            }
+          }
           Expand-Archive -Path $rcloneZip -DestinationPath "${{ env.TOOLS_DIR }}" -Force
           $rcloneDir = Get-ChildItem -Path "${{ env.TOOLS_DIR }}" -Directory -Filter 'rclone-*-windows-amd64' | Select-Object -First 1
           Copy-Item "$($rcloneDir.FullName)\rclone.exe" "${{ env.TOOLS_DIR }}\rclone.exe" -Force

@@ -60,6 +60,13 @@ jobs:
             exit 1
           fi
 
+          # 检查文件名是否包含路径分隔符或遍历字符
+          BAD_NAMES=$(jq '[.[] | select(.filename | test("[/\\\\]|\\.\\."))] | length' files.json)
+          if [ "$BAD_NAMES" -gt 0 ]; then
+            echo "::error::有 $BAD_NAMES 个文件名包含路径分隔符或遍历字符（禁止 / \\ ..）"
+            exit 1
+          fi
+
           # 获取文件数量
           FILE_COUNT=$(jq length files.json)
           echo "共找到 $FILE_COUNT 个文件"
@@ -74,7 +81,7 @@ jobs:
           MATRIX=$(jq -c '.' files.json)
 
           # 使用唯一 delimiter 避免内容截断
-          DELIMITER="MATRIX_$(date +%s)"
+          DELIMITER="MATRIX_$(date +%s)_$RANDOM"
           echo "matrix<<$DELIMITER" >> "$GITHUB_OUTPUT"
           echo "$MATRIX" >> "$GITHUB_OUTPUT"
           echo "$DELIMITER" >> "$GITHUB_OUTPUT"
@@ -228,32 +235,40 @@ jobs:
           # 校验 MD5
           if [ -n "$MD5_HASH" ] && [ "$MD5_HASH" != "null" ]; then
             echo ">>> 校验 MD5: $MD5_HASH"
-            ACTUAL_MD5=$(md5sum "$FILE_PATH" | awk '{print $1}')
-            echo ">>> 实际 MD5: $ACTUAL_MD5"
-
-            if [ "$ACTUAL_MD5" != "$MD5_HASH" ]; then
-              echo "::error::MD5 校验失败"
-              echo "  期望: $MD5_HASH"
-              echo "  实际: $ACTUAL_MD5"
+            ACTUAL_MD5=$(md5sum "$FILE_PATH" | awk '{print $1}') || {
+              echo "::error::md5sum 执行失败"
               VERIFY_PASS=false
-            else
-              echo ">>> MD5 校验通过"
+            }
+            if [ "$VERIFY_PASS" = true ]; then
+              echo ">>> 实际 MD5: $ACTUAL_MD5"
+              if [ "$ACTUAL_MD5" != "$MD5_HASH" ]; then
+                echo "::error::MD5 校验失败"
+                echo "  期望: $MD5_HASH"
+                echo "  实际: $ACTUAL_MD5"
+                VERIFY_PASS=false
+              else
+                echo ">>> MD5 校验通过"
+              fi
             fi
           fi
 
           # 校验 SHA256
           if [ -n "$SHA256_HASH" ] && [ "$SHA256_HASH" != "null" ]; then
             echo ">>> 校验 SHA256: $SHA256_HASH"
-            ACTUAL_SHA256=$(sha256sum "$FILE_PATH" | awk '{print $1}')
-            echo ">>> 实际 SHA256: $ACTUAL_SHA256"
-
-            if [ "$ACTUAL_SHA256" != "$SHA256_HASH" ]; then
-              echo "::error::SHA256 校验失败"
-              echo "  期望: $SHA256_HASH"
-              echo "  实际: $ACTUAL_SHA256"
+            ACTUAL_SHA256=$(sha256sum "$FILE_PATH" | awk '{print $1}') || {
+              echo "::error::sha256sum 执行失败"
               VERIFY_PASS=false
-            else
-              echo ">>> SHA256 校验通过"
+            }
+            if [ "$VERIFY_PASS" = true ]; then
+              echo ">>> 实际 SHA256: $ACTUAL_SHA256"
+              if [ "$ACTUAL_SHA256" != "$SHA256_HASH" ]; then
+                echo "::error::SHA256 校验失败"
+                echo "  期望: $SHA256_HASH"
+                echo "  实际: $ACTUAL_SHA256"
+                VERIFY_PASS=false
+              else
+                echo ">>> SHA256 校验通过"
+              fi
             fi
           fi
 

@@ -494,6 +494,7 @@ jobs:
           $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
           $fsi.FileSystemsToCreate = 7  # ISO9660 + Joliet + UDF
           $fsi.VolumeName = 'DRIVERS'
+          $fsi.FreeMediaBlocks = 5000000  # ~10GB 上限
 
           $fsi.Root.AddTree($sourcePath, $false)
           $result = $fsi.CreateResultImage()

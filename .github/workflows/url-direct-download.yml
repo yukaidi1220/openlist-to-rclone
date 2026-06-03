@@ -338,7 +338,23 @@ jobs:
           cat "$MD5_FILE"
 
       # ============================================================
-      # Step 8: 上传文件到 rclone
+      # Step 8: 切换 WARP 到 IPv4 优先（如果已启用）
+      # ============================================================
+      - name: 切换 WARP 到 IPv4 优先
+        if: ${{ github.event.inputs.enable_ipv6 == 'yes' }}
+        run: |
+          echo ">>> 切换 WARP 到 IPv4 优先..."
+          # 删除 IPv6 默认路由，保留 IPv4 路由
+          sudo ip -6 route del ::/0 dev wgcf 2>/dev/null || true
+          echo ">>> 验证路由:"
+          ip route show
+          ip -6 route show
+          echo ">>> 测试连通性:"
+          curl -4 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv4 OK" || echo "IPv4 失败"
+          curl -6 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "IPv6 已禁用"
+
+      # ============================================================
+      # Step 9: 上传文件到 rclone
       # ============================================================
       - name: 上传文件到 rclone
         if: steps.verify.outcome == 'success'

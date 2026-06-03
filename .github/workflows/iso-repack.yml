@@ -344,27 +344,6 @@ jobs:
             Write-Host "无 MD5 校验文件，跳过校验"
           }
 
-      - name: 计算 MD5
-        id: md5
-        shell: pwsh
-        env:
-          ISO_NAME: ${{ matrix.iso.name }}
-        run: |
-          $isoName = $env:ISO_NAME
-          $isoFile = "${{ env.DL_DIR }}\$isoName\$isoName"
-
-          Write-Host "计算源 ISO MD5: $isoFile"
-          $hash = (Get-FileHash -Path $isoFile -Algorithm MD5).Hash
-          $outName = $isoName  # 保持原文件名
-
-          Write-Host "MD5: $hash"
-          Write-Host "输出文件名: $outName"
-
-          $out = $env:GITHUB_OUTPUT
-          $nl = "`n"
-          $content = "hash=$hash${nl}out-name=$outName${nl}"
-          [System.IO.File]::WriteAllText($out, $content, [System.Text.UTF8Encoding]::new($false))
-
       - name: 解压 ISO 并提取关键目录
         shell: pwsh
         env:
@@ -457,7 +436,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $isoName = $env:ISO_NAME
-          $outName = '${{ steps.md5.outputs.out-name }}'
+          $outName = $isoName
           $dlDir = "${{ env.DL_DIR }}\$isoName"
           $outDir = "$dlDir\output"
           $newIso = "$dlDir\$outName"
@@ -509,7 +488,7 @@ jobs:
           ISO_NAME: ${{ matrix.iso.name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $outName = '${{ steps.md5.outputs.out-name }}'
+          $outName = $isoName
           $isoName = $env:ISO_NAME
           $dlDir = "${{ env.DL_DIR }}\$isoName"
           $newIso = "$dlDir\$outName"

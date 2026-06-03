@@ -158,6 +158,7 @@ jobs:
           $prevEap = $ErrorActionPreference
           $ErrorActionPreference = 'Continue'
           rclone copyto "$remoteMd5" "$localMd5" --config rclone.conf --low-level-retries=1 --retries=1 2>&1 | Out-Null
+          $global:LASTEXITCODE = 0
           $ErrorActionPreference = $prevEap
           if ((Test-Path $localMd5) -and (Get-Item $localMd5).Length -gt 0) {
             $expectedHash = ((Get-Content $localMd5 -Raw).Trim() -replace '\s+.*', '').ToUpper()
@@ -327,6 +328,7 @@ jobs:
           $prevEap = $ErrorActionPreference
           $ErrorActionPreference = 'Continue'
           rclone copyto "$remoteMd5" "$localMd5" --config rclone.conf --low-level-retries=1 --retries=1 2>&1 | Out-Null
+          $global:LASTEXITCODE = 0
           $ErrorActionPreference = $prevEap
           if ((Test-Path $localMd5) -and (Get-Item $localMd5).Length -gt 0) {
             $expectedHash = ((Get-Content $localMd5 -Raw).Trim() -replace '\s+.*', '').ToUpper()

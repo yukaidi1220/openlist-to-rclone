@@ -224,10 +224,29 @@ jobs:
           rclone copyto "$remoteFile" "$dlDir\$isoName" `
             --config rclone.conf `
             --progress `
+            --multi-thread-streams 32 `
             --onedrive-chunk-size 250M `
             --low-level-retries=3 `
             --retries=3
           Write-Host "下载完成: $isoName"
+
+          # 如果存在 .md5 文件，下载并校验
+          $remoteMd5 = "${remoteFile}.md5"
+          $localMd5 = "$dlDir\$isoName.md5"
+          Write-Host "检查 MD5 校验文件: $remoteMd5"
+          $md5Result = rclone copyto "$remoteMd5" "$localMd5" --config rclone.conf --low-level-retries=1 --retries=1 2>&1 | Out-String
+          if ((Test-Path $localMd5) -and (Get-Item $localMd5).Length -gt 0) {
+            $expectedHash = (Get-Content $localMd5 -Raw).Trim().Substring(0, 32).ToUpper()
+            $actualHash = (Get-FileHash -Path "$dlDir\$isoName" -Algorithm MD5).Hash
+            Write-Host "期望 MD5: $expectedHash"
+            Write-Host "实际 MD5: $actualHash"
+            if ($expectedHash -ne $actualHash) {
+              throw "MD5 校验失败: $isoName"
+            }
+            Write-Host "MD5 校验通过"
+          } else {
+            Write-Host "无 MD5 校验文件，跳过校验"
+          }
 
       - name: 计算 MD5
         id: md5
@@ -238,10 +257,9 @@ jobs:
           $isoName = $env:ISO_NAME
           $isoFile = "${{ env.DL_DIR }}\$isoName\$isoName"
 
-          Write-Host "计算 MD5: $isoFile"
+          Write-Host "计算源 ISO MD5: $isoFile"
           $hash = (Get-FileHash -Path $isoFile -Algorithm MD5).Hash
-          $baseName = [System.IO.Path]::GetFileNameWithoutExtension($isoName)
-          $outName = "${baseName}_Mod_${hash}.iso"
+          $outName = $isoName  # 保持原文件名
 
           Write-Host "MD5: $hash"
           Write-Host "输出文件名: $outName"
@@ -366,28 +384,44 @@ jobs:
             @{N='UsedGB';E={[math]::Round($_.Used/1GB,1)}},
             @{N='FreeGB';E={[math]::Round($_.Free/1GB,1)}} | Format-Table | Out-Host
 
-          # 优先使用 oscdimg（Windows ADK 自带）
-          $oscdimg = Get-ChildItem -Path 'C:\Program Files (x86)\Windows Kits' -Recurse -Filter 'oscdimg.exe' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          # C# helper: COM IStream 写文件
+          Add-Type -CompilerOptions "/unsafe" -TypeDefinition @"
+using System;
+using System.IO;
+using System.Runtime.InteropServices.ComTypes;
+public static class IsoFileUtil {
+    public static void WriteIStreamToFile(object i, string fileName) {
+        IStream inputStream = i as IStream;
+        FileStream fs = File.OpenWrite(fileName);
+        int bytesRead;
+        do {
+            byte[] buf = new byte[65536];
+            int* ptr = &bytesRead;
+            inputStream.Read(buf, buf.Length, (IntPtr)ptr);
+            fs.Write(buf, 0, bytesRead);
+        } while (bytesRead == 65536);
+        fs.Flush();
+        fs.Close();
+    }
+}
+"@
 
-          if ($oscdimg) {
-            Write-Host "使用 oscdimg: $($oscdimg.FullName)"
-            & $oscdimg.FullName -m -o -u2 "-lDRIVERS" "$outDir" "$newIso"
-            if ($LASTEXITCODE -ne 0) { throw "oscdimg 失败，退出码: $LASTEXITCODE" }
-          } else {
-            Write-Host "oscdimg 未找到，安装 mkisofs..."
-            choco install cdrtools -y --no-progress
-            if ($LASTEXITCODE -ne 0) { throw "cdrtools 安装失败" }
+          # IMAPI2 创建 ISO
+          Write-Host "正在创建 ISO: $newIso"
+          $sourcePath = (Resolve-Path $outDir).Path
+          $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
+          $fsi.FileSystemsToCreate = 7  # ISO9660 + Joliet + UDF
+          $fsi.VolumeName = 'DRIVERS'
+          $fsi.FreeMediaBlocks = 1000000
 
-            Write-Host "使用 mkisofs 创建 ISO"
-            mkisofs -o "$newIso" -J -R -joliet-long -N "$outDir"
-            if ($LASTEXITCODE -ne 0) { throw "mkisofs 失败，退出码: $LASTEXITCODE" }
-          }
+          $fsi.Root.AddTree($sourcePath, $false)
+          $result = $fsi.CreateResultImage()
+          [IsoFileUtil]::WriteIStreamToFile($result.ImageStream, $newIso)
 
           $isoSize = (Get-Item $newIso).Length
           Write-Host "新 ISO 创建完成: $outName ($([math]::Round($isoSize / 1GB, 2)) GB)"
 
-      - name: 上传新 ISO
+      - name: 上传新 ISO 及 .md5 校验文件
         shell: pwsh
         env:
           ISO_NAME: ${{ matrix.iso.name }}
@@ -395,15 +429,17 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $outName = '${{ steps.md5.outputs.out-name }}'
           $isoName = $env:ISO_NAME
-          $newIso = "${{ env.DL_DIR }}\$isoName\$outName"
+          $dlDir = "${{ env.DL_DIR }}\$isoName"
+          $newIso = "$dlDir\$outName"
           $rcloneTarget = "${{ github.event.inputs.target_path }}"
 
           if (-not $rcloneTarget.EndsWith(':') -and -not $rcloneTarget.EndsWith('/')) {
             $rcloneTarget += '/'
           }
 
+          # 上传 ISO
           $remoteFile = "$rcloneTarget$outName"
-          Write-Host "上传: $newIso -> $remoteFile"
+          Write-Host "上传 ISO: $newIso -> $remoteFile"
           rclone copyto "$newIso" "$remoteFile" `
             --config rclone.conf `
             --progress `
@@ -411,7 +447,19 @@ jobs:
             --onedrive-chunk-size 250M `
             --low-level-retries=3 `
             --retries=3
-          Write-Host "上传完成: $outName"
+
+          # 生成并上传 .md5 校验文件
+          $newHash = (Get-FileHash -Path $newIso -Algorithm MD5).Hash
+          $md5File = "$dlDir\$outName.md5"
+          $newHash | Out-File -FilePath $md5File -Encoding ascii -NoNewline
+          $remoteMd5 = "${remoteFile}.md5"
+          Write-Host "上传 MD5: $md5File -> $remoteMd5 (hash: $newHash)"
+          rclone copyto "$md5File" "$remoteMd5" `
+            --config rclone.conf `
+            --low-level-retries=3 `
+            --retries=3
+
+          Write-Host "上传完成: $outName + $outName.md5"
 
       - name: 清理工作目录
         if: always()

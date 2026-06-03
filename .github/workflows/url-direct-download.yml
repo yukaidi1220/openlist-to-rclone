@@ -141,9 +141,16 @@ jobs:
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
           sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
           sudo ip addr add "$ADDR_V4" dev $INTERFACE
-          sudo ip addr add "$ADDR_V6" dev $INTERFACE
+
+          # IPv6 地址非空时才添加
+          if [ -n "$ADDR_V6" ]; then
+            sudo ip addr add "$ADDR_V6" dev $INTERFACE
+            sudo ip -6 route replace ::/0 dev $INTERFACE
+          else
+            echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
+          fi
+
           sudo ip link set mtu 1280 up dev $INTERFACE
-          sudo ip -6 route replace ::/0 dev $INTERFACE
 
           echo ">>> 验证 IPv6..."
           curl -6 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "::warning::IPv6 不通"
@@ -349,7 +356,10 @@ jobs:
         run: |
           echo ">>> 切换 WARP 到 IPv4 优先..."
           # 提高 IPv6 路由的 metric（优先级降低），IPv4 保持默认（metric 更低，优先级更高）
-          sudo ip -6 route change ::/0 dev wgcf metric 1000
+          # 使用 replace 防御路由不存在的情况
+          sudo ip -6 route replace ::/0 dev wgcf metric 1000 || {
+            echo "::warning::WARP IPv6 路由不存在，跳过切换"
+          }
           echo ">>> 验证路由:"
           ip route show
           echo "---"

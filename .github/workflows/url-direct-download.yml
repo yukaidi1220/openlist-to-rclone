@@ -373,22 +373,32 @@ jobs:
           cat "$MD5_FILE"
 
       # ============================================================
-      # Step 8: 切换 WARP 到 IPv4 优先（如果已启用）
+      # Step 8: 切换到 IPv4 优先（如果已启用 WARP）
       # 设计意图：下载阶段走 IPv6（WARP），上传阶段走 IPv4（提高上传稳定性）
+      # 使用 gai.conf 控制应用层地址选择优先级
       # ============================================================
-      - name: 切换 WARP 到 IPv4 优先
+      - name: 切换到 IPv4 优先
         if: ${{ github.event.inputs.enable_ipv6 == 'yes' }}
         run: |
-          echo ">>> 切换 WARP 到 IPv4 优先..."
-          # 提高 IPv6 路由的 metric（优先级降低），IPv4 保持默认（metric 更低，优先级更高）
-          # 使用 replace 防御路由不存在的情况
-          sudo ip -6 route replace ::/0 dev wgcf metric 1000 || {
-            echo "::warning::WARP IPv6 路由不存在，跳过切换"
+          echo ">>> 切换到 IPv4 优先..."
+
+          # 方法1: 修改 gai.conf（应用层优先级控制）
+          # 清除旧规则，添加 IPv4 高优先级
+          sudo sed -i '/^precedence \:\:ffff\:0\:0/d' /etc/gai.conf 2>/dev/null || true
+          echo "precedence ::ffff:0:0/96  100" | sudo tee -a /etc/gai.conf > /dev/null
+          echo ">>> gai.conf 配置:"
+          cat /etc/gai.conf
+
+          # 方法2: 提高 IPv6 路由 metric（内核层路由控制）
+          sudo ip -6 route replace ::/0 dev wgcf metric 1000 2>/dev/null || {
+            echo "::warning::WARP IPv6 路由不存在，跳过路由切换"
           }
+
           echo ">>> 验证路由:"
-          ip route show
+          ip route show | head -5
           echo "---"
-          ip -6 route show
+          ip -6 route show | head -5
+
           echo ">>> 测试连通性:"
           curl -4 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv4 OK" || echo "IPv4 失败"
           curl -6 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "IPv6 失败"

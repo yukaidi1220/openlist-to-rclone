@@ -120,7 +120,11 @@ jobs:
           sudo mv wgcf /usr/local/bin/wgcf
 
           echo ">>> 注册 WARP 账户..."
-          wgcf register --accept-tos
+          for i in {1..5}; do
+            wgcf register --accept-tos && break
+            echo "注册失败，重试 $i/5..."
+            sleep $((i * 10))
+          done
 
           echo ">>> 生成 WireGuard 配置..."
           wgcf generate
@@ -344,14 +348,17 @@ jobs:
         if: ${{ github.event.inputs.enable_ipv6 == 'yes' }}
         run: |
           echo ">>> 切换 WARP 到 IPv4 优先..."
-          # 删除 IPv6 默认路由，保留 IPv4 路由
-          sudo ip -6 route del ::/0 dev wgcf 2>/dev/null || true
+          # 提高 IPv6 路由的 metric（优先级降低），IPv4 保持默认（metric 更低，优先级更高）
+          sudo ip -6 route change ::/0 dev wgcf metric 1000
           echo ">>> 验证路由:"
           ip route show
+          echo "---"
           ip -6 route show
           echo ">>> 测试连通性:"
           curl -4 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv4 OK" || echo "IPv4 失败"
-          curl -6 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "IPv6 已禁用"
+          curl -6 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "IPv6 失败"
+          echo ">>> 当前优先使用的出口 IP:"
+          curl -sS --max-time 5 https://v.itdog.cn 2>/dev/null || echo "获取失败"
 
       # ============================================================
       # Step 9: 上传文件到 rclone

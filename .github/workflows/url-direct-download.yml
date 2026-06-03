@@ -37,10 +37,20 @@ jobs:
           JSON_URL: ${{ github.event.inputs.json_url }}
         run: |
           echo ">>> 下载 JSON 文件..."
-          curl -fsSL "$JSON_URL" -o files.json || {
-            echo "::error::无法下载 JSON 文件，请检查链接是否正确"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 30 --max-time 60 --retry 3 --retry-delay 10 "$JSON_URL" -o files.json; then
+              echo "下载成功"
+              break
+            fi
+            echo "下载失败，重试 $i/3..."
+            sleep $((i * 5))
+          done
+
+          if [ ! -f files.json ]; then
+            echo "::error::无法下载 JSON 文件，已重试 3 次"
             exit 1
-          }
+          fi
+
           echo "JSON 文件内容:"
           cat files.json
 
@@ -120,9 +130,10 @@ jobs:
           sudo mv wgcf /usr/local/bin/wgcf
 
           echo ">>> 注册 WARP 账户..."
+          REGISTERED=false
           for i in {1..5}; do
             if wgcf register --accept-tos; then
-              echo "注册成功"
+              REGISTERED=true
               break
             fi
             echo "注册失败，重试 $i/5..."
@@ -130,10 +141,11 @@ jobs:
           done
 
           # 检查注册是否成功
-          if [ ! -f wgcf-account.toml ]; then
+          if [ "$REGISTERED" = false ] || [ ! -f wgcf-account.toml ]; then
             echo "::error::WARP 注册失败，已重试 5 次"
             exit 1
           fi
+          echo ">>> 注册成功"
 
           echo ">>> 生成 WireGuard 配置..."
           wgcf generate
@@ -362,6 +374,7 @@ jobs:
 
       # ============================================================
       # Step 8: 切换 WARP 到 IPv4 优先（如果已启用）
+      # 设计意图：下载阶段走 IPv6（WARP），上传阶段走 IPv4（提高上传稳定性）
       # ============================================================
       - name: 切换 WARP 到 IPv4 优先
         if: ${{ github.event.inputs.enable_ipv6 == 'yes' }}

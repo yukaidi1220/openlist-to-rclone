@@ -1,0 +1,314 @@
+name: OpenList 保活
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 每天 UTC 02:00 (北京时间 10:00)
+  workflow_dispatch:
+
+# 防止 schedule 与 workflow_dispatch 同时执行导致 git push 冲突
+concurrency:
+  group: openlist-keepalive
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    env:
+      TOOLS_DIR: /tmp/tasks/tools
+      OPENLIST_DIR: /tmp/tasks/openlist
+      CHECK_DIR: /tmp/tasks/check
+    steps:
+      # ============================================================
+      # Step 1: 检出仓库（必须第一步，因为需要 rclone.conf 和 data.db）
+      # ============================================================
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 完整克隆，避免 shallow update not allowed
+
+      # ============================================================
+      # Step 2: 安装 Cloudflare WARP（IPv6 only，不影响 IPv4 路由）
+      # ============================================================
+      - name: 安装 Cloudflare WARP (wgcf + WireGuard)
+        run: |
+          set -e
+
+          echo ">>> 安装 WireGuard 依赖..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools resolvconf
+
+          echo ">>> 下载 wgcf..."
+          curl -fsSL -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
+          chmod +x wgcf
+          sudo mv wgcf /usr/local/bin/wgcf
+
+          echo ">>> 注册 WARP 账户..."
+          wgcf register --accept-tos
+
+          echo ">>> 生成 WireGuard 配置..."
+          wgcf generate
+
+          echo ">>> 手动拉起 WARP 接口 (绕过 wg-quick 的 nft 防火墙)..."
+          # Address 行格式: Address = 172.16.0.2/32, 2606:.../128
+          # awk 按空白分隔: $1=Address $2== $3=172.16.0.2/32, $4=2606:.../128
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          ADDR_V4=$(grep 'Address' wgcf-profile.conf    | awk '{print $3}' | sed 's/,$//')
+          ADDR_V6=$(grep 'Address' wgcf-profile.conf    | awk '{print $4}')
+          PEER_KEY=$(grep  'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep  'Endpoint' wgcf-profile.conf  | awk '{print $NF}')
+
+          INTERFACE=wgcf
+          sudo ip link add $INTERFACE type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
+          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+          sudo ip addr add "$ADDR_V4" dev $INTERFACE
+          sudo ip addr add "$ADDR_V6" dev $INTERFACE
+          sudo ip link set mtu 1280 up dev $INTERFACE
+          sudo ip -6 route replace ::/0 dev $INTERFACE
+
+          echo ">>> 验证 IPv6..."
+          curl -6 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "::warning::IPv6 不通"
+
+          echo ">>> WARP 状态:"
+          curl -sS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E 'warp|ip|colo' || true
+
+      # ============================================================
+      # Step 3: 安装 rclone
+      # ============================================================
+      - name: 安装 rclone
+        run: |
+          set -e
+          curl https://rclone.org/install.sh | sudo bash
+          rclone version
+          echo "/usr/bin" >> $GITHUB_PATH
+
+      # ============================================================
+      # Step 4: 下载并部署 OpenList
+      # ============================================================
+      - name: 下载并部署 OpenList
+        run: |
+          set -e
+          mkdir -p "${{ env.OPENLIST_DIR }}"
+          mkdir -p "${{ env.TOOLS_DIR }}"
+
+          OPENLIST_URL='https://github.com/OpenListTeam/OpenList/releases/latest/download/openlist-linux-amd64.tar.gz'
+          echo ">>> 下载 OpenList: $OPENLIST_URL"
+          curl -fsSL "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"
+
+          echo ">>> 解压 OpenList..."
+          tar -xzf "${{ env.TOOLS_DIR }}/openlist.tar.gz" -C "${{ env.OPENLIST_DIR }}"
+
+          echo ">>> OpenList 文件列表:"
+          ls -lh "${{ env.OPENLIST_DIR }}"
+
+          # 确保有执行权限
+          chmod +x "${{ env.OPENLIST_DIR }}/openlist"
+          echo "${{ env.OPENLIST_DIR }}" >> $GITHUB_PATH
+
+      # ============================================================
+      # Step 5: 创建运行时目录 & 部署 data.db
+      # ============================================================
+      - name: 创建目录 & 部署 data.db
+        run: |
+          mkdir -p "${{ env.OPENLIST_DIR }}/data"
+          mkdir -p "${{ env.CHECK_DIR }}"
+          cp -f "openlist/data/data.db" "${{ env.OPENLIST_DIR }}/data/data.db"
+          echo "data.db 已部署到 ${{ env.OPENLIST_DIR }}/data/"
+
+      # ============================================================
+      # Step 6: 启动 OpenList → 活体检测 → 停止
+      #         全部通过才回写 push；失败自动重启 OpenList 重试一次
+      # ============================================================
+      - name: 启动 OpenList + 活体检测 + 停止
+        run: |
+          set +e
+
+          OPENLIST_BIN="${{ env.OPENLIST_DIR }}/openlist"
+          OPENLIST_DATA="${{ env.OPENLIST_DIR }}/data"
+          PIDFILE="${{ env.TOOLS_DIR }}/openlist.pid"
+          OPENLIST_LOG="/tmp/tasks/openlist.log"
+
+          CHECK_PATHS=(
+            'list:cm/h/readme.md'
+            'list:ty/h/readme.md'
+            'list:cr/qzy-cn/readme.md'
+            'list:cr/qzy-hk/readme.md'
+          )
+          EXPECTED_MD5=(
+            '9f36db725572821f695f709d4e41edef'
+            '1aeedade74c9bb43bd780c2c18a3dc5e'
+            '0edc908c207c8b8554e0944627ab28eb'
+            '70eec22ca4ca1e35978cbfde297247e2'
+          )
+          TOTAL_COUNT=${#CHECK_PATHS[@]}
+
+          # ---- 启动 OpenList ----
+          start_openlist() {
+            echo ">>> 启动 OpenList..."
+            nohup "$OPENLIST_BIN" server --data "$OPENLIST_DATA" > "$OPENLIST_LOG" 2>&1 &
+            OPENLIST_PID=$!
+            echo "OpenList PID: $OPENLIST_PID"
+          }
+          start_openlist
+          sleep 10
+          echo "等待 10 秒完成"
+
+          # ---- 连通性检查 ----
+          echo ""
+          echo "========== 连通性检查 =========="
+          rclone lsd list: --config rclone.conf || echo "::warning::rclone lsd 失败"
+          rclone ls  list: --config rclone.conf
+          echo ""
+
+          # ---- 跑一次检测，传入轮次描述 ----
+          run_checks() {
+            local round="$1"
+            PASS_COUNT=0
+            RESULTS=""
+
+            echo "========== MD5 活体检测 ($round) =========="
+
+            for i in "${!CHECK_PATHS[@]}"; do
+              SRC="${CHECK_PATHS[$i]}"
+              EXPECTED="${EXPECTED_MD5[$i]}"
+
+              SUBDIR=$(echo "$SRC" | sed 's/^list://' | sed 's/\/[^/]*$//' | tr '/' '_')
+              LOCAL_DIR="${{ env.CHECK_DIR }}/$SUBDIR"
+              LOCAL_FILE="$LOCAL_DIR/readme.md"
+
+              mkdir -p "$LOCAL_DIR"
+              rm -f "$LOCAL_FILE"
+
+              echo "--- 校验: $SRC ---"
+              timeout --signal=KILL 70 rclone copy "$SRC" "$LOCAL_DIR/" --config rclone.conf --ignore-times --contimeout 30s --timeout 60s
+              RC=$?
+
+              PASS=false
+              if [ $RC -eq 137 ]; then
+                ACTUAL='TIMEOUT'
+                echo "rclone copy 超时（>70s）"
+              elif [ $RC -ne 0 ]; then
+                ACTUAL='DOWNLOAD_FAILED'
+                echo "rclone copy 失败 (exit=$RC)"
+              elif [ ! -f "$LOCAL_FILE" ]; then
+                ACTUAL='FILE_NOT_FOUND'
+                echo "文件未下载到本地"
+              else
+                ACTUAL=$(md5sum "$LOCAL_FILE" | awk '{print $1}')
+                if [ "$ACTUAL" = "$EXPECTED" ]; then
+                  PASS=true
+                  PASS_COUNT=$((PASS_COUNT + 1))
+                fi
+              fi
+
+              STATUS="FAIL"
+              if $PASS; then STATUS="PASS"; fi
+              echo "$STATUS : $SRC"
+              echo "  expected = $EXPECTED"
+              echo "  actual   = $ACTUAL"
+              echo ""
+
+              RESULTS="$RESULTS\n  $STATUS : $SRC"
+            done
+          }
+
+          # 第一轮
+          run_checks "第1轮"
+          ROUND1_PASS=$PASS_COUNT
+
+          if [ $ROUND1_PASS -ne $TOTAL_COUNT ]; then
+            # 失败 → 重启 OpenList → 等待 20s → 第二轮
+            echo ""
+            echo ">>> 第1轮未全通过 ($ROUND1_PASS/$TOTAL_COUNT)，重启 OpenList 重试..."
+            kill "$OPENLIST_PID" 2>/dev/null
+            sleep 3
+            kill -9 "$OPENLIST_PID" 2>/dev/null || true
+            sleep 2
+
+            start_openlist
+            sleep 20
+            echo "等待 20 秒完成"
+
+            run_checks "第2轮"
+          fi
+
+          # ---- 汇总 ----
+          echo "===================================="
+          echo "汇总: 通过 $PASS_COUNT / $TOTAL_COUNT"
+          echo "===================================="
+          printf "%b\n" "$RESULTS"
+
+          if [ "$PASS_COUNT" -ne "$TOTAL_COUNT" ]; then
+            echo "::error::MD5 活体检测失败 ($PASS_COUNT/$TOTAL_COUNT 通过)，需人工复活"
+          else
+            echo "全部通过，OpenList 存活正常"
+          fi
+
+          # ---- 停止 OpenList（两段式：SIGTERM → SIGKILL） ----
+          echo ""
+          echo ">>> 停止 OpenList (PID: $OPENLIST_PID)..."
+          kill "$OPENLIST_PID" 2>/dev/null
+          sleep 5
+          if kill -0 "$OPENLIST_PID" 2>/dev/null; then
+            echo "进程未退出，发送 SIGKILL..."
+            kill -9 "$OPENLIST_PID" 2>/dev/null || true
+          fi
+          sleep 10
+          echo "等待 10 秒，确保 SQLite 句柄释放"
+
+          # 全部通过 → exit 0 ，失败 → exit 1 阻止后续回写/push
+          if [ "$PASS_COUNT" -ne "$TOTAL_COUNT" ]; then
+            exit 1
+          fi
+
+      # ============================================================
+      # Step 7: 回写 data.db 到仓库
+      # ============================================================
+      - name: 回写 data.db
+        run: |
+          set -e
+          SRC="${{ env.OPENLIST_DIR }}/data/data.db"
+          DEST="openlist/data/data.db"
+          if [ -f "$SRC" ]; then
+            cp -f "$SRC" "$DEST"
+            echo "data.db 已回写到仓库"
+          else
+            echo "::warning::data.db 不存在，跳过回写"
+          fi
+
+      # ============================================================
+      # Step 8: 提交推送（含重试）
+      # ============================================================
+      - name: 提交推送
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add openlist/data/data.db
+
+          if git diff --staged --quiet; then
+            echo "data.db 无变化，跳过提交"
+            exit 0
+          fi
+
+          git commit -m "chore: 更新 openlist data.db"
+
+          PUSH_OK=false
+          for i in 1 2 3; do
+            echo ">>> push 尝试 $i/3..."
+            git pull --rebase origin main --no-edit 2>/dev/null || {
+              git rebase --abort 2>/dev/null || true
+            }
+            if git push; then
+              echo "push 成功"
+              PUSH_OK=true
+              break
+            fi
+            echo "push 失败，5 秒后重试..."
+            sleep 5
+          done
+          if ! $PUSH_OK; then
+            echo "::error::push 失败，已达最大重试次数"
+            exit 1
+          fi

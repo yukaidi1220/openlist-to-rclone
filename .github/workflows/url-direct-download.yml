@@ -1,0 +1,330 @@
+name: URL 直接下载并上传
+
+on:
+  workflow_dispatch:
+    inputs:
+      json_url:
+        description: 'JSON 文件链接（包含 URL、文件名等信息）'
+        required: true
+      enable_ipv6:
+        description: '是否启用 IPv6（安装 WARP）'
+        required: true
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+        default: 'yes'
+      rclone_path:
+        description: 'rclone 上传目标目录（如 mupan:/Origin_System）'
+        required: true
+        default: 'mupan:/Origin_System'
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================
+  # Job 1: 下载 JSON 并构建矩阵
+  # ============================================================
+  list-files:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      file-count: ${{ steps.build-matrix.outputs.file-count }}
+    steps:
+      - name: 下载 JSON 文件
+        env:
+          JSON_URL: ${{ github.event.inputs.json_url }}
+        run: |
+          echo ">>> 下载 JSON 文件..."
+          curl -fsSL "$JSON_URL" -o files.json || {
+            echo "::error::无法下载 JSON 文件，请检查链接是否正确"
+            exit 1
+          }
+          echo "JSON 文件内容:"
+          cat files.json
+
+      - name: 构建下载矩阵
+        id: build-matrix
+        run: |
+          # 验证 JSON 格式
+          if ! jq empty files.json 2>/dev/null; then
+            echo "::error::JSON 格式无效"
+            exit 1
+          fi
+
+          # 检查所有元素的必填字段
+          MISSING_FIELDS=$(jq '[.[] | select(.url == null or .filename == null)] | length' files.json)
+          if [ "$MISSING_FIELDS" -gt 0 ]; then
+            echo "::error::有 $MISSING_FIELDS 个元素缺少 url 或 filename 字段"
+            exit 1
+          fi
+
+          # 获取文件数量
+          FILE_COUNT=$(jq length files.json)
+          echo "共找到 $FILE_COUNT 个文件"
+
+          # 检查矩阵数量限制
+          if [ "$FILE_COUNT" -gt 256 ]; then
+            echo "::error::文件数量($FILE_COUNT)超过 GitHub Actions 矩阵上限 256"
+            exit 1
+          fi
+
+          # 构建 matrix JSON（保留所有字段）
+          MATRIX=$(jq -c '.' files.json)
+
+          # 使用唯一 delimiter 避免内容截断
+          DELIMITER="MATRIX_$(date +%s)"
+          echo "matrix<<$DELIMITER" >> "$GITHUB_OUTPUT"
+          echo "$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "$DELIMITER" >> "$GITHUB_OUTPUT"
+          echo "file-count=$FILE_COUNT" >> "$GITHUB_OUTPUT"
+
+          echo "Matrix 输出:"
+          echo "$MATRIX" | jq '.'
+
+  # ============================================================
+  # Job 2: 矩阵并行下载并上传
+  # ============================================================
+  download-upload:
+    needs: list-files
+    if: ${{ needs.list-files.outputs.file-count != '0' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        file: ${{ fromJSON(needs.list-files.outputs.matrix) }}
+    steps:
+      # ============================================================
+      # Step 1: 条件安装 WARP（IPv6）
+      # ============================================================
+      - name: 安装 Cloudflare WARP (如果启用 IPv6)
+        if: ${{ github.event.inputs.enable_ipv6 == 'yes' }}
+        run: |
+          set -e
+
+          echo ">>> 安装 WireGuard 依赖..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools resolvconf
+
+          echo ">>> 下载 wgcf..."
+          curl -fsSL -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
+          chmod +x wgcf
+          sudo mv wgcf /usr/local/bin/wgcf
+
+          echo ">>> 注册 WARP 账户..."
+          wgcf register --accept-tos
+
+          echo ">>> 生成 WireGuard 配置..."
+          wgcf generate
+
+          echo ">>> 手动拉起 WARP 接口..."
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          ADDR_V4=$(grep 'Address' wgcf-profile.conf    | awk '{print $3}' | sed 's/,$//')
+          ADDR_V6=$(grep 'Address' wgcf-profile.conf    | awk '{print $4}')
+          PEER_KEY=$(grep  'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep  'Endpoint' wgcf-profile.conf  | awk '{print $NF}')
+
+          INTERFACE=wgcf
+          sudo ip link add $INTERFACE type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
+          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+          sudo ip addr add "$ADDR_V4" dev $INTERFACE
+          sudo ip addr add "$ADDR_V6" dev $INTERFACE
+          sudo ip link set mtu 1280 up dev $INTERFACE
+          sudo ip -6 route replace ::/0 dev $INTERFACE
+
+          echo ">>> 验证 IPv6..."
+          curl -6 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "::warning::IPv6 不通"
+
+          echo ">>> WARP 状态:"
+          curl -sS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E 'warp|ip|colo' || true
+
+      # ============================================================
+      # Step 2: 安装工具
+      # ============================================================
+      - name: 安装 aria2c
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aria2
+
+      - name: 安装 rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      # ============================================================
+      # Step 3: 获取 rclone.conf
+      # ============================================================
+      - name: 获取 rclone.conf
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+        run: |
+          curl -fsSL \
+            -H "Authorization: token $RCLONE_PAT" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/${{ github.repository_owner }}/rclone-action/contents/rclone.conf" \
+            -o "$GITHUB_WORKSPACE/rclone.conf" || {
+            echo "::error::无法获取 rclone.conf，请检查 RCLONE_PAT 权限或 rclone-action 仓库是否存在"
+            exit 1
+          }
+          echo "rclone.conf 获取成功"
+
+      # ============================================================
+      # Step 4: 下载文件
+      # ============================================================
+      - name: 下载文件
+        env:
+          URL: ${{ matrix.file.url }}
+          FILENAME: ${{ matrix.file.filename }}
+        run: |
+          set -e
+
+          DL_DIR="/tmp/download"
+          mkdir -p "$DL_DIR"
+
+          echo ">>> 下载文件: $FILENAME"
+          echo ">>> URL: $URL"
+
+          aria2c \
+            --dir="$DL_DIR" \
+            --out="$FILENAME" \
+            --max-connection-per-server=16 \
+            --split=16 \
+            --min-split-size=5M \
+            --continue=true \
+            --auto-file-renaming=false \
+            --allow-overwrite=true \
+            --connect-timeout=30 \
+            --timeout=600 \
+            --max-tries=3 \
+            --retry-wait=10 \
+            --console-log-level=notice \
+            --summary-interval=10 \
+            "$URL"
+
+          echo ">>> 下载完成: $DL_DIR/$FILENAME"
+          ls -lh "$DL_DIR/$FILENAME"
+
+      # ============================================================
+      # Step 5: 校验文件（如果提供了 md5 或 sha256）
+      # ============================================================
+      - name: 校验文件
+        id: verify
+        continue-on-error: true
+        env:
+          FILENAME: ${{ matrix.file.filename }}
+          # md5 和 sha256 为可选字段
+          # JSON null、缺失、字符串 "null" 均会被跳过
+          MD5_HASH: ${{ matrix.file.md5 }}
+          SHA256_HASH: ${{ matrix.file.sha256 }}
+        run: |
+          set -e
+
+          DL_DIR="/tmp/download"
+          FILE_PATH="$DL_DIR/$FILENAME"
+          VERIFY_PASS=true
+
+          # 校验 MD5
+          if [ -n "$MD5_HASH" ] && [ "$MD5_HASH" != "null" ]; then
+            echo ">>> 校验 MD5: $MD5_HASH"
+            ACTUAL_MD5=$(md5sum "$FILE_PATH" | awk '{print $1}')
+            echo ">>> 实际 MD5: $ACTUAL_MD5"
+
+            if [ "$ACTUAL_MD5" != "$MD5_HASH" ]; then
+              echo "::error::MD5 校验失败"
+              echo "  期望: $MD5_HASH"
+              echo "  实际: $ACTUAL_MD5"
+              VERIFY_PASS=false
+            else
+              echo ">>> MD5 校验通过"
+            fi
+          fi
+
+          # 校验 SHA256
+          if [ -n "$SHA256_HASH" ] && [ "$SHA256_HASH" != "null" ]; then
+            echo ">>> 校验 SHA256: $SHA256_HASH"
+            ACTUAL_SHA256=$(sha256sum "$FILE_PATH" | awk '{print $1}')
+            echo ">>> 实际 SHA256: $ACTUAL_SHA256"
+
+            if [ "$ACTUAL_SHA256" != "$SHA256_HASH" ]; then
+              echo "::error::SHA256 校验失败"
+              echo "  期望: $SHA256_HASH"
+              echo "  实际: $ACTUAL_SHA256"
+              VERIFY_PASS=false
+            else
+              echo ">>> SHA256 校验通过"
+            fi
+          fi
+
+          # 校验失败则标记
+          if [ "$VERIFY_PASS" = false ]; then
+            echo "::error::文件校验失败，跳过上传"
+            exit 1
+          fi
+
+      # ============================================================
+      # Step 6: 生成 .md5 文件
+      # ============================================================
+      - name: 生成 MD5 文件
+        if: steps.verify.outcome == 'success'
+        env:
+          FILENAME: ${{ matrix.file.filename }}
+        run: |
+          set -e
+
+          DL_DIR="/tmp/download"
+          FILE_PATH="$DL_DIR/$FILENAME"
+          MD5_FILE="$DL_DIR/$FILENAME.md5"
+
+          echo ">>> 生成 MD5 文件: $FILENAME.md5"
+          md5sum "$FILE_PATH" | awk '{print $1}' > "$MD5_FILE"
+
+          echo ">>> MD5 文件内容:"
+          cat "$MD5_FILE"
+
+      # ============================================================
+      # Step 7: 上传文件到 rclone
+      # ============================================================
+      - name: 上传文件到 rclone
+        if: steps.verify.outcome == 'success'
+        env:
+          FILENAME: ${{ matrix.file.filename }}
+          RCLONE_PATH: ${{ github.event.inputs.rclone_path }}
+        run: |
+          set -e
+
+          DL_DIR="/tmp/download"
+          RCLONE_TARGET="$RCLONE_PATH"
+
+          # 校验路径安全性
+          if [[ "$RCLONE_TARGET" =~ [$'\n'\;\$\(\)\`] ]]; then
+            echo "::error::rclone_path 包含非法字符"
+            exit 1
+          fi
+
+          # 标准化路径：反斜杠转正斜杠
+          RCLONE_TARGET="${RCLONE_TARGET//\\//}"
+
+          # 确保目标路径以 / 结尾
+          if [[ ! "$RCLONE_TARGET" =~ [:/]$ ]]; then
+            RCLONE_TARGET="$RCLONE_TARGET/"
+          fi
+
+          # 上传主文件
+          echo ">>> 上传 $FILENAME -> ${RCLONE_TARGET}${FILENAME}"
+          rclone copyto "$DL_DIR/$FILENAME" "${RCLONE_TARGET}${FILENAME}" \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --progress \
+            --low-level-retries=3 \
+            --retries=3
+
+          # 上传 MD5 文件
+          echo ">>> 上传 $FILENAME.md5 -> ${RCLONE_TARGET}${FILENAME}.md5"
+          rclone copyto "$DL_DIR/$FILENAME.md5" "${RCLONE_TARGET}${FILENAME}.md5" \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --progress \
+            --low-level-retries=3 \
+            --retries=3
+
+          echo ">>> 上传完成"

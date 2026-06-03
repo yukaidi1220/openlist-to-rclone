@@ -10,7 +10,7 @@ on:
       target_path:
         description: 'rclone 目标路径'
         required: true
-        default: 'mupan:/File/DrvCeo'
+        default: 'mupan:/File/DrvCeo_Mod'
       drvzip_path:
         description: '驱动包 ZIP 所在 rclone 目录'
         required: true

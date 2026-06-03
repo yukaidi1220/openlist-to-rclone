@@ -190,15 +190,12 @@ jobs:
           fi
 
       # ============================================================
-      # Step 3: 安装工具
+      # Step 3: 安装工具（aria2c + rclone）
       # ============================================================
-      - name: 安装 aria2c
+      - name: 安装工具
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq aria2
-
-      - name: 安装 rclone
-        run: |
           curl https://rclone.org/install.sh | sudo bash
           rclone version
 
@@ -208,11 +205,12 @@ jobs:
       - name: 获取 rclone.conf
         env:
           RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           curl -fsSL \
             -H "Authorization: token $RCLONE_PAT" \
             -H "Accept: application/vnd.github.v3.raw" \
-            "https://api.github.com/repos/${{ github.repository_owner }}/rclone-action/contents/rclone.conf" \
+            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/rclone.conf" \
             -o "$GITHUB_WORKSPACE/rclone.conf" || {
             echo "::error::无法获取 rclone.conf，请检查 RCLONE_PAT 权限或 rclone-action 仓库是否存在"
             exit 1
@@ -271,50 +269,50 @@ jobs:
 
           DL_DIR="/tmp/download"
           FILE_PATH="$DL_DIR/$FILENAME"
-          VERIFY_PASS=true
+          HAS_ERROR=false
 
           # 校验 MD5（忽略大小写）
           if [ -n "$MD5_HASH" ] && [ "$MD5_HASH" != "null" ]; then
             echo ">>> 校验 MD5: $MD5_HASH"
             ACTUAL_MD5=$(md5sum "$FILE_PATH" | awk '{print $1}') || {
               echo "::error::md5sum 执行失败"
-              VERIFY_PASS=false
+              HAS_ERROR=true
             }
-            if [ "$VERIFY_PASS" = true ]; then
+            if [ "$HAS_ERROR" = false ]; then
               echo ">>> 实际 MD5: $ACTUAL_MD5"
               if [ "${ACTUAL_MD5,,}" != "${MD5_HASH,,}" ]; then
                 echo "::error::MD5 校验失败"
                 echo "  期望: $MD5_HASH"
                 echo "  实际: $ACTUAL_MD5"
-                VERIFY_PASS=false
+                HAS_ERROR=true
               else
                 echo ">>> MD5 校验通过"
               fi
             fi
           fi
 
-          # 校验 SHA256（忽略大小写）
+          # 校验 SHA256（独立执行，不受 MD5 结果影响）
           if [ -n "$SHA256_HASH" ] && [ "$SHA256_HASH" != "null" ]; then
             echo ">>> 校验 SHA256: $SHA256_HASH"
             ACTUAL_SHA256=$(sha256sum "$FILE_PATH" | awk '{print $1}') || {
               echo "::error::sha256sum 执行失败"
-              VERIFY_PASS=false
+              HAS_ERROR=true
             }
-            if [ "$VERIFY_PASS" = true ]; then
+            if [ -n "$ACTUAL_SHA256" ]; then
               echo ">>> 实际 SHA256: $ACTUAL_SHA256"
               if [ "${ACTUAL_SHA256,,}" != "${SHA256_HASH,,}" ]; then
                 echo "::error::SHA256 校验失败"
                 echo "  期望: $SHA256_HASH"
                 echo "  实际: $ACTUAL_SHA256"
-                VERIFY_PASS=false
+                HAS_ERROR=true
               else
                 echo ">>> SHA256 校验通过"
               fi
             fi
           fi
 
-          # 校验失败则标记
-          if [ "$VERIFY_PASS" = false ]; then
+          # 统一判断
+          if [ "$HAS_ERROR" = true ]; then
             echo "::error::文件校验失败，跳过上传"
             exit 1
           fi

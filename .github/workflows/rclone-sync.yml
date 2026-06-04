@@ -1,0 +1,501 @@
+name: Rclone 多目标同步
+
+on:
+  workflow_dispatch:
+    inputs:
+      json_url:
+        description: 'JSON 文件链接（包含 source、targets、prefer_ipv6）'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================
+  # Job 1: 解析 JSON 并构建矩阵
+  # ============================================================
+  parse-tasks:
+    runs-on: ubuntu-latest
+    outputs:
+      source: ${{ steps.validate.outputs.source }}
+      matrix: ${{ steps.validate.outputs.matrix }}
+      target-count: ${{ steps.validate.outputs.target-count }}
+      prefer-ipv6: ${{ steps.validate.outputs.prefer-ipv6 }}
+    steps:
+      - name: 下载 JSON 文件
+        env:
+          JSON_URL: ${{ github.event.inputs.json_url }}
+        run: |
+          echo ">>> 下载 JSON 文件..."
+          for i in {1..5}; do
+            if curl -fsSL --connect-timeout 30 --max-time 60 --retry 3 --retry-delay 10 "$JSON_URL" -o tasks.json; then
+              echo "下载成功"
+              break
+            fi
+            echo "下载失败，重试 $i/5..."
+            sleep $((i * 5))
+          done
+
+          if [ ! -f tasks.json ]; then
+            echo "::error::无法下载 JSON 文件，已重试 5 次"
+            exit 1
+          fi
+
+          echo "JSON 文件内容:"
+          cat tasks.json
+
+      - name: 校验 JSON 并构建矩阵
+        id: validate
+        run: |
+          # 验证 JSON 格式
+          if ! jq empty tasks.json 2>/dev/null; then
+            echo "::error::JSON 格式无效"
+            exit 1
+          fi
+
+          # 校验 source 字段（必须是非空字符串）
+          SOURCE=$(jq -r '.source // empty' tasks.json)
+          if [ -z "$SOURCE" ]; then
+            echo "::error::缺少 source 字段或 source 为空"
+            exit 1
+          fi
+          echo "源路径: $SOURCE"
+
+          # 校验 targets 字段（必须是非空数组）
+          IS_ARRAY=$(jq '.targets | type == "array"' tasks.json)
+          if [ "$IS_ARRAY" != "true" ]; then
+            echo "::error::targets 字段缺失或不是数组"
+            exit 1
+          fi
+
+          TARGET_COUNT=$(jq '.targets | length' tasks.json)
+          if [ "$TARGET_COUNT" -eq 0 ]; then
+            echo "::error::targets 数组为空"
+            exit 1
+          fi
+          if [ "$TARGET_COUNT" -gt 256 ]; then
+            echo "::error::目标数量($TARGET_COUNT)超过 GitHub Actions 矩阵上限 256"
+            exit 1
+          fi
+          echo "目标数量: $TARGET_COUNT"
+
+          # 校验每个 target 必须是非空字符串
+          EMPTY_TARGETS=$(jq '[.targets[] | select(. == null or . == "" or (type != "string"))] | length' tasks.json)
+          if [ "$EMPTY_TARGETS" -gt 0 ]; then
+            echo "::error::有 $EMPTY_TARGETS 个目标路径为空或不是字符串"
+            exit 1
+          fi
+
+          # 路径安全校验：检查 source 和所有 targets 不含注入字符
+          # 使用 bash 原生正则（$'\n' 可匹配真实换行符，grep 按行处理无法检测换行）
+          if [[ "$SOURCE" =~ [$'\n'\;\$\(\)\`] ]]; then
+            echo "::error::source 路径包含非法字符（禁止 ; \$ ( ) \` 换行）"
+            exit 1
+          fi
+
+          while IFS= read -r _target; do
+            if [[ "$_target" =~ [$'\n'\;\$\(\)\`] ]]; then
+              echo "::error::有目标路径包含非法字符（禁止 ; \$ ( ) \` 换行）"
+              exit 1
+            fi
+          done < <(jq -r '.targets[]' tasks.json)
+
+          # 提取 prefer_ipv6（缺省/null 视为 false）
+          PREFER_IPV6=$(jq -r 'if .prefer_ipv6 == true then "true" else "false" end' tasks.json)
+          echo "IP 偏好: IPv6=$PREFER_IPV6"
+
+          # 构建 matrix JSON（targets 字符串数组）
+          MATRIX=$(jq -c '.targets' tasks.json)
+
+          # 输出 source
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+
+          # 使用唯一 delimiter 避免内容截断
+          DELIMITER="MATRIX_$(date +%s)_$RANDOM"
+          echo "matrix<<$DELIMITER" >> "$GITHUB_OUTPUT"
+          echo "$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "$DELIMITER" >> "$GITHUB_OUTPUT"
+
+          echo "target-count=$TARGET_COUNT" >> "$GITHUB_OUTPUT"
+          echo "prefer-ipv6=$PREFER_IPV6" >> "$GITHUB_OUTPUT"
+
+          echo "Matrix 输出:"
+          echo "$MATRIX" | jq '.'
+
+  # ============================================================
+  # Job 2: 矩阵并行 sync（每个 runner 处理一个 target）
+  # ============================================================
+  sync:
+    needs: parse-tasks
+    if: ${{ needs.parse-tasks.outputs.target-count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      TOOLS_DIR: /tmp/tasks/tools
+      OPENLIST_DIR: /tmp/tasks/openlist
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        target: ${{ fromJSON(needs.parse-tasks.outputs.matrix) }}
+    steps:
+      # ============================================================
+      # Step 0: 检出仓库（获取 data.db 等本地资源）
+      # ============================================================
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # Step 1: 安装 Cloudflare WARP（始终执行，提供 IPv6 连接）
+      # ============================================================
+      - name: 安装 Cloudflare WARP
+        run: |
+          set -e
+
+          echo ">>> 安装 WireGuard 依赖..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools resolvconf
+
+          echo ">>> 下载 wgcf..."
+          for i in {1..5}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+              -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64; then
+              echo "wgcf 下载成功"
+              break
+            fi
+            echo "wgcf 下载失败，重试 $i/5..."
+            sleep $((i * 5))
+          done
+          if [ ! -f wgcf ]; then
+            echo "::error::无法下载 wgcf，已重试 5 次"
+            exit 1
+          fi
+          chmod +x wgcf
+          sudo mv wgcf /usr/local/bin/wgcf
+
+          echo ">>> 注册 WARP 账户..."
+          REGISTERED=false
+          for i in {1..5}; do
+            if wgcf register --accept-tos; then
+              REGISTERED=true
+              break
+            fi
+            echo "注册失败，重试 $i/5..."
+            sleep $((i * 10))
+          done
+
+          # 检查注册是否成功
+          if [ "$REGISTERED" = false ] || [ ! -f wgcf-account.toml ]; then
+            echo "::error::WARP 注册失败，已重试 5 次"
+            exit 1
+          fi
+          echo ">>> 注册成功"
+
+          echo ">>> 生成 WireGuard 配置..."
+          wgcf generate
+
+          echo ">>> 手动拉起 WARP 接口..."
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          ADDRESSES=$(grep 'Address' wgcf-profile.conf | awk -F'= ' '{print $2}')
+          ADDR_V4=$(echo "$ADDRESSES" | awk -F', ' '{print $1}' | sed 's/,$//')
+          ADDR_V6=$(echo "$ADDRESSES" | awk -F', ' '{print $2}')
+          PEER_KEY=$(grep  'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep  'Endpoint' wgcf-profile.conf  | awk '{print $NF}')
+
+          INTERFACE=wgcf
+          sudo ip link add $INTERFACE type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
+          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+
+          # 先启用接口，再添加地址
+          sudo ip link set mtu 1280 up dev $INTERFACE
+          sudo ip addr add "$ADDR_V4" dev $INTERFACE
+
+          # IPv6 地址非空时才添加
+          if [ -n "$ADDR_V6" ]; then
+            sudo ip addr add "$ADDR_V6" dev $INTERFACE
+            sudo ip -6 route replace ::/0 dev $INTERFACE
+          else
+            echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
+          fi
+
+          echo ">>> 验证 IPv6..."
+          curl -6 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "::warning::IPv6 不通"
+
+          echo ">>> WARP 状态:"
+          curl -sS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E 'warp|ip|colo' || true
+
+      # ============================================================
+      # Step 2: 配置 IP 版本优先级（gai.conf）
+      # ============================================================
+      - name: 配置 IP 版本优先级
+        env:
+          PREFER_IPV6: ${{ needs.parse-tasks.outputs.prefer-ipv6 }}
+        run: |
+          echo ">>> 配置 IP 版本优先级 (prefer_ipv6=$PREFER_IPV6)..."
+
+          # 清理旧的 precedence 规则
+          sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
+
+          if [ "$PREFER_IPV6" = "true" ]; then
+            echo "precedence ::/0  100" | sudo tee -a /etc/gai.conf > /dev/null
+            echo ">>> 已设置 IPv6 优先"
+          else
+            echo "precedence ::ffff:0:0/96  100" | sudo tee -a /etc/gai.conf > /dev/null
+            echo ">>> 已设置 IPv4 优先"
+
+            # 提高 IPv6 路由 metric（内核层路由控制）
+            sudo ip -6 route replace ::/0 dev wgcf metric 1000 2>/dev/null || {
+              echo "::warning::WARP IPv6 路由不存在，跳过路由调整"
+            }
+          fi
+
+          echo ">>> gai.conf 配置:"
+          cat /etc/gai.conf
+
+          echo ">>> 验证路由:"
+          ip route show | head -5
+          echo "---"
+          ip -6 route show | head -5
+
+          echo ">>> 测试连通性:"
+          curl -4 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv4 OK" || echo "IPv4 失败"
+          curl -6 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "IPv6 失败"
+          echo ">>> 当前优先使用的出口 IP:"
+          curl -sS --max-time 5 https://v.itdog.cn 2>/dev/null || echo "获取失败"
+
+      # ============================================================
+      # Step 3: 网络信息检查
+      # ============================================================
+      - name: 网络信息检查
+        run: |
+          echo "=== 网络信息 ==="
+
+          # Azure IMDS 获取区域
+          METADATA=$(curl -sS -H "Metadata:true" \
+            "http://169.254.169.254/metadata/instance?api-version=2021-02-01" \
+            --max-time 2 2>/dev/null) || true
+          if [ -n "$METADATA" ]; then
+            AZURE_LOCATION=$(echo "$METADATA" | jq -r '.compute.location // "未知"')
+            VM_SIZE=$(echo "$METADATA" | jq -r '.compute.vmSize // "未知"')
+            echo "Azure 区域: $AZURE_LOCATION"
+            echo "VM 大小: $VM_SIZE"
+          else
+            echo "Azure 区域: 不可用"
+          fi
+
+          # 获取 IPv4
+          IPV4=$(curl -sS "https://4.itdog.cn" --max-time 5 2>/dev/null) || true
+          echo "IPv4: ${IPV4:-获取失败}"
+
+          # 获取 IPv6
+          IPV6=$(curl -sS "https://6.itdog.cn" --max-time 5 2>/dev/null) || true
+          echo "IPv6: ${IPV6:-获取失败或不支持}"
+
+          # 获取 IP 归属地
+          GEO=$(curl -sS "https://myip.ipip.net/json" --max-time 5 2>/dev/null) || true
+          if [ -n "$GEO" ]; then
+            RET=$(echo "$GEO" | jq -r '.ret // "fail"')
+            if [ "$RET" = "ok" ]; then
+              LOCATION=$(echo "$GEO" | jq -r '.data.location // [] | join(" ")')
+              echo "归属地: $LOCATION"
+            else
+              echo "归属地: 获取失败"
+            fi
+          else
+            echo "归属地: 获取失败"
+          fi
+
+      # ============================================================
+      # Step 5: 部署 OpenList（rclone list: remote 依赖本地 OpenList）
+      # ============================================================
+      - name: 部署 OpenList
+        run: |
+          set -e
+          mkdir -p "${{ env.OPENLIST_DIR }}"
+          mkdir -p "${{ env.TOOLS_DIR }}"
+
+          # 下载 OpenList 二进制
+          OPENLIST_URL='https://github.com/OpenListTeam/OpenList/releases/latest/download/openlist-linux-amd64.tar.gz'
+          echo ">>> 下载 OpenList: $OPENLIST_URL"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+              "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
+              echo "OpenList 下载成功"
+              break
+            fi
+            echo "OpenList 下载失败，重试 $i/3..."
+            sleep $((i * 10))
+          done
+          if [ ! -f "${{ env.TOOLS_DIR }}/openlist.tar.gz" ]; then
+            echo "::error::无法下载 OpenList"
+            exit 1
+          fi
+
+          echo ">>> 解压 OpenList..."
+          tar -xzf "${{ env.TOOLS_DIR }}/openlist.tar.gz" -C "${{ env.OPENLIST_DIR }}"
+          chmod +x "${{ env.OPENLIST_DIR }}/openlist"
+
+          echo ">>> OpenList 文件列表:"
+          ls -lh "${{ env.OPENLIST_DIR }}"
+
+          # 部署 data.db
+          mkdir -p "${{ env.OPENLIST_DIR }}/data"
+          if [ -f "$GITHUB_WORKSPACE/openlist/data/data.db" ]; then
+            cp -f "$GITHUB_WORKSPACE/openlist/data/data.db" "${{ env.OPENLIST_DIR }}/data/data.db"
+            echo "data.db 已从本仓库部署"
+          else
+            echo ">>> 本仓库无 data.db，尝试从 rclone-action 获取..."
+            curl -fsSL --retry 3 --retry-delay 5 \
+              -H "Authorization: token ${{ secrets.RCLONE_PAT }}" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/${{ github.repository_owner }}/rclone-action/contents/openlist/data/data.db" \
+              -o "${{ env.OPENLIST_DIR }}/data/data.db" || {
+              echo "::error::无法获取 data.db"
+              exit 1
+            }
+            echo "data.db 已从 rclone-action 仓库部署"
+          fi
+
+      # ============================================================
+      # Step 6: 启动 OpenList 并等待就绪
+      # ============================================================
+      - name: 启动 OpenList
+        run: |
+          set -e
+
+          OPENLIST_BIN="${{ env.OPENLIST_DIR }}/openlist"
+          OPENLIST_DATA="${{ env.OPENLIST_DIR }}/data"
+          OPENLIST_LOG="/tmp/tasks/openlist.log"
+
+          echo ">>> 启动 OpenList..."
+          nohup "$OPENLIST_BIN" server --data "$OPENLIST_DATA" > "$OPENLIST_LOG" 2>&1 &
+          OPENLIST_PID=$!
+          echo "OpenList PID: $OPENLIST_PID"
+          echo "$OPENLIST_PID" > /tmp/tasks/openlist.pid
+
+          echo ">>> 等待 OpenList 就绪..."
+          READY=false
+          for i in {1..15}; do
+            if curl -sS --max-time 3 http://127.0.0.1:5244/api/public/settings > /dev/null 2>&1; then
+              READY=true
+              echo "OpenList 已就绪 (等待了 $((i * 2)) 秒)"
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$READY" != "true" ]; then
+            echo "::warning::OpenList 30 秒内未就绪，查看日志:"
+            tail -30 "$OPENLIST_LOG" || true
+            echo "::error::OpenList 启动失败"
+            exit 1
+          fi
+
+      # ============================================================
+      # Step 7: 安装 rclone
+      # ============================================================
+      - name: 安装 rclone
+        run: |
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+              https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
+              sudo bash /tmp/install_rclone.sh && break
+            fi
+            echo "rclone 安装失败，重试 $i/3..."
+            sleep $((i * 10))
+          done
+          if ! command -v rclone &>/dev/null; then
+            echo "::error::rclone 安装失败"
+            exit 1
+          fi
+          rclone version
+
+      # ============================================================
+      # Step 8: 获取 rclone.conf
+      # ============================================================
+      - name: 获取 rclone.conf
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/rclone.conf" \
+              -o "$GITHUB_WORKSPACE/rclone.conf"; then
+              echo "rclone.conf 获取成功"
+              break
+            fi
+            echo "获取失败，重试 $i/3..."
+            sleep $((i * 5))
+          done
+          if [ ! -f "$GITHUB_WORKSPACE/rclone.conf" ]; then
+            echo "::error::无法获取 rclone.conf，请检查 RCLONE_PAT 权限或 rclone-action 仓库是否存在"
+            exit 1
+          fi
+
+      # ============================================================
+      # Step 9: 执行 rclone sync
+      # ============================================================
+      - name: rclone sync
+        env:
+          SOURCE: ${{ needs.parse-tasks.outputs.source }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -e
+
+          RCLONE_SOURCE="$SOURCE"
+          RCLONE_TARGET="$TARGET"
+
+          # 路径归一化：反斜杠转正斜杠
+          RCLONE_SOURCE="${RCLONE_SOURCE//\\//}"
+          RCLONE_TARGET="${RCLONE_TARGET//\\//}"
+
+          # 确保目标路径以 / 结尾
+          if [[ ! "$RCLONE_TARGET" =~ [:/]$ ]]; then
+            RCLONE_TARGET="$RCLONE_TARGET/"
+          fi
+
+          # 路径注入二次检查
+          if [[ "$RCLONE_SOURCE" =~ [$'\n'\;\$\(\)\`] ]]; then
+            echo "::error::source 路径包含非法字符"
+            exit 1
+          fi
+          if [[ "$RCLONE_TARGET" =~ [$'\n'\;\$\(\)\`] ]]; then
+            echo "::error::target 路径包含非法字符"
+            exit 1
+          fi
+
+          echo ">>> rclone sync"
+          echo ">>> 源: $RCLONE_SOURCE"
+          echo ">>> 目标: $RCLONE_TARGET"
+
+          rclone sync "$RCLONE_SOURCE" "$RCLONE_TARGET" \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --progress \
+            --transfers=8 \
+            --checkers=16 \
+            --onedrive-chunk-size 250M \
+            --low-level-retries=10 \
+            --retries=5 \
+            --retries-sleep=15 \
+            --timeout=30m
+
+          echo ">>> sync 完成: $RCLONE_SOURCE -> $RCLONE_TARGET"
+
+      # ============================================================
+      # Step 10: 清理（停止 OpenList 进程）
+      # ============================================================
+      - name: 停止 OpenList
+        if: always()
+        run: |
+          if [ -f /tmp/tasks/openlist.pid ]; then
+            PID=$(cat /tmp/tasks/openlist.pid)
+            echo ">>> 停止 OpenList (PID: $PID)..."
+            kill "$PID" 2>/dev/null || true
+            sleep 3
+            kill -9 "$PID" 2>/dev/null || true
+            echo "OpenList 已停止"
+          fi

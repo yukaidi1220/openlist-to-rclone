@@ -15,9 +15,9 @@ on:
           - 'no'
         default: 'yes'
       rclone_path:
-        description: 'rclone 上传目标目录（如 mupan:/Origin_System）'
+        description: 'rclone 上传目标目录（如 mupan:/File/Origin_System）'
         required: true
-        default: 'mupan:/Origin_System'
+        default: 'mupan:/File/Origin_System'
 
 permissions:
   contents: read
@@ -37,17 +37,17 @@ jobs:
           JSON_URL: ${{ github.event.inputs.json_url }}
         run: |
           echo ">>> 下载 JSON 文件..."
-          for i in {1..3}; do
+          for i in {1..5}; do
             if curl -fsSL --connect-timeout 30 --max-time 60 --retry 3 --retry-delay 10 "$JSON_URL" -o files.json; then
               echo "下载成功"
               break
             fi
-            echo "下载失败，重试 $i/3..."
+            echo "下载失败，重试 $i/5..."
             sleep $((i * 5))
           done
 
           if [ ! -f files.json ]; then
-            echo "::error::无法下载 JSON 文件，已重试 3 次"
+            echo "::error::无法下载 JSON 文件，已重试 5 次"
             exit 1
           fi
 

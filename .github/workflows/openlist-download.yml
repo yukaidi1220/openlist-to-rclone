@@ -302,6 +302,12 @@ jobs:
           Write-Host "冲突检查完成"
 
           Write-Host "推送到 $rcloneTarget ..."
+          # 清理临时文件，避免被上传
+          Remove-Item "$dlDir\urls.txt" -ErrorAction SilentlyContinue
+          Remove-Item "$dlDir\large_urls.txt" -ErrorAction SilentlyContinue
+          Remove-Item "$dlDir\large_dl_status.txt" -ErrorAction SilentlyContinue
+          Remove-Item "$dlDir\large_dl_failed.txt" -ErrorAction SilentlyContinue
+          
           rclone copy "$dlDir\" "$rcloneTarget" `
             --config rclone.conf `
             --progress `

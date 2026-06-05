@@ -1,7 +1,6 @@
 {
-  "source": "list:/cm/h",
+  "source": "mupan:/File",
   "targets": [
-    { "path": "mupan:/File/Sync/cm_h", "prefer_ipv6": false },
-    { "path": "zhipin:/File/Sync/cm_h", "prefer_ipv6": true }
+    { "path": "list:/cr/qzy-hk-mupan", "prefer_ipv6": false }
   ]
 }

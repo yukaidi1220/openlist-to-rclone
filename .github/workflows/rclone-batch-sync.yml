@@ -751,7 +751,7 @@ jobs:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
         run: |
-          set -e
+          set -eo pipefail
 
           echo "=== Batch ${{ matrix.batch.id }} ==="
           echo "文件数: ${{ matrix.batch.count }}"
@@ -1162,7 +1162,7 @@ jobs:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
         run: |
-          set -e
+          set -eo pipefail
 
           echo "=== 重跑 Batch ${{ inputs.batch_id }} ==="
 

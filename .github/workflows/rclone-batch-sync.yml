@@ -753,9 +753,35 @@ jobs:
           echo "大小: $(awk "BEGIN{printf \"%.2f\", ${{ matrix.batch.bytes }} / 1024 / 1024 / 1024}") GiB"
           echo ""
 
+          BATCH_FILE="batch_${{ matrix.batch.id }}.txt"
+          DIFFER_FILE="/tmp/differ_${{ matrix.batch.id }}.txt"
+
+          # 检查需要更新的文件（增强鲁棒性）
+          echo ">>> 检查需要更新的文件..."
+          rclone check \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --one-way \
+            --size-only \
+            --differ "$DIFFER_FILE" \
+            --files-from-raw "$BATCH_FILE" \
+            "$RCLONE_SRC" "$RCLONE_DST" || true
+
+          # 删除需要更新的文件（避免 WebDAV PUT 405 错误）
+          if [[ -s "$DIFFER_FILE" ]]; then
+            echo ">>> 删除 $(wc -l < "$DIFFER_FILE") 个需要更新的文件..."
+            while IFS= read -r file; do
+              rclone deletefile \
+                --config "$GITHUB_WORKSPACE/rclone.conf" \
+                "$RCLONE_DST/$file" 2>/dev/null || true
+            < "$DIFFER_FILE"
+            echo "删除完成"
+          else
+            echo ">>> 无需删除，所有文件已是最新"
+          fi
+
           rclone copy \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
-            --files-from-raw "batch_${{ matrix.batch.id }}.txt" \
+            --files-from-raw "$BATCH_FILE" \
             --transfers "$RCLONE_TRANSFERS" \
             --checkers "$RCLONE_CHECKERS" \
             --tpslimit "$RCLONE_TPSLIMIT" \
@@ -1127,6 +1153,31 @@ jobs:
 
           echo "文件数: $(wc -l < "$BATCH_FILE")"
           echo ""
+
+          DIFFER_FILE="/tmp/differ_${{ inputs.batch_id }}.txt"
+
+          # 检查需要更新的文件（增强鲁棒性）
+          echo ">>> 检查需要更新的文件..."
+          rclone check \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --one-way \
+            --size-only \
+            --differ "$DIFFER_FILE" \
+            --files-from-raw "$BATCH_FILE" \
+            "$RCLONE_SRC" "$RCLONE_DST" || true
+
+          # 删除需要更新的文件（避免 WebDAV PUT 405 错误）
+          if [[ -s "$DIFFER_FILE" ]]; then
+            echo ">>> 删除 $(wc -l < "$DIFFER_FILE") 个需要更新的文件..."
+            while IFS= read -r file; do
+              rclone deletefile \
+                --config "$GITHUB_WORKSPACE/rclone.conf" \
+                "$RCLONE_DST/$file" 2>/dev/null || true
+            < "$DIFFER_FILE"
+            echo "删除完成"
+          else
+            echo ">>> 无需删除，所有文件已是最新"
+          fi
 
           rclone copy \
             --config "$GITHUB_WORKSPACE/rclone.conf" \

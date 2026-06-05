@@ -22,7 +22,8 @@ total_files=$(wc -l < "$FILES_FILE")
 echo "Processing $total_files files, max batch size: ${MAX_GB} GiB" >&2
 
 # 读入并按大小降序排序（大文件优先分配）
-mapfile -t sorted < <(sort -t';' -k1 -rn "$FILES_FILE")
+# 过滤掉不符合 "大小;路径" 格式的行（如 rclone 进度输出）
+mapfile -t sorted < <(grep -E '^[0-9]+;' "$FILES_FILE" | sort -t';' -k1 -rn)
 
 # batch_remaining[i] = 当前 batch 剩余可用字节
 declare -a batch_remaining=()

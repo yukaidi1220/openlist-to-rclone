@@ -797,7 +797,7 @@ jobs:
             --low-level-retries=10 \
             --retries=10 \
             --retries-sleep=30s \
-            --max-duration 120m \
+            --max-duration 180m \
             --cutoff-mode soft \
             --timeout=5m \
             "$RCLONE_SRC" "$RCLONE_DST"

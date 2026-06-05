@@ -20,7 +20,6 @@ jobs:
       source: ${{ steps.validate.outputs.source }}
       matrix: ${{ steps.validate.outputs.matrix }}
       target-count: ${{ steps.validate.outputs.target-count }}
-      prefer-ipv6: ${{ steps.validate.outputs.prefer-ipv6 }}
     steps:
       - name: 下载 JSON 文件
         env:
@@ -79,10 +78,10 @@ jobs:
           fi
           echo "目标数量: $TARGET_COUNT"
 
-          # 校验每个 target 必须是非空字符串
-          EMPTY_TARGETS=$(jq '[.targets[] | select(. == null or . == "" or (type != "string"))] | length' tasks.json)
+          # 校验每个 target 必须是对象且 path 为非空字符串
+          EMPTY_TARGETS=$(jq '[.targets[] | select(. == null or .path == null or .path == "" or (.path | type) != "string")] | length' tasks.json)
           if [ "$EMPTY_TARGETS" -gt 0 ]; then
-            echo "::error::有 $EMPTY_TARGETS 个目标路径为空或不是字符串"
+            echo "::error::有 $EMPTY_TARGETS 个目标缺少 path 字段或 path 不是字符串"
             exit 1
           fi
 
@@ -98,14 +97,10 @@ jobs:
               echo "::error::有目标路径包含非法字符（禁止 ; \$ ( ) \` 换行）"
               exit 1
             fi
-          done < <(jq -r '.targets[]' tasks.json)
+          done < <(jq -r '.targets[].path' tasks.json)
 
-          # 提取 prefer_ipv6（缺省/null 视为 false）
-          PREFER_IPV6=$(jq -r 'if .prefer_ipv6 == true then "true" else "false" end' tasks.json)
-          echo "IP 偏好: IPv6=$PREFER_IPV6"
-
-          # 构建 matrix JSON（targets 字符串数组）
-          MATRIX=$(jq -c '.targets' tasks.json)
+          # 构建 matrix JSON（targets 对象数组，每个含 path + prefer_ipv6）
+          MATRIX=$(jq -c '[.targets[] | {path: .path, prefer_ipv6: (if .prefer_ipv6 == true then true else false end)}]' tasks.json)
 
           # 输出 source
           echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
@@ -117,7 +112,6 @@ jobs:
           echo "$DELIMITER" >> "$GITHUB_OUTPUT"
 
           echo "target-count=$TARGET_COUNT" >> "$GITHUB_OUTPUT"
-          echo "prefer-ipv6=$PREFER_IPV6" >> "$GITHUB_OUTPUT"
 
           echo "Matrix 输出:"
           echo "$MATRIX" | jq '.'
@@ -230,7 +224,7 @@ jobs:
       # ============================================================
       - name: 配置 IP 版本优先级
         env:
-          PREFER_IPV6: ${{ needs.parse-tasks.outputs.prefer-ipv6 }}
+          PREFER_IPV6: ${{ matrix.target.prefer_ipv6 }}
         run: |
           echo ">>> 配置 IP 版本优先级 (prefer_ipv6=$PREFER_IPV6)..."
 
@@ -442,7 +436,7 @@ jobs:
       - name: rclone sync
         env:
           SOURCE: ${{ needs.parse-tasks.outputs.source }}
-          TARGET: ${{ matrix.target }}
+          TARGET: ${{ matrix.target.path }}
         run: |
           set -e
 

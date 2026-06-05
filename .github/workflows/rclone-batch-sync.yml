@@ -30,6 +30,11 @@ on:
       run_id:
         description: 'rerun 模式下原始 workflow run_id'
         required: false
+      prefer_ipv6:
+        description: '是否优先使用 IPv6'
+        required: false
+        default: 'false'
+        type: boolean
 
 permissions:
   contents: read
@@ -58,6 +63,167 @@ jobs:
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
+
+      # ============================================================
+      # 安装 Cloudflare WARP（始终执行，提供 IPv6 连接）
+      # ============================================================
+      - name: 安装 Cloudflare WARP
+        run: |
+          set -e
+
+          echo ">>> 安装 WireGuard 依赖..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools resolvconf
+
+          echo ">>> 下载 wgcf..."
+          for i in {1..5}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+              -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64; then
+              echo "wgcf 下载成功"
+              break
+            fi
+            echo "wgcf 下载失败，重试 $i/5..."
+            sleep $((i * 5))
+          done
+          if [ ! -f wgcf ]; then
+            echo "::error::无法下载 wgcf，已重试 5 次"
+            exit 1
+          fi
+          chmod +x wgcf
+          sudo mv wgcf /usr/local/bin/wgcf
+
+          echo ">>> 注册 WARP 账户..."
+          REGISTERED=false
+          for i in {1..5}; do
+            if wgcf register --accept-tos; then
+              REGISTERED=true
+              break
+            fi
+            echo "注册失败，重试 $i/5..."
+            sleep $((i * 10))
+          done
+
+          # 检查注册是否成功
+          if [ "$REGISTERED" = false ] || [ ! -f wgcf-account.toml ]; then
+            echo "::error::WARP 注册失败，已重试 5 次"
+            exit 1
+          fi
+          echo ">>> 注册成功"
+
+          echo ">>> 生成 WireGuard 配置..."
+          wgcf generate
+
+          echo ">>> 手动拉起 WARP 接口..."
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          ADDRESSES=$(grep 'Address' wgcf-profile.conf | awk -F'= ' '{print $2}')
+          ADDR_V4=$(echo "$ADDRESSES" | awk -F', ' '{print $1}' | sed 's/,$//')
+          ADDR_V6=$(echo "$ADDRESSES" | awk -F', ' '{print $2}')
+          PEER_KEY=$(grep  'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep  'Endpoint' wgcf-profile.conf  | awk '{print $NF}')
+
+          INTERFACE=wgcf
+          sudo ip link add $INTERFACE type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
+          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+
+          # 先启用接口，再添加地址
+          sudo ip link set mtu 1280 up dev $INTERFACE
+          sudo ip addr add "$ADDR_V4" dev $INTERFACE
+
+          # IPv6 地址非空时才添加
+          if [ -n "$ADDR_V6" ]; then
+            sudo ip addr add "$ADDR_V6" dev $INTERFACE
+            sudo ip -6 route replace ::/0 dev $INTERFACE
+          else
+            echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
+          fi
+
+          echo ">>> 验证 IPv6..."
+          curl -6 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "::warning::IPv6 不通"
+
+          echo ">>> WARP 状态:"
+          curl -sS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E 'warp|ip|colo' || true
+
+      # ============================================================
+      # 配置 IP 版本优先级（gai.conf）
+      # ============================================================
+      - name: 配置 IP 版本优先级
+        env:
+          PREFER_IPV6: ${{ inputs.prefer_ipv6 }}
+        run: |
+          echo ">>> 配置 IP 版本优先级 (prefer_ipv6=$PREFER_IPV6)..."
+
+          # 清理旧的 precedence 规则
+          sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
+
+          if [ "$PREFER_IPV6" = "true" ]; then
+            echo "precedence ::/0  100" | sudo tee -a /etc/gai.conf > /dev/null
+            echo ">>> 已设置 IPv6 优先"
+          else
+            echo "precedence ::ffff:0:0/96  100" | sudo tee -a /etc/gai.conf > /dev/null
+            echo ">>> 已设置 IPv4 优先"
+
+            # 提高 IPv6 路由 metric（内核层路由控制）
+            sudo ip -6 route replace ::/0 dev wgcf metric 1000 2>/dev/null || {
+              echo "::warning::WARP IPv6 路由不存在，跳过路由调整"
+            }
+          fi
+
+          echo ">>> gai.conf 配置:"
+          cat /etc/gai.conf
+
+          echo ">>> 验证路由:"
+          ip route show | head -5
+          echo "---"
+          ip -6 route show | head -5
+
+          echo ">>> 测试连通性:"
+          curl -4 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv4 OK" || echo "IPv4 失败"
+          curl -6 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "IPv6 失败"
+          echo ">>> 当前优先使用的出口 IP:"
+          curl -sS --max-time 5 https://v.itdog.cn 2>/dev/null || echo "获取失败"
+
+      # ============================================================
+      # 网络信息检查
+      # ============================================================
+      - name: 网络信息检查
+        run: |
+          echo "=== 网络信息 ==="
+
+          # Azure IMDS 获取区域
+          METADATA=$(curl -sS -H "Metadata:true" \
+            "http://169.254.169.254/metadata/instance?api-version=2021-02-01" \
+            --max-time 2 2>/dev/null) || true
+          if [ -n "$METADATA" ]; then
+            AZURE_LOCATION=$(echo "$METADATA" | jq -r '.compute.location // "未知"')
+            VM_SIZE=$(echo "$METADATA" | jq -r '.compute.vmSize // "未知"')
+            echo "Azure 区域: $AZURE_LOCATION"
+            echo "VM 大小: $VM_SIZE"
+          else
+            echo "Azure 区域: 不可用"
+          fi
+
+          # 获取 IPv4
+          IPV4=$(curl -sS "https://4.itdog.cn" --max-time 5 2>/dev/null) || true
+          echo "IPv4: ${IPV4:-获取失败}"
+
+          # 获取 IPv6
+          IPV6=$(curl -sS "https://6.itdog.cn" --max-time 5 2>/dev/null) || true
+          echo "IPv6: ${IPV6:-获取失败或不支持}"
+
+          # 获取 IP 归属地
+          GEO=$(curl -sS "https://myip.ipip.net/json" --max-time 5 2>/dev/null) || true
+          if [ -n "$GEO" ]; then
+            RET=$(echo "$GEO" | jq -r '.ret // "fail"')
+            if [ "$RET" = "ok" ]; then
+              LOCATION=$(echo "$GEO" | jq -r '.data.location // [] | join(" ")')
+              echo "归属地: $LOCATION"
+            else
+              echo "归属地: 获取失败"
+            fi
+          else
+            echo "归属地: 获取失败"
+          fi
 
       # ============================================================
       # 部署 OpenList（rclone list: remote 依赖本地 OpenList）
@@ -192,6 +358,7 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --missing-on-dst /tmp/missing.txt \
             --differ /tmp/differ.txt \
+            --progress \
             "$RCLONE_SRC" "$RCLONE_DST" 2>/dev/null || true
 
           # 合并需要传输的文件列表
@@ -219,6 +386,7 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-only --absolute \
             --files-from-raw /tmp/transfer.txt \
+            --progress \
             "$RCLONE_SRC" > files_with_size.txt
 
           echo "文件列表: $(wc -l < files_with_size.txt) 个文件"
@@ -288,6 +456,167 @@ jobs:
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
+
+      # ============================================================
+      # 安装 Cloudflare WARP（始终执行，提供 IPv6 连接）
+      # ============================================================
+      - name: 安装 Cloudflare WARP
+        run: |
+          set -e
+
+          echo ">>> 安装 WireGuard 依赖..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools resolvconf
+
+          echo ">>> 下载 wgcf..."
+          for i in {1..5}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+              -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64; then
+              echo "wgcf 下载成功"
+              break
+            fi
+            echo "wgcf 下载失败，重试 $i/5..."
+            sleep $((i * 5))
+          done
+          if [ ! -f wgcf ]; then
+            echo "::error::无法下载 wgcf，已重试 5 次"
+            exit 1
+          fi
+          chmod +x wgcf
+          sudo mv wgcf /usr/local/bin/wgcf
+
+          echo ">>> 注册 WARP 账户..."
+          REGISTERED=false
+          for i in {1..5}; do
+            if wgcf register --accept-tos; then
+              REGISTERED=true
+              break
+            fi
+            echo "注册失败，重试 $i/5..."
+            sleep $((i * 10))
+          done
+
+          # 检查注册是否成功
+          if [ "$REGISTERED" = false ] || [ ! -f wgcf-account.toml ]; then
+            echo "::error::WARP 注册失败，已重试 5 次"
+            exit 1
+          fi
+          echo ">>> 注册成功"
+
+          echo ">>> 生成 WireGuard 配置..."
+          wgcf generate
+
+          echo ">>> 手动拉起 WARP 接口..."
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          ADDRESSES=$(grep 'Address' wgcf-profile.conf | awk -F'= ' '{print $2}')
+          ADDR_V4=$(echo "$ADDRESSES" | awk -F', ' '{print $1}' | sed 's/,$//')
+          ADDR_V6=$(echo "$ADDRESSES" | awk -F', ' '{print $2}')
+          PEER_KEY=$(grep  'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep  'Endpoint' wgcf-profile.conf  | awk '{print $NF}')
+
+          INTERFACE=wgcf
+          sudo ip link add $INTERFACE type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
+          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+
+          # 先启用接口，再添加地址
+          sudo ip link set mtu 1280 up dev $INTERFACE
+          sudo ip addr add "$ADDR_V4" dev $INTERFACE
+
+          # IPv6 地址非空时才添加
+          if [ -n "$ADDR_V6" ]; then
+            sudo ip addr add "$ADDR_V6" dev $INTERFACE
+            sudo ip -6 route replace ::/0 dev $INTERFACE
+          else
+            echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
+          fi
+
+          echo ">>> 验证 IPv6..."
+          curl -6 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "::warning::IPv6 不通"
+
+          echo ">>> WARP 状态:"
+          curl -sS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E 'warp|ip|colo' || true
+
+      # ============================================================
+      # 配置 IP 版本优先级（gai.conf）
+      # ============================================================
+      - name: 配置 IP 版本优先级
+        env:
+          PREFER_IPV6: ${{ inputs.prefer_ipv6 }}
+        run: |
+          echo ">>> 配置 IP 版本优先级 (prefer_ipv6=$PREFER_IPV6)..."
+
+          # 清理旧的 precedence 规则
+          sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
+
+          if [ "$PREFER_IPV6" = "true" ]; then
+            echo "precedence ::/0  100" | sudo tee -a /etc/gai.conf > /dev/null
+            echo ">>> 已设置 IPv6 优先"
+          else
+            echo "precedence ::ffff:0:0/96  100" | sudo tee -a /etc/gai.conf > /dev/null
+            echo ">>> 已设置 IPv4 优先"
+
+            # 提高 IPv6 路由 metric（内核层路由控制）
+            sudo ip -6 route replace ::/0 dev wgcf metric 1000 2>/dev/null || {
+              echo "::warning::WARP IPv6 路由不存在，跳过路由调整"
+            }
+          fi
+
+          echo ">>> gai.conf 配置:"
+          cat /etc/gai.conf
+
+          echo ">>> 验证路由:"
+          ip route show | head -5
+          echo "---"
+          ip -6 route show | head -5
+
+          echo ">>> 测试连通性:"
+          curl -4 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv4 OK" || echo "IPv4 失败"
+          curl -6 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "IPv6 失败"
+          echo ">>> 当前优先使用的出口 IP:"
+          curl -sS --max-time 5 https://v.itdog.cn 2>/dev/null || echo "获取失败"
+
+      # ============================================================
+      # 网络信息检查
+      # ============================================================
+      - name: 网络信息检查
+        run: |
+          echo "=== 网络信息 ==="
+
+          # Azure IMDS 获取区域
+          METADATA=$(curl -sS -H "Metadata:true" \
+            "http://169.254.169.254/metadata/instance?api-version=2021-02-01" \
+            --max-time 2 2>/dev/null) || true
+          if [ -n "$METADATA" ]; then
+            AZURE_LOCATION=$(echo "$METADATA" | jq -r '.compute.location // "未知"')
+            VM_SIZE=$(echo "$METADATA" | jq -r '.compute.vmSize // "未知"')
+            echo "Azure 区域: $AZURE_LOCATION"
+            echo "VM 大小: $VM_SIZE"
+          else
+            echo "Azure 区域: 不可用"
+          fi
+
+          # 获取 IPv4
+          IPV4=$(curl -sS "https://4.itdog.cn" --max-time 5 2>/dev/null) || true
+          echo "IPv4: ${IPV4:-获取失败}"
+
+          # 获取 IPv6
+          IPV6=$(curl -sS "https://6.itdog.cn" --max-time 5 2>/dev/null) || true
+          echo "IPv6: ${IPV6:-获取失败或不支持}"
+
+          # 获取 IP 归属地
+          GEO=$(curl -sS "https://myip.ipip.net/json" --max-time 5 2>/dev/null) || true
+          if [ -n "$GEO" ]; then
+            RET=$(echo "$GEO" | jq -r '.ret // "fail"')
+            if [ "$RET" = "ok" ]; then
+              LOCATION=$(echo "$GEO" | jq -r '.data.location // [] | join(" ")')
+              echo "归属地: $LOCATION"
+            else
+              echo "归属地: 获取失败"
+            fi
+          else
+            echo "归属地: 获取失败"
+          fi
 
       # ============================================================
       # 部署 OpenList（rclone list: remote 依赖本地 OpenList）
@@ -432,6 +761,7 @@ jobs:
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-one-line \
+            --progress \
             --low-level-retries=10 \
             --retries=10 \
             --retries-sleep=30s \
@@ -492,6 +822,167 @@ jobs:
 
       - name: 检出仓库
         uses: actions/checkout@v4
+
+      # ============================================================
+      # 安装 Cloudflare WARP（始终执行，提供 IPv6 连接）
+      # ============================================================
+      - name: 安装 Cloudflare WARP
+        run: |
+          set -e
+
+          echo ">>> 安装 WireGuard 依赖..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools resolvconf
+
+          echo ">>> 下载 wgcf..."
+          for i in {1..5}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+              -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64; then
+              echo "wgcf 下载成功"
+              break
+            fi
+            echo "wgcf 下载失败，重试 $i/5..."
+            sleep $((i * 5))
+          done
+          if [ ! -f wgcf ]; then
+            echo "::error::无法下载 wgcf，已重试 5 次"
+            exit 1
+          fi
+          chmod +x wgcf
+          sudo mv wgcf /usr/local/bin/wgcf
+
+          echo ">>> 注册 WARP 账户..."
+          REGISTERED=false
+          for i in {1..5}; do
+            if wgcf register --accept-tos; then
+              REGISTERED=true
+              break
+            fi
+            echo "注册失败，重试 $i/5..."
+            sleep $((i * 10))
+          done
+
+          # 检查注册是否成功
+          if [ "$REGISTERED" = false ] || [ ! -f wgcf-account.toml ]; then
+            echo "::error::WARP 注册失败，已重试 5 次"
+            exit 1
+          fi
+          echo ">>> 注册成功"
+
+          echo ">>> 生成 WireGuard 配置..."
+          wgcf generate
+
+          echo ">>> 手动拉起 WARP 接口..."
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          ADDRESSES=$(grep 'Address' wgcf-profile.conf | awk -F'= ' '{print $2}')
+          ADDR_V4=$(echo "$ADDRESSES" | awk -F', ' '{print $1}' | sed 's/,$//')
+          ADDR_V6=$(echo "$ADDRESSES" | awk -F', ' '{print $2}')
+          PEER_KEY=$(grep  'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep  'Endpoint' wgcf-profile.conf  | awk '{print $NF}')
+
+          INTERFACE=wgcf
+          sudo ip link add $INTERFACE type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
+          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+
+          # 先启用接口，再添加地址
+          sudo ip link set mtu 1280 up dev $INTERFACE
+          sudo ip addr add "$ADDR_V4" dev $INTERFACE
+
+          # IPv6 地址非空时才添加
+          if [ -n "$ADDR_V6" ]; then
+            sudo ip addr add "$ADDR_V6" dev $INTERFACE
+            sudo ip -6 route replace ::/0 dev $INTERFACE
+          else
+            echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
+          fi
+
+          echo ">>> 验证 IPv6..."
+          curl -6 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "::warning::IPv6 不通"
+
+          echo ">>> WARP 状态:"
+          curl -sS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E 'warp|ip|colo' || true
+
+      # ============================================================
+      # 配置 IP 版本优先级（gai.conf）
+      # ============================================================
+      - name: 配置 IP 版本优先级
+        env:
+          PREFER_IPV6: ${{ inputs.prefer_ipv6 }}
+        run: |
+          echo ">>> 配置 IP 版本优先级 (prefer_ipv6=$PREFER_IPV6)..."
+
+          # 清理旧的 precedence 规则
+          sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
+
+          if [ "$PREFER_IPV6" = "true" ]; then
+            echo "precedence ::/0  100" | sudo tee -a /etc/gai.conf > /dev/null
+            echo ">>> 已设置 IPv6 优先"
+          else
+            echo "precedence ::ffff:0:0/96  100" | sudo tee -a /etc/gai.conf > /dev/null
+            echo ">>> 已设置 IPv4 优先"
+
+            # 提高 IPv6 路由 metric（内核层路由控制）
+            sudo ip -6 route replace ::/0 dev wgcf metric 1000 2>/dev/null || {
+              echo "::warning::WARP IPv6 路由不存在，跳过路由调整"
+            }
+          fi
+
+          echo ">>> gai.conf 配置:"
+          cat /etc/gai.conf
+
+          echo ">>> 验证路由:"
+          ip route show | head -5
+          echo "---"
+          ip -6 route show | head -5
+
+          echo ">>> 测试连通性:"
+          curl -4 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv4 OK" || echo "IPv4 失败"
+          curl -6 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "IPv6 失败"
+          echo ">>> 当前优先使用的出口 IP:"
+          curl -sS --max-time 5 https://v.itdog.cn 2>/dev/null || echo "获取失败"
+
+      # ============================================================
+      # 网络信息检查
+      # ============================================================
+      - name: 网络信息检查
+        run: |
+          echo "=== 网络信息 ==="
+
+          # Azure IMDS 获取区域
+          METADATA=$(curl -sS -H "Metadata:true" \
+            "http://169.254.169.254/metadata/instance?api-version=2021-02-01" \
+            --max-time 2 2>/dev/null) || true
+          if [ -n "$METADATA" ]; then
+            AZURE_LOCATION=$(echo "$METADATA" | jq -r '.compute.location // "未知"')
+            VM_SIZE=$(echo "$METADATA" | jq -r '.compute.vmSize // "未知"')
+            echo "Azure 区域: $AZURE_LOCATION"
+            echo "VM 大小: $VM_SIZE"
+          else
+            echo "Azure 区域: 不可用"
+          fi
+
+          # 获取 IPv4
+          IPV4=$(curl -sS "https://4.itdog.cn" --max-time 5 2>/dev/null) || true
+          echo "IPv4: ${IPV4:-获取失败}"
+
+          # 获取 IPv6
+          IPV6=$(curl -sS "https://6.itdog.cn" --max-time 5 2>/dev/null) || true
+          echo "IPv6: ${IPV6:-获取失败或不支持}"
+
+          # 获取 IP 归属地
+          GEO=$(curl -sS "https://myip.ipip.net/json" --max-time 5 2>/dev/null) || true
+          if [ -n "$GEO" ]; then
+            RET=$(echo "$GEO" | jq -r '.ret // "fail"')
+            if [ "$RET" = "ok" ]; then
+              LOCATION=$(echo "$GEO" | jq -r '.data.location // [] | join(" ")')
+              echo "归属地: $LOCATION"
+            else
+              echo "归属地: 获取失败"
+            fi
+          else
+            echo "归属地: 获取失败"
+          fi
 
       # ============================================================
       # 部署 OpenList（rclone list: remote 依赖本地 OpenList）
@@ -645,6 +1136,7 @@ jobs:
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-one-line \
+            --progress \
             --low-level-retries=10 \
             --retries=10 \
             --retries-sleep=30s \

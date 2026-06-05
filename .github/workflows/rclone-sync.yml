@@ -475,7 +475,7 @@ jobs:
             --onedrive-chunk-size 250M \
             --low-level-retries=10 \
             --retries=5 \
-            --retries-sleep=15 \
+            --retries-sleep=15s \
             --timeout=30m
 
           echo ">>> sync 完成: $RCLONE_SOURCE -> $RCLONE_TARGET"

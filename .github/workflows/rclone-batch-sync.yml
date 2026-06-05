@@ -358,6 +358,7 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --missing-on-dst /tmp/missing.txt \
             --differ /tmp/differ.txt \
+            --min-size 1B \
             --stats 10s \
             --tpslimit 1 \
             --progress \

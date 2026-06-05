@@ -428,8 +428,14 @@ jobs:
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
+          # 清理临时文件
+          $dlDir = "${{ env.DL_DIR }}"
+          Remove-Item "$dlDir\large_urls.txt" -ErrorAction SilentlyContinue
+          Remove-Item "$dlDir\large_dl_status.txt" -ErrorAction SilentlyContinue
+          
           # 检查下载是否成功
-          if (Test-Path "${{ env.DL_DIR }}\large_dl_failed.txt") {
+          if (Test-Path "$dlDir\large_dl_failed.txt") {
+            Remove-Item "$dlDir\large_dl_failed.txt" -ErrorAction SilentlyContinue
             Write-Host "下载失败，跳过推送..."
             exit 0
           }

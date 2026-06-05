@@ -800,9 +800,25 @@ jobs:
             --max-duration 180m \
             --cutoff-mode soft \
             --timeout=5m \
-            "$RCLONE_SRC" "$RCLONE_DST"
+            "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
 
-          echo ">>> Batch ${{ matrix.batch.id }} 同步完成"
+          # 解析 rclone 输出并生成汇总
+          TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
+          ERRORS=$(grep -oP 'Errors:\s+\K[0-9]+' /tmp/rclone_output.log | tail -1)
+          CHECKS=$(grep -oP 'Checks:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
+          ELAPSED=$(grep -oP 'Elapsed time:\s+\K[^[:space:]]+' /tmp/rclone_output.log | tail -1)
+          
+          echo ""
+          echo "=========================================="
+          echo "  Batch ${{ matrix.batch.id }} 同步结果汇总"
+          echo "=========================================="
+          echo "  计划文件数: ${{ matrix.batch.count }}"
+          echo "  计划大小: $(awk "BEGIN{printf \"%.2f\", ${{ matrix.batch.bytes }} / 1024 / 1024 / 1024}") GiB"
+          echo "  传输: ${TRANSFERRED:-未知}"
+          echo "  检查: ${CHECKS:-未知}"
+          echo "  错误: ${ERRORS:-0}"
+          echo "  耗时: ${ELAPSED:-未知}"
+          echo "=========================================="
 
       - name: 上传结果
         if: always()
@@ -1201,9 +1217,24 @@ jobs:
             --max-duration 120m \
             --cutoff-mode soft \
             --timeout=5m \
-            "$RCLONE_SRC" "$RCLONE_DST"
+            "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
 
-          echo ">>> Batch ${{ inputs.batch_id }} 重跑完成"
+          # 解析 rclone 输出并生成汇总
+          TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
+          ERRORS=$(grep -oP 'Errors:\s+\K[0-9]+' /tmp/rclone_output.log | tail -1)
+          CHECKS=$(grep -oP 'Checks:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
+          ELAPSED=$(grep -oP 'Elapsed time:\s+\K[^[:space:]]+' /tmp/rclone_output.log | tail -1)
+          
+          echo ""
+          echo "=========================================="
+          echo "  Batch ${{ inputs.batch_id }} 重跑结果汇总"
+          echo "=========================================="
+          echo "  文件数: $(wc -l < "$BATCH_FILE")"
+          echo "  传输: ${TRANSFERRED:-未知}"
+          echo "  检查: ${CHECKS:-未知}"
+          echo "  错误: ${ERRORS:-0}"
+          echo "  耗时: ${ELAPSED:-未知}"
+          echo "=========================================="
 
       # ============================================================
       # 清理（停止 OpenList 进程）

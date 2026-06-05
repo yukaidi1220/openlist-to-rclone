@@ -768,6 +768,7 @@ jobs:
             --one-way \
             --size-only \
             --differ "$DIFFER_FILE" \
+            --min-size 1B \
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
 
@@ -1168,6 +1169,7 @@ jobs:
             --one-way \
             --size-only \
             --differ "$DIFFER_FILE" \
+            --min-size 1B \
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
 

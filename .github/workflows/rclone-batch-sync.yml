@@ -3,6 +3,11 @@ name: Rclone 分批同步
 on:
   workflow_dispatch:
     inputs:
+      prefer_ipv6:
+        description: '是否优先使用 IPv6'
+        required: false
+        default: 'false'
+        type: boolean
       mode:
         description: '运行模式'
         required: true
@@ -30,11 +35,6 @@ on:
       run_id:
         description: 'rerun 模式下原始 workflow run_id'
         required: false
-      prefer_ipv6:
-        description: '是否优先使用 IPv6'
-        required: false
-        default: 'false'
-        type: boolean
 
 permissions:
   contents: read
@@ -358,6 +358,8 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --missing-on-dst /tmp/missing.txt \
             --differ /tmp/differ.txt \
+            --stats 10s \
+            --tpslimit 1 \
             --progress \
             "$RCLONE_SRC" "$RCLONE_DST" 2>/dev/null || true
 
@@ -386,6 +388,8 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-only --absolute \
             --files-from-raw /tmp/transfer.txt \
+            --stats 10s \
+            --tpslimit 1 \
             --progress \
             "$RCLONE_SRC" > files_with_size.txt
 

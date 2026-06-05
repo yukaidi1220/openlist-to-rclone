@@ -6,6 +6,7 @@ on:
       json_url:
         description: 'JSON 文件链接（包含 source、targets、prefer_ipv6）'
         required: true
+        default: 'https://raw.githubusercontent.com/yukaidi1220/openlist-to-rclone/refs/heads/main/examples/sync-tasks.json'
 
 permissions:
   contents: read

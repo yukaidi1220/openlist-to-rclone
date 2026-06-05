@@ -1,6 +1,6 @@
 {
   "source": "mupan:File",
   "targets": [
-    { "path": "list:cr/qzy-hk-mupan", "prefer_ipv6": false }
+    { "path": "list:cr/qzy-hk-mupan", "prefer_ipv6": true }
   ]
 }

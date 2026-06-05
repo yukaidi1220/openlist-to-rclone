@@ -105,7 +105,8 @@ jobs:
           echo "源: $RCLONE_SRC"
           echo "目标: $RCLONE_DST"
 
-          rclone copy --dry-run \
+          # 使用 rclone check --one-way 对比差异
+          rclone check --one-way --size-only \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --missing-on-dst /tmp/missing.txt \
             --differ /tmp/differ.txt \
@@ -131,7 +132,8 @@ jobs:
           RCLONE_SRC: ${{ inputs.rclone_src }}
         run: |
           echo ">>> 获取文件大小信息..."
-          rclone lsf -R --format "ps" --separator ";" \
+          # 格式为 大小;路径（sp = size;path）
+          rclone lsf -R --format "sp" --separator ";" \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-only --absolute \
             --files-from-raw /tmp/transfer.txt \
@@ -148,7 +150,12 @@ jobs:
           echo ">>> 分批处理（每批最大 $MAX_BATCH_GB GB）..."
           bash bin/split_batches.sh files_with_size.txt "$MAX_BATCH_GB" > matrix.json
 
-          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          # 使用 delimiter 方式避免内容截断
+          DELIMITER="MATRIX_$(date +%s)_$RANDOM"
+          echo "matrix<<$DELIMITER" >> "$GITHUB_OUTPUT"
+          cat matrix.json >> "$GITHUB_OUTPUT"
+          echo "$DELIMITER" >> "$GITHUB_OUTPUT"
+
           echo "batch_count=$(jq length matrix.json)" >> "$GITHUB_OUTPUT"
 
           echo ""
@@ -156,12 +163,13 @@ jobs:
           jq -r '.[] | "Batch \(.id): \(.count) 个文件, \(.bytes / 1024 / 1024 / 1024 | . * 100 | floor / 100) GiB"' matrix.json
 
       - name: 上传 batch 文件
-        if: steps.split.outputs.batch_count != '0'
+        if: steps.split.outputs.batch_count != '' && steps.split.outputs.batch_count != '0'
         uses: actions/upload-artifact@v4
         with:
           name: rclone-batches
           path: batch_*.txt
           retention-days: 3
+          if-no-files-found: ignore
 
   # ============================================================
   # Job 2: 矩阵同步（full 模式）

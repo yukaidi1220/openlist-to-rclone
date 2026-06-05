@@ -2,7 +2,7 @@
 # split_batches.sh - 将 rclone lsf 输出的文件列表按大小分批
 # 采用 First-Fit Decreasing 算法，保证每批 ≤ MAX_BYTES
 #
-# 输入: files_with_size.txt (格式: 字节数;路径，由 rclone lsf --format ps --separator ";" 生成)
+# 输入: files_with_size.txt (格式: 大小;路径，由 rclone lsf --format sp --separator ";" 生成)
 # 输出: batch_*.txt 文件 + matrix JSON (stdout)
 #
 # 用法: bash split_batches.sh files_with_size.txt [max_gb]

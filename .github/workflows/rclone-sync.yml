@@ -471,12 +471,13 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --progress \
             --transfers=8 \
-            --checkers=16 \
+            --checkers=32 \
             --onedrive-chunk-size 250M \
             --low-level-retries=10 \
-            --retries=5 \
-            --retries-sleep=15s \
-            --timeout=30m
+            --retries=10 \
+            --retries-sleep=30s \
+            --tpslimit 1 \
+            --timeout=5m
 
           echo ">>> sync 完成: $RCLONE_SOURCE -> $RCLONE_TARGET"
 

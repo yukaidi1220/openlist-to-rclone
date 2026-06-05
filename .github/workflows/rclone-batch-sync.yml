@@ -773,7 +773,7 @@ jobs:
               rclone deletefile \
                 --config "$GITHUB_WORKSPACE/rclone.conf" \
                 "$RCLONE_DST/$file" 2>/dev/null || true
-            < "$DIFFER_FILE"
+            done < "$DIFFER_FILE"
             echo "删除完成"
           else
             echo ">>> 无需删除，所有文件已是最新"
@@ -1173,7 +1173,7 @@ jobs:
               rclone deletefile \
                 --config "$GITHUB_WORKSPACE/rclone.conf" \
                 "$RCLONE_DST/$file" 2>/dev/null || true
-            < "$DIFFER_FILE"
+            done < "$DIFFER_FILE"
             echo "删除完成"
           else
             echo ">>> 无需删除，所有文件已是最新"

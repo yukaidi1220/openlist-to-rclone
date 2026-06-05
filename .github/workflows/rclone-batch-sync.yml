@@ -33,14 +33,13 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   RCLONE_TRANSFERS: "4"
   RCLONE_CHECKERS: "16"
-  RCLONE_TPSLIMIT: "0.5"
-  RCLONE_MAX_SIZE: "8G"
-  RCLONE_MIN_SIZE: "100B"
-  RCLONE_STATS_INTERVAL: "30s"
+  RCLONE_TPSLIMIT: "1"
+  RCLONE_STATS_INTERVAL: "10s"
 
 jobs:
   # ============================================================
@@ -53,9 +52,92 @@ jobs:
     outputs:
       matrix: ${{ steps.split.outputs.matrix }}
       batch_count: ${{ steps.split.outputs.batch_count }}
+    env:
+      TOOLS_DIR: /tmp/tasks/tools
+      OPENLIST_DIR: /tmp/tasks/openlist
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
+
+      # ============================================================
+      # 部署 OpenList（rclone list: remote 依赖本地 OpenList）
+      # ============================================================
+      - name: 部署 OpenList
+        run: |
+          set -e
+          mkdir -p "${{ env.OPENLIST_DIR }}"
+          mkdir -p "${{ env.TOOLS_DIR }}"
+
+          # 下载 OpenList 二进制
+          OPENLIST_URL='https://github.com/OpenListTeam/OpenList/releases/latest/download/openlist-linux-amd64.tar.gz'
+          echo ">>> 下载 OpenList: $OPENLIST_URL"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+              "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
+              echo "OpenList 下载成功"
+              break
+            fi
+            echo "OpenList 下载失败，重试 $i/3..."
+            sleep $((i * 10))
+          done
+          if [ ! -f "${{ env.TOOLS_DIR }}/openlist.tar.gz" ]; then
+            echo "::error::无法下载 OpenList"
+            exit 1
+          fi
+
+          echo ">>> 解压 OpenList..."
+          tar -xzf "${{ env.TOOLS_DIR }}/openlist.tar.gz" -C "${{ env.OPENLIST_DIR }}"
+          chmod +x "${{ env.OPENLIST_DIR }}/openlist"
+
+          # 部署 data.db
+          mkdir -p "${{ env.OPENLIST_DIR }}/data"
+          if [ -f "$GITHUB_WORKSPACE/openlist/data/data.db" ]; then
+            cp -f "$GITHUB_WORKSPACE/openlist/data/data.db" "${{ env.OPENLIST_DIR }}/data/data.db"
+            echo "data.db 已从本仓库部署"
+          else
+            echo ">>> 本仓库无 data.db，尝试从 rclone-action 获取..."
+            curl -fsSL --retry 3 --retry-delay 5 \
+              -H "Authorization: token ${{ secrets.RCLONE_PAT }}" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/${{ github.repository_owner }}/rclone-action/contents/openlist/data/data.db" \
+              -o "${{ env.OPENLIST_DIR }}/data/data.db" || {
+              echo "::error::无法获取 data.db"
+              exit 1
+            }
+            echo "data.db 已从 rclone-action 仓库部署"
+          fi
+
+      - name: 启动 OpenList
+        run: |
+          set -e
+
+          OPENLIST_BIN="${{ env.OPENLIST_DIR }}/openlist"
+          OPENLIST_DATA="${{ env.OPENLIST_DIR }}/data"
+          OPENLIST_LOG="/tmp/tasks/openlist.log"
+
+          echo ">>> 启动 OpenList..."
+          nohup "$OPENLIST_BIN" server --data "$OPENLIST_DATA" > "$OPENLIST_LOG" 2>&1 &
+          OPENLIST_PID=$!
+          echo "OpenList PID: $OPENLIST_PID"
+          echo "$OPENLIST_PID" > /tmp/tasks/openlist.pid
+
+          echo ">>> 等待 OpenList 就绪..."
+          READY=false
+          for i in {1..15}; do
+            if curl -sS --max-time 3 http://127.0.0.1:5244/api/public/settings > /dev/null 2>&1; then
+              READY=true
+              echo "OpenList 已就绪 (等待了 $((i * 2)) 秒)"
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$READY" != "true" ]; then
+            echo "::warning::OpenList 30 秒内未就绪，查看日志:"
+            tail -30 "$OPENLIST_LOG" || true
+            echo "::error::OpenList 启动失败"
+            exit 1
+          fi
 
       - name: 安装 rclone
         run: |
@@ -171,6 +253,21 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
 
+      # ============================================================
+      # 清理（停止 OpenList 进程）
+      # ============================================================
+      - name: 停止 OpenList
+        if: always()
+        run: |
+          if [ -f /tmp/tasks/openlist.pid ]; then
+            PID=$(cat /tmp/tasks/openlist.pid)
+            echo ">>> 停止 OpenList (PID: $PID)..."
+            kill "$PID" 2>/dev/null || true
+            sleep 3
+            kill -9 "$PID" 2>/dev/null || true
+            echo "OpenList 已停止"
+          fi
+
   # ============================================================
   # Job 2: 矩阵同步（full 模式）
   # 每个 runner 处理一个 batch
@@ -180,12 +277,98 @@ jobs:
     if: inputs.mode == 'full' && needs.dispatch.outputs.batch_count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      TOOLS_DIR: /tmp/tasks/tools
+      OPENLIST_DIR: /tmp/tasks/openlist
     strategy:
       fail-fast: false
       max-parallel: 10
       matrix:
         batch: ${{ fromJSON(needs.dispatch.outputs.matrix) }}
     steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 部署 OpenList（rclone list: remote 依赖本地 OpenList）
+      # ============================================================
+      - name: 部署 OpenList
+        run: |
+          set -e
+          mkdir -p "${{ env.OPENLIST_DIR }}"
+          mkdir -p "${{ env.TOOLS_DIR }}"
+
+          # 下载 OpenList 二进制
+          OPENLIST_URL='https://github.com/OpenListTeam/OpenList/releases/latest/download/openlist-linux-amd64.tar.gz'
+          echo ">>> 下载 OpenList: $OPENLIST_URL"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+              "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
+              echo "OpenList 下载成功"
+              break
+            fi
+            echo "OpenList 下载失败，重试 $i/3..."
+            sleep $((i * 10))
+          done
+          if [ ! -f "${{ env.TOOLS_DIR }}/openlist.tar.gz" ]; then
+            echo "::error::无法下载 OpenList"
+            exit 1
+          fi
+
+          echo ">>> 解压 OpenList..."
+          tar -xzf "${{ env.TOOLS_DIR }}/openlist.tar.gz" -C "${{ env.OPENLIST_DIR }}"
+          chmod +x "${{ env.OPENLIST_DIR }}/openlist"
+
+          # 部署 data.db
+          mkdir -p "${{ env.OPENLIST_DIR }}/data"
+          if [ -f "$GITHUB_WORKSPACE/openlist/data/data.db" ]; then
+            cp -f "$GITHUB_WORKSPACE/openlist/data/data.db" "${{ env.OPENLIST_DIR }}/data/data.db"
+            echo "data.db 已从本仓库部署"
+          else
+            echo ">>> 本仓库无 data.db，尝试从 rclone-action 获取..."
+            curl -fsSL --retry 3 --retry-delay 5 \
+              -H "Authorization: token ${{ secrets.RCLONE_PAT }}" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/${{ github.repository_owner }}/rclone-action/contents/openlist/data/data.db" \
+              -o "${{ env.OPENLIST_DIR }}/data/data.db" || {
+              echo "::error::无法获取 data.db"
+              exit 1
+            }
+            echo "data.db 已从 rclone-action 仓库部署"
+          fi
+
+      - name: 启动 OpenList
+        run: |
+          set -e
+
+          OPENLIST_BIN="${{ env.OPENLIST_DIR }}/openlist"
+          OPENLIST_DATA="${{ env.OPENLIST_DIR }}/data"
+          OPENLIST_LOG="/tmp/tasks/openlist.log"
+
+          echo ">>> 启动 OpenList..."
+          nohup "$OPENLIST_BIN" server --data "$OPENLIST_DATA" > "$OPENLIST_LOG" 2>&1 &
+          OPENLIST_PID=$!
+          echo "OpenList PID: $OPENLIST_PID"
+          echo "$OPENLIST_PID" > /tmp/tasks/openlist.pid
+
+          echo ">>> 等待 OpenList 就绪..."
+          READY=false
+          for i in {1..15}; do
+            if curl -sS --max-time 3 http://127.0.0.1:5244/api/public/settings > /dev/null 2>&1; then
+              READY=true
+              echo "OpenList 已就绪 (等待了 $((i * 2)) 秒)"
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$READY" != "true" ]; then
+            echo "::warning::OpenList 30 秒内未就绪，查看日志:"
+            tail -30 "$OPENLIST_LOG" || true
+            echo "::error::OpenList 启动失败"
+            exit 1
+          fi
+
       - name: 安装 rclone
         run: |
           for i in {1..3}; do
@@ -247,8 +430,6 @@ jobs:
             --transfers "$RCLONE_TRANSFERS" \
             --checkers "$RCLONE_CHECKERS" \
             --tpslimit "$RCLONE_TPSLIMIT" \
-            --max-size "$RCLONE_MAX_SIZE" \
-            --min-size "$RCLONE_MIN_SIZE" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-one-line \
             --timeout=5m \
@@ -266,6 +447,21 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # ============================================================
+      # 清理（停止 OpenList 进程）
+      # ============================================================
+      - name: 停止 OpenList
+        if: always()
+        run: |
+          if [ -f /tmp/tasks/openlist.pid ]; then
+            PID=$(cat /tmp/tasks/openlist.pid)
+            echo ">>> 停止 OpenList (PID: $PID)..."
+            kill "$PID" 2>/dev/null || true
+            sleep 3
+            kill -9 "$PID" 2>/dev/null || true
+            echo "OpenList 已停止"
+          fi
+
   # ============================================================
   # Job 3: 单 batch 重跑（rerun 模式）
   # ============================================================
@@ -273,6 +469,9 @@ jobs:
     if: inputs.mode == 'rerun'
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      TOOLS_DIR: /tmp/tasks/tools
+      OPENLIST_DIR: /tmp/tasks/openlist
     steps:
       - name: 验证输入参数
         run: |
@@ -285,6 +484,89 @@ jobs:
             exit 1
           fi
           echo "重跑 Batch ${{ inputs.batch_id }} (来自 run ${{ inputs.run_id }})"
+
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 部署 OpenList（rclone list: remote 依赖本地 OpenList）
+      # ============================================================
+      - name: 部署 OpenList
+        run: |
+          set -e
+          mkdir -p "${{ env.OPENLIST_DIR }}"
+          mkdir -p "${{ env.TOOLS_DIR }}"
+
+          # 下载 OpenList 二进制
+          OPENLIST_URL='https://github.com/OpenListTeam/OpenList/releases/latest/download/openlist-linux-amd64.tar.gz'
+          echo ">>> 下载 OpenList: $OPENLIST_URL"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+              "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
+              echo "OpenList 下载成功"
+              break
+            fi
+            echo "OpenList 下载失败，重试 $i/3..."
+            sleep $((i * 10))
+          done
+          if [ ! -f "${{ env.TOOLS_DIR }}/openlist.tar.gz" ]; then
+            echo "::error::无法下载 OpenList"
+            exit 1
+          fi
+
+          echo ">>> 解压 OpenList..."
+          tar -xzf "${{ env.TOOLS_DIR }}/openlist.tar.gz" -C "${{ env.OPENLIST_DIR }}"
+          chmod +x "${{ env.OPENLIST_DIR }}/openlist"
+
+          # 部署 data.db
+          mkdir -p "${{ env.OPENLIST_DIR }}/data"
+          if [ -f "$GITHUB_WORKSPACE/openlist/data/data.db" ]; then
+            cp -f "$GITHUB_WORKSPACE/openlist/data/data.db" "${{ env.OPENLIST_DIR }}/data/data.db"
+            echo "data.db 已从本仓库部署"
+          else
+            echo ">>> 本仓库无 data.db，尝试从 rclone-action 获取..."
+            curl -fsSL --retry 3 --retry-delay 5 \
+              -H "Authorization: token ${{ secrets.RCLONE_PAT }}" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/${{ github.repository_owner }}/rclone-action/contents/openlist/data/data.db" \
+              -o "${{ env.OPENLIST_DIR }}/data/data.db" || {
+              echo "::error::无法获取 data.db"
+              exit 1
+            }
+            echo "data.db 已从 rclone-action 仓库部署"
+          fi
+
+      - name: 启动 OpenList
+        run: |
+          set -e
+
+          OPENLIST_BIN="${{ env.OPENLIST_DIR }}/openlist"
+          OPENLIST_DATA="${{ env.OPENLIST_DIR }}/data"
+          OPENLIST_LOG="/tmp/tasks/openlist.log"
+
+          echo ">>> 启动 OpenList..."
+          nohup "$OPENLIST_BIN" server --data "$OPENLIST_DATA" > "$OPENLIST_LOG" 2>&1 &
+          OPENLIST_PID=$!
+          echo "OpenList PID: $OPENLIST_PID"
+          echo "$OPENLIST_PID" > /tmp/tasks/openlist.pid
+
+          echo ">>> 等待 OpenList 就绪..."
+          READY=false
+          for i in {1..15}; do
+            if curl -sS --max-time 3 http://127.0.0.1:5244/api/public/settings > /dev/null 2>&1; then
+              READY=true
+              echo "OpenList 已就绪 (等待了 $((i * 2)) 秒)"
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$READY" != "true" ]; then
+            echo "::warning::OpenList 30 秒内未就绪，查看日志:"
+            tail -30 "$OPENLIST_LOG" || true
+            echo "::error::OpenList 启动失败"
+            exit 1
+          fi
 
       - name: 安装 rclone
         run: |
@@ -356,11 +638,24 @@ jobs:
             --transfers "$RCLONE_TRANSFERS" \
             --checkers "$RCLONE_CHECKERS" \
             --tpslimit "$RCLONE_TPSLIMIT" \
-            --max-size "$RCLONE_MAX_SIZE" \
-            --min-size "$RCLONE_MIN_SIZE" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-one-line \
             --timeout=5m \
             "$RCLONE_SRC" "$RCLONE_DST"
 
           echo ">>> Batch ${{ inputs.batch_id }} 重跑完成"
+
+      # ============================================================
+      # 清理（停止 OpenList 进程）
+      # ============================================================
+      - name: 停止 OpenList
+        if: always()
+        run: |
+          if [ -f /tmp/tasks/openlist.pid ]; then
+            PID=$(cat /tmp/tasks/openlist.pid)
+            echo ">>> 停止 OpenList (PID: $PID)..."
+            kill "$PID" 2>/dev/null || true
+            sleep 3
+            kill -9 "$PID" 2>/dev/null || true
+            echo "OpenList 已停止"
+          fi

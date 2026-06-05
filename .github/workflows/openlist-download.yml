@@ -308,7 +308,8 @@ jobs:
             --transfers=8 `
             --checkers=16 `
             --low-level-retries=3 `
-            --retries=3
+            --retries=3 `
+            --stats 10s
           Write-Host "推送完成"
 
   # ============================================================
@@ -457,5 +458,6 @@ jobs:
             --transfers=4 `
             --onedrive-chunk-size 250M `
             --low-level-retries=3 `
-            --retries=3
+            --retries=3 `
+            --stats 10s
           Write-Host "推送完成"

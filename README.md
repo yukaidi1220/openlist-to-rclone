@@ -8,8 +8,10 @@
 |------|--------|------|
 | OpenList 文件批量下载并推送到 rclone 云端 | `openlist-download.yml` | ✅ 已完成 |
 | 驱动总裁 ISO 镜像自动重打包 | `iso-repack.yml` | ✅ 已完成 |
+| URL 直接下载并上传到 rclone 云端 | `url-direct-download.yml` | ✅ 已完成 |
+| rclone 多目标同步 | `rclone-sync.yml` | ✅ 已完成 |
+| rclone 分批同步（大规模文件） | `rclone-batch-sync.yml` | ✅ 已完成 |
 | 自动构建 oslist | — | 🚧 TODO |
-| rclone 与 OpenList 间文件双向同步 | — | 🚧 TODO |
 
 ## 已实现功能
 
@@ -67,16 +69,221 @@ rclone 下载 ISO → 7z 解压 → 提取关键目录（PESRS/Win7/Win10 等）
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `source_path` | rclone 源路径（ISO 所在目录） | `mupan:/File/DrvCeo_XR` |
-| `target_path` | rclone 目标路径（上传目录） | `mupan:/File/DrvCeo` |
+| `target_path` | rclone 目标路径（上传目录） | `mupan:/File/DrvCeo_Mod` |
 | `drvzip_path` | 驱动包 ZIP 所在目录 | `mupan:/File/DrvCeo_Main` |
+
+### 3. URL 直接下载并上传
+
+从指定 URL 直接下载文件，支持 MD5/SHA256 校验，然后通过 rclone 上传到目标云存储。
+
+**流程：**
+
+```
+JSON 配置 → 解析文件列表 → aria2c 多线程下载 → 文件校验 → rclone 上传到云端
+```
+
+**特性：**
+
+- 支持批量下载，通过 JSON 文件配置多个下载任务
+- 支持 IPv6（可选安装 Cloudflare WARP）
+- 支持 MD5 和 SHA256 文件校验（可选）
+- 自动生成并上传 `.md5` 校验文件
+- 使用 aria2c 多线程高速下载（16 并发连接）
+- 下载和上传阶段可切换 IP 优先级（IPv6 下载，IPv4 上传）
+
+**触发方式：** 手动触发（workflow_dispatch），需提供以下参数：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `json_url` | JSON 文件链接 | — |
+| `enable_ipv6` | 是否启用 IPv6 | `yes` |
+| `rclone_path` | rclone 上传目标目录 | `mupan:/File/Origin_System` |
+
+**JSON 格式：**
+
+```json
+[
+  {
+    "url": "https://example.com/file1.iso",
+    "filename": "file1.iso",
+    "md5": "d41d8cd98f00b204e9800998ecf8427e",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "url": "https://example.com/file2.zip",
+    "filename": "file2.zip"
+  }
+]
+```
+
+### 4. rclone 多目标同步
+
+通过 JSON 配置多个同步目标，实现 rclone 源路径到多个目标路径的并行同步。
+
+**流程：**
+
+```
+JSON 配置 → 解析源和目标 → 矩阵并行 sync → 每个目标独立 Runner
+```
+
+**特性：**
+
+- 支持多目标并行同步，最多 20 个并行
+- 每个目标可独立配置 IPv6 优先级
+- 自动部署 OpenList 服务（list: remote 依赖）
+- 路径安全校验，防止注入攻击
+- 支持 IPv6（通过 Cloudflare WARP）
+- 自动配置 IP 版本优先级（gai.conf）
+
+**触发方式：** 手动触发（workflow_dispatch），需提供以下参数：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `json_url` | JSON 文件链接 | 示例链接 |
+
+**JSON 格式：**
+
+```json
+{
+  "source": "mupan:File",
+  "targets": [
+    { "path": "list:cr/qzy-hk-mupan", "prefer_ipv6": true },
+    { "path": "list:cr/qzy-cn-mupan", "prefer_ipv6": false }
+  ]
+}
+```
+
+### 5. rclone 分批同步（大规模文件）
+
+针对大规模文件（几百 GB 到 TB 级）的同步场景，通过 bin-pack 算法将文件分批，每批 ≤ 50GB，支持矩阵并行同步，单个 batch 失败可独立重跑。
+
+**流程：**
+
+```
+对比两端差异 → 获取文件列表 → bin-pack 分批 → 矩阵并行同步
+```
+
+**特性：**
+
+- First-Fit Decreasing 算法（大文件优先），保证每批 ≤ 50GB
+- 三种运行模式：完整同步、仅分批、重跑单个 batch
+- 每个 batch 独立 runner 并行处理，最多 10 个并行
+- 单个 batch 失败可独立重跑，不浪费已成功的
+- 支持自定义每批最大大小
+
+**触发方式：** 手动触发（workflow_dispatch），需提供以下参数：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `mode` | 运行模式 | `full` |
+| `rclone_src` | 源路径 | — |
+| `rclone_dst` | 目标路径 | — |
+| `max_batch_gb` | 每批最大大小（GB） | `50` |
+| `batch_id` | rerun 模式下要重跑的 batch 编号 | — |
+| `run_id` | rerun 模式下原始 workflow run_id | — |
+
+**运行模式：**
+
+| 模式 | 作用 |
+|------|------|
+| `full` | 完整流程：分批 + 同步所有 batch |
+| `dispatch` | 只运行分批，查看结果 |
+| `rerun` | 重跑指定 batch |
+
+**使用流程：**
+
+1. **首次运行**：选 `dispatch` 模式，看分批结果是否合理
+2. **确认后**：选 `full` 模式，矩阵并行同步
+3. **有失败**：记下 `run_id`，选 `rerun` 模式，输入失败的 `batch_id`
 
 ## TODO
 
 - [ ] **自动构建 oslist** — 自动化构建 oslist
-- [ ] **rclone ↔ OpenList 文件同步** — 实现双向或单向的增量文件同步
+- [ ] **优化分批算法** — 支持更智能的分批策略（考虑文件数量、传输时间等）
 
 ## 仓库依赖
 
 - **rclone 配置**：通过 `RCLONE_PAT` 从同 Owner 下的 `rclone-action` 仓库获取 `rclone.conf`
-- **运行环境**：GitHub Actions `windows-latest`（预装 7-Zip）
-- **下载工具**：aria2c（从 Motrix 项目获取）
+- **运行环境**：
+  - `windows-latest`：用于 openlist-download、iso-repack 工作流
+  - `ubuntu-latest`：用于 url-direct-download、rclone-sync、rclone-batch-sync 工作流
+- **下载工具**：
+  - aria2c（从 Motrix 项目获取）
+  - rclone（官方安装脚本）
+- **网络工具**：
+  - Cloudflare WARP（wgcf + WireGuard）用于 IPv6 支持
+- **脚本工具**：
+  - `bin/split_batches.sh`：bin-pack 分批脚本（用于 rclone-batch-sync）
+- **示例文件**：
+  - `examples/sync-tasks.json`：rclone 多目标同步配置示例
+  - `examples/download-tasks.json`：URL 直接下载配置示例
+
+## 示例文件说明
+
+### sync-tasks.json
+
+用于 `rclone-sync.yml` 工作流，配置多个同步目标：
+
+```json
+{
+  "source": "mupan:File",
+  "targets": [
+    { "path": "list:cr/qzy-hk-mupan", "prefer_ipv6": true },
+    { "path": "list:cr/qzy-cn-mupan", "prefer_ipv6": false }
+  ]
+}
+```
+
+**字段说明：**
+- `source`：rclone 源路径
+- `targets`：目标路径数组
+  - `path`：rclone 目标路径
+  - `prefer_ipv6`：是否优先使用 IPv6
+
+### download-tasks.json
+
+用于 `url-direct-download.yml` 工作流，配置多个下载任务：
+
+```json
+[
+  {
+    "url": "https://example.com/file1.iso",
+    "filename": "file1.iso",
+    "md5": "d41d8cd98f00b204e9800998ecf8427e",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "url": "https://example.com/file2.zip",
+    "filename": "file2.zip",
+    "md5": null,
+    "sha256": null
+  },
+  {
+    "url": "https://example.com/file3.exe",
+    "filename": "file3.exe"
+  }
+]
+```
+
+**字段说明：**
+- `url`：下载链接（必填）
+- `filename`：保存文件名（必填，不能包含路径分隔符）
+- `md5`：MD5 校验值（可选，支持三种写法：省略字段、`null`、具体哈希值）
+- `sha256`：SHA256 校验值（可选，支持三种写法：省略字段、`null`、具体哈希值）
+
+### split_batches.sh
+
+用于 `rclone-batch-sync.yml` 工作流，将文件列表按大小分批：
+
+**用法：**
+```bash
+bash bin/split_batches.sh files_with_size.txt [max_gb]
+```
+
+**输入：**
+- `files_with_size.txt`：格式为 `字节数;路径`（由 `rclone lsf --format ps --separator ";"` 生成）
+- `max_gb`：每批最大大小（GB），默认 50
+
+**输出：**
+- `batch_*.txt`：每个 batch 的文件路径列表
+- stdout：matrix JSON（用于 GitHub Actions 矩阵）

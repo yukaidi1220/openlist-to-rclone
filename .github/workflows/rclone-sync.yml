@@ -477,6 +477,10 @@ jobs:
             --retries=10 \
             --retries-sleep=30s \
             --tpslimit 1 \
+            --max-transfer 50G \
+            --max-duration 120m \
+            --cutoff-mode soft \
+            --stats 30s \
             --timeout=5m
 
           echo ">>> sync 完成: $RCLONE_SOURCE -> $RCLONE_TARGET"

@@ -182,7 +182,7 @@ jobs:
               rm -f "$LOCAL_FILE"
 
               echo "--- 校验: $SRC ---"
-              timeout --signal=KILL 70 rclone copy "$SRC" "$LOCAL_DIR/" --config rclone.conf --ignore-times --contimeout 30s --timeout 60s
+              timeout --signal=KILL 70 rclone copy "$SRC" "$LOCAL_DIR/" --config rclone.conf --ignore-times --contimeout 30s --timeout 60s --stats 10s
               RC=$?
 
               PASS=false

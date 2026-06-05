@@ -440,7 +440,8 @@ jobs:
             --progress \
             --onedrive-chunk-size 250M \
             --low-level-retries=3 \
-            --retries=3
+            --retries=3 \
+            --stats 10s
 
           # 上传 MD5 文件
           echo ">>> 上传 $FILENAME.md5 -> ${RCLONE_TARGET}${FILENAME}.md5"
@@ -449,6 +450,7 @@ jobs:
             --progress \
             --onedrive-chunk-size 250M \
             --low-level-retries=3 \
-            --retries=3
+            --retries=3 \
+            --stats 10s
 
           echo ">>> 上传完成"

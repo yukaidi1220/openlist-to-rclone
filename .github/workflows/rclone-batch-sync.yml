@@ -1,0 +1,358 @@
+name: Rclone 分批同步
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '运行模式'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full        # 完整流程：分批 + 同步所有 batch
+          - dispatch    # 只运行分批，查看结果
+          - rerun       # 重跑指定 batch
+      rclone_src:
+        description: '源路径（如 onedrive:path）'
+        required: true
+      rclone_dst:
+        description: '目标路径（如 webdav:path）'
+        required: true
+      max_batch_gb:
+        description: '每批最大大小（GB）'
+        required: false
+        default: '50'
+        type: number
+      batch_id:
+        description: 'rerun 模式下要重跑的 batch 编号'
+        required: false
+        type: number
+      run_id:
+        description: 'rerun 模式下原始 workflow run_id'
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  RCLONE_TRANSFERS: "4"
+  RCLONE_CHECKERS: "16"
+  RCLONE_TPSLIMIT: "0.5"
+  RCLONE_MAX_SIZE: "8G"
+  RCLONE_MIN_SIZE: "100B"
+  RCLONE_STATS_INTERVAL: "30s"
+
+jobs:
+  # ============================================================
+  # Job 1: 分批器（dispatch/full 模式）
+  # 对比两端差异 → 获取文件列表 → bin-pack → 输出 matrix
+  # ============================================================
+  dispatch:
+    if: inputs.mode != 'rerun'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+      batch_count: ${{ steps.split.outputs.batch_count }}
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 rclone
+        run: |
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+              https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
+              sudo bash /tmp/install_rclone.sh && break
+            fi
+            echo "rclone 安装失败，重试 $i/3..."
+            sleep $((i * 10))
+          done
+          if ! command -v rclone &>/dev/null; then
+            echo "::error::rclone 安装失败"
+            exit 1
+          fi
+          rclone version
+
+      - name: 获取 rclone.conf
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/rclone.conf" \
+              -o "$GITHUB_WORKSPACE/rclone.conf"; then
+              echo "rclone.conf 获取成功"
+              break
+            fi
+            echo "获取失败，重试 $i/3..."
+            sleep $((i * 5))
+          done
+          if [ ! -f "$GITHUB_WORKSPACE/rclone.conf" ]; then
+            echo "::error::无法获取 rclone.conf，请检查 RCLONE_PAT 权限或 rclone-action 仓库是否存在"
+            exit 1
+          fi
+
+      - name: 对比源和目标差异
+        id: diff
+        env:
+          RCLONE_SRC: ${{ inputs.rclone_src }}
+          RCLONE_DST: ${{ inputs.rclone_dst }}
+        run: |
+          echo ">>> 对比源和目标差异..."
+          echo "源: $RCLONE_SRC"
+          echo "目标: $RCLONE_DST"
+
+          rclone copy --dry-run \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --missing-on-dst /tmp/missing.txt \
+            --differ /tmp/differ.txt \
+            "$RCLONE_SRC" "$RCLONE_DST" 2>/dev/null || true
+
+          # 合并需要传输的文件列表
+          cat /tmp/missing.txt /tmp/differ.txt > /tmp/transfer.txt 2>/dev/null || true
+          transfer_count=$(wc -l < /tmp/transfer.txt 2>/dev/null || echo "0")
+          echo "需要同步的文件数: $transfer_count"
+
+          if [[ "$transfer_count" -eq 0 ]]; then
+            echo "无需同步！"
+            echo "batch_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "transfer_count=$transfer_count" >> "$GITHUB_OUTPUT"
+
+      - name: 获取文件大小信息
+        id: sizes
+        if: steps.diff.outputs.transfer_count != '0'
+        env:
+          RCLONE_SRC: ${{ inputs.rclone_src }}
+        run: |
+          echo ">>> 获取文件大小信息..."
+          rclone lsf -R --format "ps" --separator ";" \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --files-only --absolute \
+            --files-from-raw /tmp/transfer.txt \
+            "$RCLONE_SRC" > files_with_size.txt
+
+          echo "文件列表: $(wc -l < files_with_size.txt) 个文件"
+
+      - name: 分批处理
+        id: split
+        if: steps.diff.outputs.transfer_count != '0'
+        env:
+          MAX_BATCH_GB: ${{ inputs.max_batch_gb }}
+        run: |
+          echo ">>> 分批处理（每批最大 $MAX_BATCH_GB GB）..."
+          bash bin/split_batches.sh files_with_size.txt "$MAX_BATCH_GB" > matrix.json
+
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "batch_count=$(jq length matrix.json)" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "=== 分批结果 ==="
+          jq -r '.[] | "Batch \(.id): \(.count) 个文件, \(.bytes / 1024 / 1024 / 1024 | . * 100 | floor / 100) GiB"' matrix.json
+
+      - name: 上传 batch 文件
+        if: steps.split.outputs.batch_count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rclone-batches
+          path: batch_*.txt
+          retention-days: 3
+
+  # ============================================================
+  # Job 2: 矩阵同步（full 模式）
+  # 每个 runner 处理一个 batch
+  # ============================================================
+  sync:
+    needs: dispatch
+    if: inputs.mode == 'full' && needs.dispatch.outputs.batch_count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        batch: ${{ fromJSON(needs.dispatch.outputs.matrix) }}
+    steps:
+      - name: 安装 rclone
+        run: |
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+              https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
+              sudo bash /tmp/install_rclone.sh && break
+            fi
+            echo "rclone 安装失败，重试 $i/3..."
+            sleep $((i * 10))
+          done
+          if ! command -v rclone &>/dev/null; then
+            echo "::error::rclone 安装失败"
+            exit 1
+          fi
+          rclone version
+
+      - name: 获取 rclone.conf
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/rclone.conf" \
+              -o "$GITHUB_WORKSPACE/rclone.conf"; then
+              echo "rclone.conf 获取成功"
+              break
+            fi
+            echo "获取失败，重试 $i/3..."
+            sleep $((i * 5))
+          done
+          if [ ! -f "$GITHUB_WORKSPACE/rclone.conf" ]; then
+            echo "::error::无法获取 rclone.conf"
+            exit 1
+          fi
+
+      - name: 下载 batch 文件
+        uses: actions/download-artifact@v4
+        with:
+          name: rclone-batches
+
+      - name: 同步 batch ${{ matrix.batch.id }}
+        env:
+          RCLONE_SRC: ${{ inputs.rclone_src }}
+          RCLONE_DST: ${{ inputs.rclone_dst }}
+        run: |
+          set -e
+
+          echo "=== Batch ${{ matrix.batch.id }} ==="
+          echo "文件数: ${{ matrix.batch.count }}"
+          echo "大小: $(awk "BEGIN{printf \"%.2f\", ${{ matrix.batch.bytes }} / 1024 / 1024 / 1024}") GiB"
+          echo ""
+
+          rclone copy \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --files-from-raw "batch_${{ matrix.batch.id }}.txt" \
+            --transfers "$RCLONE_TRANSFERS" \
+            --checkers "$RCLONE_CHECKERS" \
+            --tpslimit "$RCLONE_TPSLIMIT" \
+            --max-size "$RCLONE_MAX_SIZE" \
+            --min-size "$RCLONE_MIN_SIZE" \
+            --stats "$RCLONE_STATS_INTERVAL" \
+            --stats-one-line \
+            --timeout=5m \
+            "$RCLONE_SRC" "$RCLONE_DST"
+
+          echo ">>> Batch ${{ matrix.batch.id }} 同步完成"
+
+      - name: 上传结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-result-batch-${{ matrix.batch.id }}
+          path: |
+            *.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ============================================================
+  # Job 3: 单 batch 重跑（rerun 模式）
+  # ============================================================
+  rerun:
+    if: inputs.mode == 'rerun'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: 验证输入参数
+        run: |
+          if [[ -z "${{ inputs.batch_id }}" ]]; then
+            echo "::error::rerun 模式需要 batch_id 参数"
+            exit 1
+          fi
+          if [[ -z "${{ inputs.run_id }}" ]]; then
+            echo "::error::rerun 模式需要 run_id 参数"
+            exit 1
+          fi
+          echo "重跑 Batch ${{ inputs.batch_id }} (来自 run ${{ inputs.run_id }})"
+
+      - name: 安装 rclone
+        run: |
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+              https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
+              sudo bash /tmp/install_rclone.sh && break
+            fi
+            echo "rclone 安装失败，重试 $i/3..."
+            sleep $((i * 10))
+          done
+          if ! command -v rclone &>/dev/null; then
+            echo "::error::rclone 安装失败"
+            exit 1
+          fi
+          rclone version
+
+      - name: 获取 rclone.conf
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/rclone.conf" \
+              -o "$GITHUB_WORKSPACE/rclone.conf"; then
+              echo "rclone.conf 获取成功"
+              break
+            fi
+            echo "获取失败，重试 $i/3..."
+            sleep $((i * 5))
+          done
+          if [ ! -f "$GITHUB_WORKSPACE/rclone.conf" ]; then
+            echo "::error::无法获取 rclone.conf"
+            exit 1
+          fi
+
+      - name: 下载 batch artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rclone-batches
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 同步 batch ${{ inputs.batch_id }}
+        env:
+          RCLONE_SRC: ${{ inputs.rclone_src }}
+          RCLONE_DST: ${{ inputs.rclone_dst }}
+        run: |
+          set -e
+
+          echo "=== 重跑 Batch ${{ inputs.batch_id }} ==="
+
+          # 检查 batch 文件是否存在
+          BATCH_FILE="batch_${{ inputs.batch_id }}.txt"
+          if [[ ! -f "$BATCH_FILE" ]]; then
+            echo "::error::Batch 文件 $BATCH_FILE 不存在"
+            exit 1
+          fi
+
+          echo "文件数: $(wc -l < "$BATCH_FILE")"
+          echo ""
+
+          rclone copy \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --files-from-raw "$BATCH_FILE" \
+            --transfers "$RCLONE_TRANSFERS" \
+            --checkers "$RCLONE_CHECKERS" \
+            --tpslimit "$RCLONE_TPSLIMIT" \
+            --max-size "$RCLONE_MAX_SIZE" \
+            --min-size "$RCLONE_MIN_SIZE" \
+            --stats "$RCLONE_STATS_INTERVAL" \
+            --stats-one-line \
+            --timeout=5m \
+            "$RCLONE_SRC" "$RCLONE_DST"
+
+          echo ">>> Batch ${{ inputs.batch_id }} 重跑完成"

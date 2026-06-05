@@ -432,6 +432,11 @@ jobs:
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-one-line \
+            --low-level-retries=10 \
+            --retries=10 \
+            --retries-sleep=30s \
+            --max-duration 120m \
+            --cutoff-mode soft \
             --timeout=5m \
             "$RCLONE_SRC" "$RCLONE_DST"
 
@@ -640,6 +645,11 @@ jobs:
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-one-line \
+            --low-level-retries=10 \
+            --retries=10 \
+            --retries-sleep=30s \
+            --max-duration 120m \
+            --cutoff-mode soft \
             --timeout=5m \
             "$RCLONE_SRC" "$RCLONE_DST"
 

@@ -73,8 +73,8 @@ for ((i = 0; i < batch_count; i++)); do
     total=0
     while IFS= read -r p; do
         [[ -z "$p" ]] && continue
-        # 从原始文件中精确匹配路径
-        s=$(grep -m1 -F ";$p" "$FILES_FILE" | cut -d';' -f1)
+        # 从原始文件中精确匹配路径（使用 awk 避免子串误匹配）
+        s=$(awk -F';' -v p="$p" '$2 == p {print $1; exit}' "$FILES_FILE")
         if [[ -n "$s" ]]; then
             total=$((total + s))
         fi

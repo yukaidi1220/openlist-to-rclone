@@ -1,0 +1,155 @@
+name: Rclone 多目标分批同步
+
+on:
+  workflow_dispatch:
+    inputs:
+      json_url:
+        description: 'JSON 文件链接（包含 source、targets）'
+        required: true
+        default: 'https://raw.githubusercontent.com/yukaidi1220/openlist-to-rclone/refs/heads/main/examples/sync-tasks.json'
+      max_batch_gb:
+        description: '每批最大大小（GB）'
+        required: false
+        default: '50'
+        type: number
+      max_file_gb:
+        description: '单文件最大大小（GB），超过此大小的文件将被跳过'
+        required: false
+        default: '100'
+        type: number
+      cleanup_dst:
+        description: '是否清理目的端多余文件'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # ============================================================
+  # Job 1: 解析 JSON 并构建矩阵
+  # ============================================================
+  parse-tasks:
+    runs-on: ubuntu-latest
+    outputs:
+      source: ${{ steps.validate.outputs.source }}
+      matrix: ${{ steps.validate.outputs.matrix }}
+      target-count: ${{ steps.validate.outputs.target-count }}
+    steps:
+      - name: 下载 JSON 文件
+        env:
+          JSON_URL: ${{ inputs.json_url }}
+        run: |
+          echo ">>> 下载 JSON 文件..."
+          for i in {1..5}; do
+            if curl -fsSL --connect-timeout 30 --max-time 60 --retry 3 --retry-delay 10 "$JSON_URL" -o tasks.json; then
+              echo "下载成功"
+              break
+            fi
+            echo "下载失败，重试 $i/5..."
+            sleep $((i * 5))
+          done
+
+          if [ ! -f tasks.json ]; then
+            echo "::error::无法下载 JSON 文件，已重试 5 次"
+            exit 1
+          fi
+
+          echo "JSON 文件内容:"
+          cat tasks.json
+
+      - name: 校验 JSON 并构建矩阵
+        id: validate
+        run: |
+          # 验证 JSON 格式
+          if ! jq empty tasks.json 2>/dev/null; then
+            echo "::error::JSON 格式无效"
+            exit 1
+          fi
+
+          # 校验 source 字段（必须是非空字符串）
+          SOURCE=$(jq -r '.source // empty' tasks.json)
+          if [ -z "$SOURCE" ]; then
+            echo "::error::缺少 source 字段或 source 为空"
+            exit 1
+          fi
+          echo "源路径: $SOURCE"
+
+          # 校验 targets 字段（必须是非空数组）
+          IS_ARRAY=$(jq '.targets | type == "array"' tasks.json)
+          if [ "$IS_ARRAY" != "true" ]; then
+            echo "::error::targets 字段缺失或不是数组"
+            exit 1
+          fi
+
+          TARGET_COUNT=$(jq '.targets | length' tasks.json)
+          if [ "$TARGET_COUNT" -eq 0 ]; then
+            echo "::error::targets 数组为空"
+            exit 1
+          fi
+          if [ "$TARGET_COUNT" -gt 256 ]; then
+            echo "::error::目标数量($TARGET_COUNT)超过 GitHub Actions 矩阵上限 256"
+            exit 1
+          fi
+          echo "目标数量: $TARGET_COUNT"
+
+          # 校验每个 target 必须是对象且 path 为非空字符串
+          EMPTY_TARGETS=$(jq '[.targets[] | select(. == null or .path == null or .path == "" or (.path | type) != "string")] | length' tasks.json)
+          if [ "$EMPTY_TARGETS" -gt 0 ]; then
+            echo "::error::有 $EMPTY_TARGETS 个目标缺少 path 字段或 path 不是字符串"
+            exit 1
+          fi
+
+          # 路径安全校验：检查 source 和所有 targets 不含注入字符
+          if [[ "$SOURCE" =~ [$'\n'\;\$\(\)\`] ]]; then
+            echo "::error::source 路径包含非法字符（禁止 ; \$ ( ) \` 换行）"
+            exit 1
+          fi
+
+          while IFS= read -r _target; do
+            if [[ "$_target" =~ [$'\n'\;\$\(\)\`] ]]; then
+              echo "::error::有目标路径包含非法字符（禁止 ; \$ ( ) \` 换行）"
+              exit 1
+            fi
+          done < <(jq -r '.targets[].path' tasks.json)
+
+          # 构建 matrix JSON（targets 对象数组，每个含 path + prefer_ipv6）
+          MATRIX=$(jq -c '[.targets[] | {path: .path, prefer_ipv6: (if .prefer_ipv6 == true then true else false end)}]' tasks.json)
+
+          # 输出 source
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+
+          # 使用唯一 delimiter 避免内容截断
+          DELIMITER="MATRIX_$(date +%s)_$RANDOM"
+          echo "matrix<<$DELIMITER" >> "$GITHUB_OUTPUT"
+          echo "$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "$DELIMITER" >> "$GITHUB_OUTPUT"
+
+          echo "target-count=$TARGET_COUNT" >> "$GITHUB_OUTPUT"
+
+          echo "Matrix 输出:"
+          echo "$MATRIX" | jq '.'
+
+  # ============================================================
+  # Job 2: 矩阵并行调用 rclone-batch-sync.yml（每个 target 一个 workflow）
+  # ============================================================
+  sync:
+    needs: parse-tasks
+    if: ${{ needs.parse-tasks.outputs.target-count != '0' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        target: ${{ fromJSON(needs.parse-tasks.outputs.matrix) }}
+    uses: ./.github/workflows/rclone-batch-sync.yml
+    with:
+      prefer_ipv6: ${{ matrix.target.prefer_ipv6 }}
+      mode: 'full'
+      rclone_src: ${{ needs.parse-tasks.outputs.source }}
+      rclone_dst: ${{ matrix.target.path }}
+      max_batch_gb: ${{ inputs.max_batch_gb }}
+      max_file_gb: ${{ inputs.max_file_gb }}
+      cleanup_dst: ${{ inputs.cleanup_dst }}
+    secrets: inherit

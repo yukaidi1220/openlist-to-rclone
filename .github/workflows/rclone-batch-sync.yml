@@ -28,6 +28,11 @@ on:
         required: false
         default: '50'
         type: number
+      max_file_gb:
+        description: '单文件最大大小（GB），超过此大小的文件将被跳过'
+        required: false
+        default: '100'
+        type: number
       batch_id:
         description: 'rerun 模式下要重跑的 batch 编号'
         required: false
@@ -348,10 +353,12 @@ jobs:
         env:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
+          MAX_FILE_GB: ${{ inputs.max_file_gb }}
         run: |
           echo ">>> 对比源和目标差异..."
           echo "源: $RCLONE_SRC"
           echo "目标: $RCLONE_DST"
+          echo "单文件最大: ${MAX_FILE_GB} GB"
 
           # 使用 rclone check --one-way 对比差异
           rclone check --one-way --size-only \
@@ -359,6 +366,7 @@ jobs:
             --missing-on-dst /tmp/missing.txt \
             --differ /tmp/differ.txt \
             --min-size 1B \
+            --max-size "${MAX_FILE_GB}G" \
             --stats 10s \
             --tpslimit 1 \
             --progress \
@@ -382,6 +390,7 @@ jobs:
         if: steps.diff.outputs.transfer_count != '0'
         env:
           RCLONE_SRC: ${{ inputs.rclone_src }}
+          MAX_FILE_GB: ${{ inputs.max_file_gb }}
         run: |
           echo ">>> 获取文件大小信息..."
           # 格式为 大小;路径（sp = size;path）
@@ -389,6 +398,7 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-only --absolute \
             --files-from-raw /tmp/transfer.txt \
+            --max-size "${MAX_FILE_GB}G" \
             --stats 10s \
             --tpslimit 1 \
             --progress \

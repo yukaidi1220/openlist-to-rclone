@@ -1121,12 +1121,14 @@ jobs:
         env:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
+          MAX_FILE_GB: ${{ inputs.max_file_gb }}
         run: |
           set -eo pipefail
 
           echo ">>> 使用 rclone sync 清理目的端多余文件..."
           echo "源: $RCLONE_SRC"
           echo "目标: $RCLONE_DST"
+          echo "单文件最大: ${MAX_FILE_GB} GB"
 
           # rclone sync 会删除目的端多余文件，保持两端一致
           rclone sync "$RCLONE_SRC" "$RCLONE_DST" \
@@ -1141,7 +1143,8 @@ jobs:
             --retries=10 \
             --retries-sleep=30s \
             --max-duration 60m \
-            --timeout=5m
+            --timeout=5m \
+            --max-size "${MAX_FILE_GB}G"
 
           echo ""
           echo "=========================================="

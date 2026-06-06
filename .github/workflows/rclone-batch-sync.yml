@@ -887,8 +887,8 @@ jobs:
   # Job 3: 清理目的端多余文件（full 模式，可选）
   # ============================================================
   cleanup:
-    needs: sync
-    if: inputs.mode == 'full' && inputs.cleanup_dst == true
+    needs: [dispatch, sync]
+    if: ${{ !failure() && !cancelled() && inputs.mode == 'full' && inputs.cleanup_dst == true }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:

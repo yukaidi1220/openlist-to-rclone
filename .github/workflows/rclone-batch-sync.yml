@@ -40,6 +40,26 @@ on:
       run_id:
         description: 'rerun 模式下原始 workflow run_id'
         required: false
+  workflow_call:
+    inputs:
+      prefer_ipv6:
+        type: boolean
+        default: false
+      mode:
+        type: string
+        default: 'full'
+      rclone_src:
+        type: string
+        required: true
+      rclone_dst:
+        type: string
+        required: true
+      max_batch_gb:
+        type: number
+        default: 50
+      max_file_gb:
+        type: number
+        default: 100
 
 permissions:
   contents: read

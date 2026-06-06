@@ -11,6 +11,7 @@
 | URL 直接下载并上传到 rclone 云端 | `url-direct-download.yml` | ✅ 已完成 |
 | rclone 多目标同步 | `rclone-sync.yml` | ✅ 已完成 |
 | rclone 分批同步（大规模文件） | `rclone-batch-sync.yml` | ✅ 已完成 |
+| rclone 多目标分批同步 | `rclone-multi-batch-sync.yml` | ✅ 已完成 |
 | 自动构建 oslist | — | 🚧 TODO |
 
 ## 已实现功能
@@ -153,6 +154,8 @@ JSON 配置 → 解析源和目标 → 矩阵并行 sync → 每个目标独立 
 }
 ```
 
+> **注意**：此工作流使用 `rclone sync` 进行全量同步，适合文件数量较少的场景。大规模文件同步请使用 `rclone-multi-batch-sync.yml`。
+
 ### 5. rclone 分批同步（大规模文件）
 
 针对大规模文件（几百 GB 到 TB 级）的同步场景，通过 bin-pack 算法将文件分批，每批 ≤ 50GB，支持矩阵并行同步，单个 batch 失败可独立重跑。
@@ -160,7 +163,7 @@ JSON 配置 → 解析源和目标 → 矩阵并行 sync → 每个目标独立 
 **流程：**
 
 ```
-对比两端差异 → 获取文件列表 → bin-pack 分批 → 矩阵并行同步
+对比两端差异 → 获取文件列表 → bin-pack 分批 → 矩阵并行同步 → 可选清理目的端多余文件
 ```
 
 **特性：**
@@ -169,9 +172,16 @@ JSON 配置 → 解析源和目标 → 矩阵并行 sync → 每个目标独立 
 - 三种运行模式：完整同步、仅分批、重跑单个 batch
 - 每个 batch 独立 runner 并行处理，最多 10 个并行
 - 单个 batch 失败可独立重跑，不浪费已成功的
-- 支持自定义每批最大大小
+- 支持自定义每批最大大小和单文件最大大小
+- 可选清理目的端多余文件（使用 `rclone sync`）
+- 支持 `workflow_call`，可被其他工作流调用
 
-**触发方式：** 手动触发（workflow_dispatch），需提供以下参数：
+**触发方式：**
+
+1. **手动触发**（workflow_dispatch）
+2. **被其他工作流调用**（workflow_call）
+
+**手动触发参数：**
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
@@ -179,6 +189,8 @@ JSON 配置 → 解析源和目标 → 矩阵并行 sync → 每个目标独立 
 | `rclone_src` | 源路径 | — |
 | `rclone_dst` | 目标路径 | — |
 | `max_batch_gb` | 每批最大大小（GB） | `50` |
+| `max_file_gb` | 单文件最大大小（GB） | `100` |
+| `cleanup_dst` | 是否清理目的端多余文件 | `false` |
 | `batch_id` | rerun 模式下要重跑的 batch 编号 | — |
 | `run_id` | rerun 模式下原始 workflow run_id | — |
 
@@ -186,7 +198,7 @@ JSON 配置 → 解析源和目标 → 矩阵并行 sync → 每个目标独立 
 
 | 模式 | 作用 |
 |------|------|
-| `full` | 完整流程：分批 + 同步所有 batch |
+| `full` | 完整流程：分批 + 同步所有 batch + 可选清理 |
 | `dispatch` | 只运行分批，查看结果 |
 | `rerun` | 重跑指定 batch |
 
@@ -195,6 +207,64 @@ JSON 配置 → 解析源和目标 → 矩阵并行 sync → 每个目标独立 
 1. **首次运行**：选 `dispatch` 模式，看分批结果是否合理
 2. **确认后**：选 `full` 模式，矩阵并行同步
 3. **有失败**：记下 `run_id`，选 `rerun` 模式，输入失败的 `batch_id`
+
+---
+
+### 6. rclone 多目标分批同步
+
+结合多目标和分批同步的能力，从 JSON 配置读取多个目标，每个目标独立进行分批同步。
+
+**流程：**
+
+```
+JSON 配置 → 解析多目标 → 每个目标调用 rclone-batch-sync.yml → 矩阵并行
+```
+
+**特性：**
+
+- 支持多目标独立配置（批量大小、文件大小限制、清理策略）
+- 每个目标独立进行分批同步
+- 路径安全校验，防止注入攻击
+- 配置统一在 JSON 中管理
+
+**触发方式：** 手动触发（workflow_dispatch），需提供以下参数：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `json_url` | JSON 文件链接 | 示例链接 |
+
+**JSON 格式：**
+
+```json
+{
+  "source": "mupan:File",
+  "targets": [
+    {
+      "path": "list:cr/qzy-hk-mupan",
+      "prefer_ipv6": true,
+      "max_batch_gb": 50,
+      "max_file_gb": 100,
+      "cleanup_dst": true
+    },
+    {
+      "path": "webdav:backup",
+      "prefer_ipv6": false,
+      "max_batch_gb": 30,
+      "max_file_gb": 50,
+      "cleanup_dst": false
+    }
+  ]
+}
+```
+
+**JSON 字段说明：**
+- `source`：rclone 源路径
+- `targets`：目标路径数组
+  - `path`：rclone 目标路径
+  - `prefer_ipv6`：是否优先使用 IPv6
+  - `max_batch_gb`：每批最大大小（GB），默认 50
+  - `max_file_gb`：单文件最大大小（GB），默认 100
+  - `cleanup_dst`：是否清理目的端多余文件，默认 false
 
 ## TODO
 
@@ -222,14 +292,26 @@ JSON 配置 → 解析源和目标 → 矩阵并行 sync → 每个目标独立 
 
 ### sync-tasks.json
 
-用于 `rclone-sync.yml` 工作流，配置多个同步目标：
+用于 `rclone-sync.yml` 和 `rclone-multi-batch-sync.yml` 工作流，配置多个同步目标：
 
 ```json
 {
   "source": "mupan:File",
   "targets": [
-    { "path": "list:cr/qzy-hk-mupan", "prefer_ipv6": true },
-    { "path": "list:cr/qzy-cn-mupan", "prefer_ipv6": false }
+    {
+      "path": "list:cr/qzy-hk-mupan",
+      "prefer_ipv6": true,
+      "max_batch_gb": 50,
+      "max_file_gb": 100,
+      "cleanup_dst": true
+    },
+    {
+      "path": "list:cr/qzy-cn-mupan",
+      "prefer_ipv6": false,
+      "max_batch_gb": 30,
+      "max_file_gb": 50,
+      "cleanup_dst": false
+    }
   ]
 }
 ```
@@ -239,6 +321,9 @@ JSON 配置 → 解析源和目标 → 矩阵并行 sync → 每个目标独立 
 - `targets`：目标路径数组
   - `path`：rclone 目标路径
   - `prefer_ipv6`：是否优先使用 IPv6
+  - `max_batch_gb`：每批最大大小（GB），默认 50（仅 `rclone-multi-batch-sync.yml` 使用）
+  - `max_file_gb`：单文件最大大小（GB），默认 100（仅 `rclone-multi-batch-sync.yml` 使用）
+  - `cleanup_dst`：是否清理目的端多余文件，默认 false（仅 `rclone-multi-batch-sync.yml` 使用）
 
 ### download-tasks.json
 

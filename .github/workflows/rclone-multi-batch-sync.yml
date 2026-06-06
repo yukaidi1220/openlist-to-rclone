@@ -7,21 +7,6 @@ on:
         description: 'JSON 文件链接（包含 source、targets）'
         required: true
         default: 'https://raw.githubusercontent.com/yukaidi1220/openlist-to-rclone/refs/heads/main/examples/sync-tasks.json'
-      max_batch_gb:
-        description: '每批最大大小（GB）'
-        required: false
-        default: '50'
-        type: number
-      max_file_gb:
-        description: '单文件最大大小（GB），超过此大小的文件将被跳过'
-        required: false
-        default: '100'
-        type: number
-      cleanup_dst:
-        description: '是否清理目的端多余文件'
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -115,8 +100,14 @@ jobs:
             fi
           done < <(jq -r '.targets[].path' tasks.json)
 
-          # 构建 matrix JSON（targets 对象数组，每个含 path + prefer_ipv6）
-          MATRIX=$(jq -c '[.targets[] | {path: .path, prefer_ipv6: (if .prefer_ipv6 == true then true else false end)}]' tasks.json)
+          # 构建 matrix JSON（targets 对象数组，包含完整配置）
+          MATRIX=$(jq -c '[.targets[] | {
+            path: .path,
+            prefer_ipv6: (if .prefer_ipv6 == true then true else false end),
+            max_batch_gb: (.max_batch_gb // 50),
+            max_file_gb: (.max_file_gb // 100),
+            cleanup_dst: (.cleanup_dst // false)
+          }]' tasks.json)
 
           # 输出 source
           echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
@@ -149,7 +140,7 @@ jobs:
       mode: 'full'
       rclone_src: ${{ needs.parse-tasks.outputs.source }}
       rclone_dst: ${{ matrix.target.path }}
-      max_batch_gb: ${{ inputs.max_batch_gb }}
-      max_file_gb: ${{ inputs.max_file_gb }}
-      cleanup_dst: ${{ inputs.cleanup_dst }}
+      max_batch_gb: ${{ matrix.target.max_batch_gb }}
+      max_file_gb: ${{ matrix.target.max_file_gb }}
+      cleanup_dst: ${{ matrix.target.cleanup_dst }}
     secrets: inherit

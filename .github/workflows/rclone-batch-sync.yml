@@ -1124,65 +1124,33 @@ jobs:
         run: |
           set -eo pipefail
 
-          echo ">>> 清理目的端多余文件..."
+          echo ">>> 使用 rclone sync 清理目的端多余文件..."
           echo "源: $RCLONE_SRC"
           echo "目标: $RCLONE_DST"
 
-          # 列出源端文件
-          echo ">>> 列出源端文件..."
-          rclone lsf -R --config "$GITHUB_WORKSPACE/rclone.conf" \
-            --stats 10s --tpslimit 1 \
-            "$RCLONE_SRC" > /tmp/src_files.txt
-          src_count=$(wc -l < /tmp/src_files.txt)
-          echo "源端文件数: $src_count"
-
-          # 列出目的端文件
-          echo ">>> 列出目的端文件..."
-          rclone lsf -R --config "$GITHUB_WORKSPACE/rclone.conf" \
-            --stats 10s --tpslimit 1 \
-            "$RCLONE_DST" > /tmp/dst_files.txt
-          dst_count=$(wc -l < /tmp/dst_files.txt)
-          echo "目的端文件数: $dst_count"
-
-          # 找出目的端多余文件
-          comm -13 <(sort /tmp/src_files.txt) <(sort /tmp/dst_files.txt) > /tmp/extra_files.txt
-          extra_count=$(wc -l < /tmp/extra_files.txt)
+          # rclone sync 会删除目的端多余文件，保持两端一致
+          rclone sync "$RCLONE_SRC" "$RCLONE_DST" \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --transfers "$RCLONE_TRANSFERS" \
+            --checkers "$RCLONE_CHECKERS" \
+            --tpslimit "$RCLONE_TPSLIMIT" \
+            --stats "$RCLONE_STATS_INTERVAL" \
+            --stats-one-line \
+            --progress \
+            --low-level-retries=10 \
+            --retries=10 \
+            --retries-sleep=30s \
+            --max-duration 60m \
+            --timeout=5m
 
           echo ""
           echo "=========================================="
-          echo "  目的端清理结果"
+          echo "  目的端清理完成"
           echo "=========================================="
-          echo "  源端文件数: $src_count"
-          echo "  目的端文件数: $dst_count"
-          echo "  多余文件数: $extra_count"
+          echo "  源: $RCLONE_SRC"
+          echo "  目标: $RCLONE_DST"
+          echo "  rclone sync 已删除目的端多余文件"
           echo "=========================================="
-
-          if [[ $extra_count -gt 0 ]]; then
-            echo ""
-            echo "前 20 个多余文件:"
-            head -20 /tmp/extra_files.txt
-            echo ""
-            echo ">>> 删除多余文件..."
-            rclone delete --files-from /tmp/extra_files.txt \
-              --config "$GITHUB_WORKSPACE/rclone.conf" \
-              --stats 10s --tpslimit 1 \
-              "$RCLONE_DST"
-            echo "删除完成"
-          else
-            echo "目的端没有多余文件"
-          fi
-
-      - name: 上传清理结果
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cleanup-result
-          path: |
-            /tmp/extra_files.txt
-            /tmp/src_files.txt
-            /tmp/dst_files.txt
-          retention-days: 7
-          if-no-files-found: ignore
 
       # ============================================================
       # 清理（停止 OpenList 进程）

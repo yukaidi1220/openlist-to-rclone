@@ -33,6 +33,11 @@ on:
         required: false
         default: '100'
         type: number
+      cleanup_dst:
+        description: '是否清理目的端多余文件'
+        required: false
+        default: false
+        type: boolean
       batch_id:
         description: 'rerun 模式下要重跑的 batch 编号'
         required: false
@@ -60,6 +65,9 @@ on:
       max_file_gb:
         type: number
         default: 100
+      cleanup_dst:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -876,7 +884,323 @@ jobs:
           fi
 
   # ============================================================
-  # Job 3: 单 batch 重跑（rerun 模式）
+  # Job 3: 清理目的端多余文件（full 模式，可选）
+  # ============================================================
+  cleanup:
+    needs: sync
+    if: inputs.mode == 'full' && inputs.cleanup_dst == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TOOLS_DIR: /tmp/tasks/tools
+      OPENLIST_DIR: /tmp/tasks/openlist
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 安装 Cloudflare WARP
+      # ============================================================
+      - name: 安装 Cloudflare WARP
+        run: |
+          set -e
+
+          echo ">>> 安装 WireGuard 依赖..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools resolvconf
+
+          echo ">>> 下载 wgcf..."
+          for i in {1..5}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+              -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64; then
+              echo "wgcf 下载成功"
+              break
+            fi
+            echo "wgcf 下载失败，重试 $i/5..."
+            sleep $((i * 5))
+          done
+          if [ ! -f wgcf ]; then
+            echo "::error::无法下载 wgcf，已重试 5 次"
+            exit 1
+          fi
+          chmod +x wgcf
+          sudo mv wgcf /usr/local/bin/wgcf
+
+          echo ">>> 注册 WARP 账户..."
+          REGISTERED=false
+          for i in {1..5}; do
+            if wgcf register --accept-tos; then
+              REGISTERED=true
+              break
+            fi
+            echo "注册失败，重试 $i/5..."
+            sleep $((i * 10))
+          done
+
+          if [ "$REGISTERED" = false ] || [ ! -f wgcf-account.toml ]; then
+            echo "::error::WARP 注册失败，已重试 5 次"
+            exit 1
+          fi
+          echo ">>> 注册成功"
+
+          echo ">>> 生成 WireGuard 配置..."
+          wgcf generate
+
+          echo ">>> 手动拉起 WARP 接口..."
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          ADDRESSES=$(grep 'Address' wgcf-profile.conf | awk -F'= ' '{print $2}')
+          ADDR_V4=$(echo "$ADDRESSES" | awk -F', ' '{print $1}' | sed 's/,$//')
+          ADDR_V6=$(echo "$ADDRESSES" | awk -F', ' '{print $2}')
+          PEER_KEY=$(grep  'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep  'Endpoint' wgcf-profile.conf  | awk '{print $NF}')
+
+          INTERFACE=wgcf
+          sudo ip link add $INTERFACE type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
+          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+
+          sudo ip link set mtu 1280 up dev $INTERFACE
+          sudo ip addr add "$ADDR_V4" dev $INTERFACE
+
+          if [ -n "$ADDR_V6" ]; then
+            sudo ip addr add "$ADDR_V6" dev $INTERFACE
+            sudo ip -6 route replace ::/0 dev $INTERFACE
+          else
+            echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
+          fi
+
+          echo ">>> 验证 IPv6..."
+          curl -6 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "::warning::IPv6 不通"
+
+          echo ">>> WARP 状态:"
+          curl -sS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E 'warp|ip|colo' || true
+
+      # ============================================================
+      # 配置 IP 版本优先级
+      # ============================================================
+      - name: 配置 IP 版本优先级
+        env:
+          PREFER_IPV6: ${{ inputs.prefer_ipv6 }}
+        run: |
+          echo ">>> 配置 IP 版本优先级 (prefer_ipv6=$PREFER_IPV6)..."
+
+          sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
+
+          if [ "$PREFER_IPV6" = "true" ]; then
+            echo "precedence ::/0  100" | sudo tee -a /etc/gai.conf > /dev/null
+            echo ">>> 已设置 IPv6 优先"
+          else
+            echo "precedence ::ffff:0:0/96  100" | sudo tee -a /etc/gai.conf > /dev/null
+            echo ">>> 已设置 IPv4 优先"
+
+            sudo ip -6 route replace ::/0 dev wgcf metric 1000 2>/dev/null || {
+              echo "::warning::WARP IPv6 路由不存在，跳过路由调整"
+            }
+          fi
+
+          echo ">>> gai.conf 配置:"
+          cat /etc/gai.conf
+
+      # ============================================================
+      # 部署 OpenList
+      # ============================================================
+      - name: 部署 OpenList
+        run: |
+          set -e
+          mkdir -p "${{ env.OPENLIST_DIR }}"
+          mkdir -p "${{ env.TOOLS_DIR }}"
+
+          OPENLIST_URL='https://github.com/OpenListTeam/OpenList/releases/latest/download/openlist-linux-amd64.tar.gz'
+          echo ">>> 下载 OpenList: $OPENLIST_URL"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+              "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
+              echo "OpenList 下载成功"
+              break
+            fi
+            echo "OpenList 下载失败，重试 $i/3..."
+            sleep $((i * 10))
+          done
+          if [ ! -f "${{ env.TOOLS_DIR }}/openlist.tar.gz" ]; then
+            echo "::error::无法下载 OpenList"
+            exit 1
+          fi
+
+          echo ">>> 解压 OpenList..."
+          tar -xzf "${{ env.TOOLS_DIR }}/openlist.tar.gz" -C "${{ env.OPENLIST_DIR }}"
+          chmod +x "${{ env.OPENLIST_DIR }}/openlist"
+
+          mkdir -p "${{ env.OPENLIST_DIR }}/data"
+          if [ -f "$GITHUB_WORKSPACE/openlist/data/data.db" ]; then
+            cp -f "$GITHUB_WORKSPACE/openlist/data/data.db" "${{ env.OPENLIST_DIR }}/data/data.db"
+            echo "data.db 已从本仓库部署"
+          else
+            echo ">>> 本仓库无 data.db，尝试从 rclone-action 获取..."
+            curl -fsSL --retry 3 --retry-delay 5 \
+              -H "Authorization: token ${{ secrets.RCLONE_PAT }}" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/${{ github.repository_owner }}/rclone-action/contents/openlist/data/data.db" \
+              -o "${{ env.OPENLIST_DIR }}/data/data.db" || {
+              echo "::error::无法获取 data.db"
+              exit 1
+            }
+            echo "data.db 已从 rclone-action 仓库部署"
+          fi
+
+      - name: 启动 OpenList
+        run: |
+          set -e
+
+          OPENLIST_BIN="${{ env.OPENLIST_DIR }}/openlist"
+          OPENLIST_DATA="${{ env.OPENLIST_DIR }}/data"
+          OPENLIST_LOG="/tmp/tasks/openlist.log"
+
+          echo ">>> 启动 OpenList..."
+          nohup "$OPENLIST_BIN" server --data "$OPENLIST_DATA" > "$OPENLIST_LOG" 2>&1 &
+          OPENLIST_PID=$!
+          echo "OpenList PID: $OPENLIST_PID"
+          echo "$OPENLIST_PID" > /tmp/tasks/openlist.pid
+
+          echo ">>> 等待 OpenList 就绪..."
+          READY=false
+          for i in {1..15}; do
+            if curl -sS --max-time 3 http://127.0.0.1:5244/api/public/settings > /dev/null 2>&1; then
+              READY=true
+              echo "OpenList 已就绪 (等待了 $((i * 2)) 秒)"
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$READY" != "true" ]; then
+            echo "::warning::OpenList 30 秒内未就绪，查看日志:"
+            tail -30 "$OPENLIST_LOG" || true
+            echo "::error::OpenList 启动失败"
+            exit 1
+          fi
+
+      - name: 安装 rclone
+        run: |
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+              https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
+              sudo bash /tmp/install_rclone.sh && break
+            fi
+            echo "rclone 安装失败，重试 $i/3..."
+            sleep $((i * 10))
+          done
+          if ! command -v rclone &>/dev/null; then
+            echo "::error::rclone 安装失败"
+            exit 1
+          fi
+          rclone version
+
+      - name: 获取 rclone.conf
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/rclone.conf" \
+              -o "$GITHUB_WORKSPACE/rclone.conf"; then
+              echo "rclone.conf 获取成功"
+              break
+            fi
+            echo "获取失败，重试 $i/3..."
+            sleep $((i * 5))
+          done
+          if [ ! -f "$GITHUB_WORKSPACE/rclone.conf" ]; then
+            echo "::error::无法获取 rclone.conf"
+            exit 1
+          fi
+
+      - name: 清理目的端多余文件
+        env:
+          RCLONE_SRC: ${{ inputs.rclone_src }}
+          RCLONE_DST: ${{ inputs.rclone_dst }}
+        run: |
+          set -eo pipefail
+
+          echo ">>> 清理目的端多余文件..."
+          echo "源: $RCLONE_SRC"
+          echo "目标: $RCLONE_DST"
+
+          # 列出源端文件
+          echo ">>> 列出源端文件..."
+          rclone lsf -R --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --stats 10s --tpslimit 1 \
+            "$RCLONE_SRC" > /tmp/src_files.txt
+          src_count=$(wc -l < /tmp/src_files.txt)
+          echo "源端文件数: $src_count"
+
+          # 列出目的端文件
+          echo ">>> 列出目的端文件..."
+          rclone lsf -R --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --stats 10s --tpslimit 1 \
+            "$RCLONE_DST" > /tmp/dst_files.txt
+          dst_count=$(wc -l < /tmp/dst_files.txt)
+          echo "目的端文件数: $dst_count"
+
+          # 找出目的端多余文件
+          comm -13 <(sort /tmp/src_files.txt) <(sort /tmp/dst_files.txt) > /tmp/extra_files.txt
+          extra_count=$(wc -l < /tmp/extra_files.txt)
+
+          echo ""
+          echo "=========================================="
+          echo "  目的端清理结果"
+          echo "=========================================="
+          echo "  源端文件数: $src_count"
+          echo "  目的端文件数: $dst_count"
+          echo "  多余文件数: $extra_count"
+          echo "=========================================="
+
+          if [[ $extra_count -gt 0 ]]; then
+            echo ""
+            echo "前 20 个多余文件:"
+            head -20 /tmp/extra_files.txt
+            echo ""
+            echo ">>> 删除多余文件..."
+            rclone delete --files-from /tmp/extra_files.txt \
+              --config "$GITHUB_WORKSPACE/rclone.conf" \
+              --stats 10s --tpslimit 1 \
+              "$RCLONE_DST"
+            echo "删除完成"
+          else
+            echo "目的端没有多余文件"
+          fi
+
+      - name: 上传清理结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleanup-result
+          path: |
+            /tmp/extra_files.txt
+            /tmp/src_files.txt
+            /tmp/dst_files.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # ============================================================
+      # 清理（停止 OpenList 进程）
+      # ============================================================
+      - name: 停止 OpenList
+        if: always()
+        run: |
+          if [ -f /tmp/tasks/openlist.pid ]; then
+            PID=$(cat /tmp/tasks/openlist.pid)
+            echo ">>> 停止 OpenList (PID: $PID)..."
+            kill "$PID" 2>/dev/null || true
+            sleep 3
+            kill -9 "$PID" 2>/dev/null || true
+            echo "OpenList 已停止"
+          fi
+
+  # ============================================================
+  # Job 4: 单 batch 重跑（rerun 模式）
   # ============================================================
   rerun:
     if: inputs.mode == 'rerun'

@@ -1,6 +1,16 @@
 {
   "source": "mupan:File",
   "targets": [
-    { "path": "list:cr/qzy-hk-mupan", "prefer_ipv6": true }
-  ]
+    {
+      "path": "list:cr/qzy-hk-mupan",
+      "prefer_ipv6": true,
+      "max_batch_gb": 50,
+      "max_file_gb": 100
+    },
+    {
+      "path": "webdav:backup",
+      "prefer_ipv6": false
+    }
+  ],
+  "cleanup_dst": false
 }

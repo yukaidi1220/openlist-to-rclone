@@ -836,7 +836,7 @@ jobs:
             --max-duration 180m \
             --cutoff-mode soft \
             --timeout=5m \
-            "$RCLONE_SRC" "$RCLONE_DST" --log-file /tmp/rclone_output.log
+            "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | stdbuf -oL tee /tmp/rclone_output.log
 
           # 解析 rclone 输出并生成汇总
           TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
@@ -1539,7 +1539,7 @@ jobs:
             --max-duration 120m \
             --cutoff-mode soft \
             --timeout=5m \
-            "$RCLONE_SRC" "$RCLONE_DST" --log-file /tmp/rclone_output.log
+            "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | stdbuf -oL tee /tmp/rclone_output.log
 
           # 解析 rclone 输出并生成汇总
           TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)

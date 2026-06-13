@@ -426,7 +426,6 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-only --absolute \
             --files-from-raw /tmp/transfer.txt \
-            --max-size "${MAX_FILE_GB}G" \
             --stats 10s \
             --tpslimit 1 \
             --progress \

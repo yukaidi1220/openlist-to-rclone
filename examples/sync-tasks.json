@@ -7,13 +7,6 @@
       "max_batch_gb": 50,
       "max_file_gb": 100,
       "cleanup_dst": true
-    },
-    {
-      "path": "webdav:backup",
-      "prefer_ipv6": false,
-      "max_batch_gb": 30,
-      "max_file_gb": 50,
-      "cleanup_dst": false
     }
   ]
 }

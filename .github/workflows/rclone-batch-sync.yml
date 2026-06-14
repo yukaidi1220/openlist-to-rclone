@@ -836,7 +836,7 @@ jobs:
             --max-duration 180m \
             --cutoff-mode soft \
             --timeout=5m \
-            "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
+            "$RCLONE_SRC" "$RCLONE_DST"
           echo ">>> 同步结束"
 
           # 解析 rclone 输出并生成汇总
@@ -1540,7 +1540,7 @@ jobs:
             --max-duration 120m \
             --cutoff-mode soft \
             --timeout=5m \
-            "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
+            "$RCLONE_SRC" "$RCLONE_DST"
           echo ">>> 同步结束"
 
           # 解析 rclone 输出并生成汇总

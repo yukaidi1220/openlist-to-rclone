@@ -923,9 +923,10 @@ jobs:
           if [[ -s "$DIFFER_FILE" ]]; then
             echo ">>> 删除 $(wc -l < "$DIFFER_FILE") 个需要更新的文件..."
             while IFS= read -r file; do
+              echo "  删除: $RCLONE_DST/$file"
               rclone deletefile \
                 --config "$GITHUB_WORKSPACE/rclone.conf" \
-                "$RCLONE_DST/$file" 2>/dev/null || true
+                "$RCLONE_DST/$file" || echo "::warning::删除失败: $file"
             done < "$DIFFER_FILE"
             echo "删除完成"
           else
@@ -1709,9 +1710,10 @@ jobs:
           if [[ -s "$DIFFER_FILE" ]]; then
             echo ">>> 删除 $(wc -l < "$DIFFER_FILE") 个需要更新的文件..."
             while IFS= read -r file; do
+              echo "  删除: $RCLONE_DST/$file"
               rclone deletefile \
                 --config "$GITHUB_WORKSPACE/rclone.conf" \
-                "$RCLONE_DST/$file" 2>/dev/null || true
+                "$RCLONE_DST/$file" || echo "::warning::删除失败: $file"
             done < "$DIFFER_FILE"
             echo "删除完成"
           else

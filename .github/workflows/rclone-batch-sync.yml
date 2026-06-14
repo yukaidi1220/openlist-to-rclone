@@ -258,6 +258,13 @@ jobs:
             echo "归属地: 获取失败"
           fi
 
+          # DNS 出口 IP 检查（Akamai whoami）
+          echo "=== DNS 出口 IP ==="
+          for i in 1 2 3 4 5; do
+            echo "--- 第 ${i} 次 ---"
+            dig +short whoami.ds.akahelp.net TXT || true
+          done
+
       # ============================================================
       # 部署 OpenList（rclone list: remote 依赖本地 OpenList）
       # ============================================================
@@ -659,6 +666,13 @@ jobs:
           else
             echo "归属地: 获取失败"
           fi
+
+          # DNS 出口 IP 检查（Akamai whoami）
+          echo "=== DNS 出口 IP ==="
+          for i in 1 2 3 4 5; do
+            echo "--- 第 ${i} 次 ---"
+            dig +short whoami.ds.akahelp.net TXT || true
+          done
 
       # ============================================================
       # 部署 OpenList（rclone list: remote 依赖本地 OpenList）
@@ -1361,6 +1375,13 @@ jobs:
           else
             echo "归属地: 获取失败"
           fi
+
+          # DNS 出口 IP 检查（Akamai whoami）
+          echo "=== DNS 出口 IP ==="
+          for i in 1 2 3 4 5; do
+            echo "--- 第 ${i} 次 ---"
+            dig +short whoami.ds.akahelp.net TXT || true
+          done
 
       # ============================================================
       # 部署 OpenList（rclone list: remote 依赖本地 OpenList）

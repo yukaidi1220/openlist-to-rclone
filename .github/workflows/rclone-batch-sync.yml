@@ -458,9 +458,7 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-only --absolute \
             --files-from-raw /tmp/transfer.txt \
-            --stats 10s \
             --tpslimit 1 \
-            --progress \
             "$RCLONE_SRC" > files_with_size.txt
 
           echo "文件列表: $(wc -l < files_with_size.txt) 个文件"
@@ -653,8 +651,6 @@ jobs:
             printf '%s\n' \
               "nameserver 2606:4700:4700::1111" \
               "nameserver 2606:4700:4700::1001" \
-              "nameserver 1.1.1.1" \
-              "nameserver 1.0.0.1" | \
               sudo tee /etc/resolv.conf > /dev/null
             echo ">>> 已将 DNS 服务器换为 Cloudflare IPv6"
           else

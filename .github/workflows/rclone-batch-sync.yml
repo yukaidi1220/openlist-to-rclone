@@ -448,13 +448,23 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-only --absolute \
             --files-from-raw /tmp/transfer.txt \
-            --max-size "${MAX_FILE_GB}G" \
             --stats 10s \
             --tpslimit 1 \
             --progress \
             "$RCLONE_SRC" > files_with_size.txt
 
           echo "文件列表: $(wc -l < files_with_size.txt) 个文件"
+
+          # 二次过滤：移除超过单文件大小限制的文件（rclone check --max-size 可能遗漏）
+          MAX_FILE_BYTES=$((MAX_FILE_GB * 1024 * 1024 * 1024))
+          BEFORE=$(wc -l < files_with_size.txt)
+          awk -F';' -v max="$MAX_FILE_BYTES" '$1 <= max' files_with_size.txt > files_with_size_filtered.txt
+          mv files_with_size_filtered.txt files_with_size.txt
+          AFTER=$(wc -l < files_with_size.txt)
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "::warning::过滤掉 $((BEFORE - AFTER)) 个超过 ${MAX_FILE_GB}GB 的文件"
+          fi
+          echo "过滤后文件列表: $AFTER 个文件"
 
       - name: 分批处理
         id: split
@@ -850,7 +860,6 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --one-way \
             --size-only \
-            --max-size "${MAX_FILE_GB}G" \
             --differ "$DIFFER_FILE" \
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
@@ -873,7 +882,6 @@ jobs:
           rclone copy \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
-            --max-size "${MAX_FILE_GB}G" \
             --transfers "$RCLONE_TRANSFERS" \
             --checkers "$RCLONE_CHECKERS" \
             --tpslimit "$RCLONE_TPSLIMIT" \
@@ -1598,7 +1606,6 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --one-way \
             --size-only \
-            --max-size "${MAX_FILE_GB}G" \
             --differ "$DIFFER_FILE" \
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
@@ -1621,7 +1628,6 @@ jobs:
           rclone copy \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
-            --max-size "${MAX_FILE_GB}G" \
             --transfers "$RCLONE_TRANSFERS" \
             --checkers "$RCLONE_CHECKERS" \
             --tpslimit "$RCLONE_TPSLIMIT" \

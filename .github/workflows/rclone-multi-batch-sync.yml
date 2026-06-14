@@ -3,10 +3,18 @@ name: Rclone 多目标分批同步
 on:
   workflow_dispatch:
     inputs:
-      json_url:
-        description: 'JSON 文件链接（包含 source、targets）'
+      json_preset:
+        description: '预置 JSON 配置'
         required: true
-        default: 'https://raw.githubusercontent.com/yukaidi1220/openlist-to-rclone/refs/heads/main/examples/sync-tasks.json'
+        default: 'mupan-sync.json'
+        type: choice
+        options:
+          - mupan-sync.json
+          - zhipin-sync.json
+      json_url:
+        description: '自定义 JSON 链接（非空时覆盖上方预置选择）'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -23,9 +31,24 @@ jobs:
       matrix: ${{ steps.validate.outputs.matrix }}
       target-count: ${{ steps.validate.outputs.target-count }}
     steps:
+      - name: 解析 JSON 来源
+        id: resolve-url
+        env:
+          JSON_PRESET: ${{ inputs.json_preset }}
+          JSON_URL_CUSTOM: ${{ inputs.json_url }}
+        run: |
+          if [ -n "$JSON_URL_CUSTOM" ]; then
+            JSON_URL="$JSON_URL_CUSTOM"
+            echo ">>> 使用自定义 URL: $JSON_URL"
+          else
+            JSON_URL="https://raw.githubusercontent.com/${{ github.repository }}/refs/heads/main/examples/${JSON_PRESET}"
+            echo ">>> 使用预置配置: ${JSON_PRESET}"
+          fi
+          echo "json_url=$JSON_URL" >> "$GITHUB_OUTPUT"
+
       - name: 下载 JSON 文件
         env:
-          JSON_URL: ${{ inputs.json_url }}
+          JSON_URL: ${{ steps.resolve-url.outputs.json_url }}
         run: |
           echo ">>> 下载 JSON 文件..."
           for i in {1..5}; do

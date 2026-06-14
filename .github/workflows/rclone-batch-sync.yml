@@ -229,14 +229,7 @@ jobs:
           echo ">>> 当前优先使用的出口 IP:"
           curl -sS --max-time 5 https://v.itdog.cn 2>/dev/null || echo "获取失败"
           echo ">>> 地址选择验证 (google.com):"
-          python3 -c "
-import socket
-results = socket.getaddrinfo('google.com', 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
-families = [r[0] for r in results[:4]]
-for i, (family, _, _, _, addr) in enumerate(results[:4]):
-    proto = 'IPv6' if family == socket.AF_INET6 else 'IPv4'
-    print(f'  {i+1}. {proto}: {addr[0]}')
-"
+          python3 -c "import socket; results=socket.getaddrinfo('google.com',443,socket.AF_UNSPEC,socket.SOCK_STREAM); [print(f'  {i+1}. {\"IPv6\" if r[0]==socket.AF_INET6 else \"IPv4\"}: {r[4][0]}') for i,r in enumerate(results[:4])]"
 
       # ============================================================
       # 网络信息检查
@@ -661,14 +654,7 @@ for i, (family, _, _, _, addr) in enumerate(results[:4]):
           echo ">>> 当前优先使用的出口 IP:"
           curl -sS --max-time 5 https://v.itdog.cn 2>/dev/null || echo "获取失败"
           echo ">>> 地址选择验证 (google.com):"
-          python3 -c "
-import socket
-results = socket.getaddrinfo('google.com', 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
-families = [r[0] for r in results[:4]]
-for i, (family, _, _, _, addr) in enumerate(results[:4]):
-    proto = 'IPv6' if family == socket.AF_INET6 else 'IPv4'
-    print(f'  {i+1}. {proto}: {addr[0]}')
-"
+          python3 -c "import socket; results=socket.getaddrinfo('google.com',443,socket.AF_UNSPEC,socket.SOCK_STREAM); [print(f'  {i+1}. {\"IPv6\" if r[0]==socket.AF_INET6 else \"IPv4\"}: {r[4][0]}') for i,r in enumerate(results[:4])]"
 
       # ============================================================
       # 网络信息检查
@@ -1408,14 +1394,7 @@ for i, (family, _, _, _, addr) in enumerate(results[:4]):
           echo ">>> 当前优先使用的出口 IP:"
           curl -sS --max-time 5 https://v.itdog.cn 2>/dev/null || echo "获取失败"
           echo ">>> 地址选择验证 (google.com):"
-          python3 -c "
-import socket
-results = socket.getaddrinfo('google.com', 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
-families = [r[0] for r in results[:4]]
-for i, (family, _, _, _, addr) in enumerate(results[:4]):
-    proto = 'IPv6' if family == socket.AF_INET6 else 'IPv4'
-    print(f'  {i+1}. {proto}: {addr[0]}')
-"
+          python3 -c "import socket; results=socket.getaddrinfo('google.com',443,socket.AF_UNSPEC,socket.SOCK_STREAM); [print(f'  {i+1}. {\"IPv6\" if r[0]==socket.AF_INET6 else \"IPv4\"}: {r[4][0]}') for i,r in enumerate(results[:4])]"
 
       # ============================================================
       # 网络信息检查

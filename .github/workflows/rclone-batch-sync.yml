@@ -945,7 +945,6 @@ jobs:
             --low-level-retries=10 \
             --retries=10 \
             --retries-sleep=30s \
-            --max-duration 180m \
             --cutoff-mode soft \
             --timeout=5m \
             "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
@@ -1287,7 +1286,6 @@ jobs:
             --low-level-retries=10 \
             --retries=10 \
             --retries-sleep=30s \
-            --max-duration 60m \
             --timeout=5m \
             --max-size "${MAX_FILE_GB}G"
 
@@ -1733,7 +1731,6 @@ jobs:
             --low-level-retries=10 \
             --retries=10 \
             --retries-sleep=30s \
-            --max-duration 120m \
             --cutoff-mode soft \
             --timeout=5m \
             "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log

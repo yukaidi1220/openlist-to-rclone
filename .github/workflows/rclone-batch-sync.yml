@@ -467,7 +467,10 @@ jobs:
 
           # 二次过滤：移除超过单文件大小限制的文件（rclone check --max-size 可能遗漏）
           MAX_FILE_BYTES=$((MAX_FILE_GB * 1024 * 1024 * 1024))
+          echo ">>> 单文件大小限制: ${MAX_FILE_GB}GB (${MAX_FILE_BYTES} bytes)"
           BEFORE=$(wc -l < files_with_size.txt)
+          # 显示超过限制的文件
+          awk -F';' -v max="$MAX_FILE_BYTES" '$1 > max {printf "  跳过: %s (%s bytes, %.2f GiB)\n", $2, $1, $1/1024/1024/1024}' files_with_size.txt || true
           awk -F';' -v max="$MAX_FILE_BYTES" '$1 <= max' files_with_size.txt > files_with_size_filtered.txt
           mv files_with_size_filtered.txt files_with_size.txt
           AFTER=$(wc -l < files_with_size.txt)

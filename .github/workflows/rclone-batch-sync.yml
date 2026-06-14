@@ -1143,8 +1143,7 @@ jobs:
             --checkers "$RCLONE_CHECKERS" \
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
-            --stats-one-line \
-            --progress \
+            --stats-log-level NOTICE \
             --low-level-retries=10 \
             --retries=10 \
             --retries-sleep=30s \

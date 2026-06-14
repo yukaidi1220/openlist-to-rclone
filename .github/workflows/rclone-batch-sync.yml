@@ -506,7 +506,7 @@ jobs:
         if: steps.split.outputs.batch_count != '' && steps.split.outputs.batch_count != '0'
         uses: actions/upload-artifact@v4
         with:
-          name: rclone-batches
+          name: rclone-batches-${{ github.run_id }}
           path: batch_*.txt
           retention-days: 3
           if-no-files-found: ignore
@@ -865,7 +865,7 @@ jobs:
       - name: 下载 batch 文件
         uses: actions/download-artifact@v4
         with:
-          name: rclone-batches
+          name: rclone-batches-${{ github.run_id }}
 
       - name: 同步 batch ${{ matrix.batch.id }}
         env:
@@ -1635,7 +1635,7 @@ jobs:
       - name: 下载 batch artifact
         uses: actions/download-artifact@v4
         with:
-          name: rclone-batches
+          name: rclone-batches-${{ github.run_id }}
           run-id: ${{ inputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 

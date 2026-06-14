@@ -189,11 +189,24 @@ jobs:
           # 清理旧的 precedence 规则
           sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
 
+          # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
-            echo "precedence ::/0  100" | sudo tee -a /etc/gai.conf > /dev/null
+            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
+precedence ::1/128       50
+precedence ::/0          40
+precedence 2002::/16     30
+precedence ::/96         20
+precedence ::ffff:0:0/96 1
+GAI
             echo ">>> 已设置 IPv6 优先"
           else
-            echo "precedence ::ffff:0:0/96  100" | sudo tee -a /etc/gai.conf > /dev/null
+            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
+precedence ::1/128       50
+precedence ::/0          10
+precedence 2002::/16     30
+precedence ::/96         20
+precedence ::ffff:0:0/96 100
+GAI
             echo ">>> 已设置 IPv4 优先"
 
             # 提高 IPv6 路由 metric（内核层路由控制）
@@ -215,6 +228,15 @@ jobs:
           curl -6 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "IPv6 失败"
           echo ">>> 当前优先使用的出口 IP:"
           curl -sS --max-time 5 https://v.itdog.cn 2>/dev/null || echo "获取失败"
+          echo ">>> 地址选择验证 (google.com):"
+          python3 -c "
+import socket
+results = socket.getaddrinfo('google.com', 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+families = [r[0] for r in results[:4]]
+for i, (family, _, _, _, addr) in enumerate(results[:4]):
+    proto = 'IPv6' if family == socket.AF_INET6 else 'IPv4'
+    print(f'  {i+1}. {proto}: {addr[0]}')
+"
 
       # ============================================================
       # 网络信息检查
@@ -433,6 +455,7 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-only --absolute \
             --files-from-raw /tmp/transfer.txt \
+            --max-size "${MAX_FILE_GB}G" \
             --stats 10s \
             --tpslimit 1 \
             --progress \
@@ -598,11 +621,24 @@ jobs:
           # 清理旧的 precedence 规则
           sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
 
+          # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
-            echo "precedence ::/0  100" | sudo tee -a /etc/gai.conf > /dev/null
+            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
+precedence ::1/128       50
+precedence ::/0          40
+precedence 2002::/16     30
+precedence ::/96         20
+precedence ::ffff:0:0/96 1
+GAI
             echo ">>> 已设置 IPv6 优先"
           else
-            echo "precedence ::ffff:0:0/96  100" | sudo tee -a /etc/gai.conf > /dev/null
+            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
+precedence ::1/128       50
+precedence ::/0          10
+precedence 2002::/16     30
+precedence ::/96         20
+precedence ::ffff:0:0/96 100
+GAI
             echo ">>> 已设置 IPv4 优先"
 
             # 提高 IPv6 路由 metric（内核层路由控制）
@@ -624,6 +660,15 @@ jobs:
           curl -6 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "IPv6 失败"
           echo ">>> 当前优先使用的出口 IP:"
           curl -sS --max-time 5 https://v.itdog.cn 2>/dev/null || echo "获取失败"
+          echo ">>> 地址选择验证 (google.com):"
+          python3 -c "
+import socket
+results = socket.getaddrinfo('google.com', 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+families = [r[0] for r in results[:4]]
+for i, (family, _, _, _, addr) in enumerate(results[:4]):
+    proto = 'IPv6' if family == socket.AF_INET6 else 'IPv4'
+    print(f'  {i+1}. {proto}: {addr[0]}')
+"
 
       # ============================================================
       # 网络信息检查
@@ -801,6 +846,7 @@ jobs:
         env:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
+          MAX_FILE_GB: ${{ inputs.max_file_gb }}
         run: |
           set -eo pipefail
 
@@ -818,6 +864,7 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --one-way \
             --size-only \
+            --max-size "${MAX_FILE_GB}G" \
             --differ "$DIFFER_FILE" \
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
@@ -840,6 +887,7 @@ jobs:
           rclone copy \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
+            --max-size "${MAX_FILE_GB}G" \
             --transfers "$RCLONE_TRANSFERS" \
             --checkers "$RCLONE_CHECKERS" \
             --tpslimit "$RCLONE_TPSLIMIT" \
@@ -1006,11 +1054,24 @@ jobs:
 
           sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
 
+          # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
-            echo "precedence ::/0  100" | sudo tee -a /etc/gai.conf > /dev/null
+            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
+precedence ::1/128       50
+precedence ::/0          40
+precedence 2002::/16     30
+precedence ::/96         20
+precedence ::ffff:0:0/96 1
+GAI
             echo ">>> 已设置 IPv6 优先"
           else
-            echo "precedence ::ffff:0:0/96  100" | sudo tee -a /etc/gai.conf > /dev/null
+            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
+precedence ::1/128       50
+precedence ::/0          10
+precedence 2002::/16     30
+precedence ::/96         20
+precedence ::ffff:0:0/96 100
+GAI
             echo ">>> 已设置 IPv4 优先"
 
             sudo ip -6 route replace ::/0 dev wgcf metric 1000 2>/dev/null || {
@@ -1307,11 +1368,24 @@ jobs:
           # 清理旧的 precedence 规则
           sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
 
+          # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
-            echo "precedence ::/0  100" | sudo tee -a /etc/gai.conf > /dev/null
+            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
+precedence ::1/128       50
+precedence ::/0          40
+precedence 2002::/16     30
+precedence ::/96         20
+precedence ::ffff:0:0/96 1
+GAI
             echo ">>> 已设置 IPv6 优先"
           else
-            echo "precedence ::ffff:0:0/96  100" | sudo tee -a /etc/gai.conf > /dev/null
+            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
+precedence ::1/128       50
+precedence ::/0          10
+precedence 2002::/16     30
+precedence ::/96         20
+precedence ::ffff:0:0/96 100
+GAI
             echo ">>> 已设置 IPv4 优先"
 
             # 提高 IPv6 路由 metric（内核层路由控制）
@@ -1333,6 +1407,15 @@ jobs:
           curl -6 -sS --max-time 5 https://ip.sb 2>/dev/null && echo "IPv6 OK" || echo "IPv6 失败"
           echo ">>> 当前优先使用的出口 IP:"
           curl -sS --max-time 5 https://v.itdog.cn 2>/dev/null || echo "获取失败"
+          echo ">>> 地址选择验证 (google.com):"
+          python3 -c "
+import socket
+results = socket.getaddrinfo('google.com', 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+families = [r[0] for r in results[:4]]
+for i, (family, _, _, _, addr) in enumerate(results[:4]):
+    proto = 'IPv6' if family == socket.AF_INET6 else 'IPv4'
+    print(f'  {i+1}. {proto}: {addr[0]}')
+"
 
       # ============================================================
       # 网络信息检查
@@ -1512,6 +1595,7 @@ jobs:
         env:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
+          MAX_FILE_GB: ${{ inputs.max_file_gb }}
         run: |
           set -eo pipefail
 
@@ -1535,6 +1619,7 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --one-way \
             --size-only \
+            --max-size "${MAX_FILE_GB}G" \
             --differ "$DIFFER_FILE" \
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
@@ -1557,6 +1642,7 @@ jobs:
           rclone copy \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
+            --max-size "${MAX_FILE_GB}G" \
             --transfers "$RCLONE_TRANSFERS" \
             --checkers "$RCLONE_CHECKERS" \
             --tpslimit "$RCLONE_TPSLIMIT" \

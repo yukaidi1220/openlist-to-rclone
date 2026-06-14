@@ -191,22 +191,22 @@ jobs:
 
           # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
-            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
-precedence ::1/128       50
-precedence ::/0          40
-precedence 2002::/16     30
-precedence ::/96         20
-precedence ::ffff:0:0/96 1
-GAI
+            printf '%s\n' \
+              "precedence ::1/128       50" \
+              "precedence ::/0          40" \
+              "precedence 2002::/16     30" \
+              "precedence ::/96         20" \
+              "precedence ::ffff:0:0/96 1" | \
+              sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv6 优先"
           else
-            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
-precedence ::1/128       50
-precedence ::/0          10
-precedence 2002::/16     30
-precedence ::/96         20
-precedence ::ffff:0:0/96 100
-GAI
+            printf '%s\n' \
+              "precedence ::1/128       50" \
+              "precedence ::/0          10" \
+              "precedence 2002::/16     30" \
+              "precedence ::/96         20" \
+              "precedence ::ffff:0:0/96 100" | \
+              sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv4 优先"
 
             # 提高 IPv6 路由 metric（内核层路由控制）
@@ -623,22 +623,22 @@ for i, (family, _, _, _, addr) in enumerate(results[:4]):
 
           # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
-            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
-precedence ::1/128       50
-precedence ::/0          40
-precedence 2002::/16     30
-precedence ::/96         20
-precedence ::ffff:0:0/96 1
-GAI
+            printf '%s\n' \
+              "precedence ::1/128       50" \
+              "precedence ::/0          40" \
+              "precedence 2002::/16     30" \
+              "precedence ::/96         20" \
+              "precedence ::ffff:0:0/96 1" | \
+              sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv6 优先"
           else
-            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
-precedence ::1/128       50
-precedence ::/0          10
-precedence 2002::/16     30
-precedence ::/96         20
-precedence ::ffff:0:0/96 100
-GAI
+            printf '%s\n' \
+              "precedence ::1/128       50" \
+              "precedence ::/0          10" \
+              "precedence 2002::/16     30" \
+              "precedence ::/96         20" \
+              "precedence ::ffff:0:0/96 100" | \
+              sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv4 优先"
 
             # 提高 IPv6 路由 metric（内核层路由控制）
@@ -1056,22 +1056,22 @@ for i, (family, _, _, _, addr) in enumerate(results[:4]):
 
           # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
-            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
-precedence ::1/128       50
-precedence ::/0          40
-precedence 2002::/16     30
-precedence ::/96         20
-precedence ::ffff:0:0/96 1
-GAI
+            printf '%s\n' \
+              "precedence ::1/128       50" \
+              "precedence ::/0          40" \
+              "precedence 2002::/16     30" \
+              "precedence ::/96         20" \
+              "precedence ::ffff:0:0/96 1" | \
+              sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv6 优先"
           else
-            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
-precedence ::1/128       50
-precedence ::/0          10
-precedence 2002::/16     30
-precedence ::/96         20
-precedence ::ffff:0:0/96 100
-GAI
+            printf '%s\n' \
+              "precedence ::1/128       50" \
+              "precedence ::/0          10" \
+              "precedence 2002::/16     30" \
+              "precedence ::/96         20" \
+              "precedence ::ffff:0:0/96 100" | \
+              sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv4 优先"
 
             sudo ip -6 route replace ::/0 dev wgcf metric 1000 2>/dev/null || {
@@ -1370,22 +1370,22 @@ GAI
 
           # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
-            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
-precedence ::1/128       50
-precedence ::/0          40
-precedence 2002::/16     30
-precedence ::/96         20
-precedence ::ffff:0:0/96 1
-GAI
+            printf '%s\n' \
+              "precedence ::1/128       50" \
+              "precedence ::/0          40" \
+              "precedence 2002::/16     30" \
+              "precedence ::/96         20" \
+              "precedence ::ffff:0:0/96 1" | \
+              sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv6 优先"
           else
-            sudo tee -a /etc/gai.conf > /dev/null <<'GAI'
-precedence ::1/128       50
-precedence ::/0          10
-precedence 2002::/16     30
-precedence ::/96         20
-precedence ::ffff:0:0/96 100
-GAI
+            printf '%s\n' \
+              "precedence ::1/128       50" \
+              "precedence ::/0          10" \
+              "precedence 2002::/16     30" \
+              "precedence ::/96         20" \
+              "precedence ::ffff:0:0/96 100" | \
+              sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv4 优先"
 
             # 提高 IPv6 路由 metric（内核层路由控制）

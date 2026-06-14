@@ -843,11 +843,11 @@ jobs:
           echo ">>> 同步结束 (exit: $COPY_EXIT)"
 
           # 解析 rclone 输出并生成汇总
-          TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
-          ERRORS=$(grep -oP 'Errors:\s+\K[0-9]+' /tmp/rclone_output.log | tail -1)
-          CHECKS=$(grep -oP 'Checks:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
-          ELAPSED=$(grep -oP 'Elapsed time:\s+\K[^[:space:]]+' /tmp/rclone_output.log | tail -1)
-          
+          TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1 || true)
+          ERRORS=$(grep -oP 'Errors:\s+\K[0-9]+' /tmp/rclone_output.log | tail -1 || true)
+          CHECKS=$(grep -oP 'Checks:\s+\K[^,]+' /tmp/rclone_output.log | tail -1 || true)
+          ELAPSED=$(grep -oP 'Elapsed time:\s+\K[^[:space:]]+' /tmp/rclone_output.log | tail -1 || true)
+
           echo ""
           echo "=========================================="
           echo "  Batch ${{ matrix.batch.id }} 同步结果汇总"
@@ -1553,11 +1553,11 @@ jobs:
           echo ">>> 同步结束 (exit: $COPY_EXIT)"
 
           # 解析 rclone 输出并生成汇总
-          TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
-          ERRORS=$(grep -oP 'Errors:\s+\K[0-9]+' /tmp/rclone_output.log | tail -1)
-          CHECKS=$(grep -oP 'Checks:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
-          ELAPSED=$(grep -oP 'Elapsed time:\s+\K[^[:space:]]+' /tmp/rclone_output.log | tail -1)
-          
+          TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1 || true)
+          ERRORS=$(grep -oP 'Errors:\s+\K[0-9]+' /tmp/rclone_output.log | tail -1 || true)
+          CHECKS=$(grep -oP 'Checks:\s+\K[^,]+' /tmp/rclone_output.log | tail -1 || true)
+          ELAPSED=$(grep -oP 'Elapsed time:\s+\K[^[:space:]]+' /tmp/rclone_output.log | tail -1 || true)
+
           echo ""
           echo "=========================================="
           echo "  Batch ${{ inputs.batch_id }} 重跑结果汇总"

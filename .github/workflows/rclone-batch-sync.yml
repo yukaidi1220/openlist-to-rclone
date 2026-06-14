@@ -829,14 +829,13 @@ jobs:
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-one-line \
-            --progress \
             --low-level-retries=10 \
             --retries=10 \
             --retries-sleep=30s \
             --max-duration 180m \
             --cutoff-mode soft \
             --timeout=5m \
-            "$RCLONE_SRC" "$RCLONE_DST" | tee /tmp/rclone_output.log
+            "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
 
           # 解析 rclone 输出并生成汇总
           TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
@@ -1532,14 +1531,13 @@ jobs:
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-one-line \
-            --progress \
             --low-level-retries=10 \
             --retries=10 \
             --retries-sleep=30s \
             --max-duration 120m \
             --cutoff-mode soft \
             --timeout=5m \
-            "$RCLONE_SRC" "$RCLONE_DST" | tee /tmp/rclone_output.log
+            "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
 
           # 解析 rclone 输出并生成汇总
           TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)

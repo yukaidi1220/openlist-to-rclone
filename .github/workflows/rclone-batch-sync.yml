@@ -201,12 +201,11 @@ jobs:
             echo ">>> 已设置 IPv6 优先"
 
             # 将 DNS 服务器换为 IPv6，使 DNS 查询也走 WARP 隧道
-            sudo cp /etc/resolv.conf /etc/resolv.conf.bak
+            sudo systemctl stop systemd-resolved 2>/dev/null || true
+            sudo rm -f /etc/resolv.conf
             printf '%s\n' \
               "nameserver 2606:4700:4700::1111" \
-              "nameserver 2606:4700:4700::1001" \
-              "nameserver 1.1.1.1" \
-              "nameserver 1.0.0.1" | \
+              "nameserver 2606:4700:4700::1001" | \
               sudo tee /etc/resolv.conf > /dev/null
             echo ">>> 已将 DNS 服务器换为 Cloudflare IPv6"
           else
@@ -1079,12 +1078,11 @@ jobs:
             echo ">>> 已设置 IPv6 优先"
 
             # 将 DNS 服务器换为 IPv6，使 DNS 查询也走 WARP 隧道
-            sudo cp /etc/resolv.conf /etc/resolv.conf.bak
+            sudo systemctl stop systemd-resolved 2>/dev/null || true
+            sudo rm -f /etc/resolv.conf
             printf '%s\n' \
               "nameserver 2606:4700:4700::1111" \
-              "nameserver 2606:4700:4700::1001" \
-              "nameserver 1.1.1.1" \
-              "nameserver 1.0.0.1" | \
+              "nameserver 2606:4700:4700::1001" | \
               sudo tee /etc/resolv.conf > /dev/null
             echo ">>> 已将 DNS 服务器换为 Cloudflare IPv6"
           else
@@ -1403,12 +1401,11 @@ jobs:
             echo ">>> 已设置 IPv6 优先"
 
             # 将 DNS 服务器换为 IPv6，使 DNS 查询也走 WARP 隧道
-            sudo cp /etc/resolv.conf /etc/resolv.conf.bak
+            sudo systemctl stop systemd-resolved 2>/dev/null || true
+            sudo rm -f /etc/resolv.conf
             printf '%s\n' \
               "nameserver 2606:4700:4700::1111" \
-              "nameserver 2606:4700:4700::1001" \
-              "nameserver 1.1.1.1" \
-              "nameserver 1.0.0.1" | \
+              "nameserver 2606:4700:4700::1001" | \
               sudo tee /etc/resolv.conf > /dev/null
             echo ">>> 已将 DNS 服务器换为 Cloudflare IPv6"
           else

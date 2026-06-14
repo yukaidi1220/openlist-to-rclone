@@ -830,6 +830,7 @@ jobs:
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-one-line \
+            --progress \
             --low-level-retries=10 \
             --retries=10 \
             --retries-sleep=30s \
@@ -1534,6 +1535,7 @@ jobs:
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-one-line \
+            --progress \
             --low-level-retries=10 \
             --retries=10 \
             --retries-sleep=30s \

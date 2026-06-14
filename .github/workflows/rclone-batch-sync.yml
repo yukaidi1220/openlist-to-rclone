@@ -821,6 +821,7 @@ jobs:
             echo ">>> 无需删除，所有文件已是最新"
           fi
 
+          echo ">>> 开始同步..."
           rclone copy \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
@@ -836,6 +837,7 @@ jobs:
             --cutoff-mode soft \
             --timeout=5m \
             "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
+          echo ">>> 同步结束"
 
           # 解析 rclone 输出并生成汇总
           TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
@@ -1523,6 +1525,7 @@ jobs:
             echo ">>> 无需删除，所有文件已是最新"
           fi
 
+          echo ">>> 开始同步..."
           rclone copy \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
@@ -1538,6 +1541,7 @@ jobs:
             --cutoff-mode soft \
             --timeout=5m \
             "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
+          echo ">>> 同步结束"
 
           # 解析 rclone 输出并生成汇总
           TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)

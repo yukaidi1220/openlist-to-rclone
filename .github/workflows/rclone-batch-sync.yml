@@ -822,6 +822,7 @@ jobs:
           fi
 
           echo ">>> 开始同步..."
+          set +eo pipefail
           rclone copy \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
@@ -829,7 +830,6 @@ jobs:
             --checkers "$RCLONE_CHECKERS" \
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
-            --stats-one-line \
             --stats-log-level NOTICE \
             --low-level-retries=10 \
             --retries=10 \
@@ -838,7 +838,9 @@ jobs:
             --cutoff-mode soft \
             --timeout=5m \
             "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
-          echo ">>> 同步结束"
+          COPY_EXIT=${PIPESTATUS[0]}
+          set -eo pipefail
+          echo ">>> 同步结束 (exit: $COPY_EXIT)"
 
           # 解析 rclone 输出并生成汇总
           TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
@@ -857,6 +859,10 @@ jobs:
           echo "  错误: ${ERRORS:-0}"
           echo "  耗时: ${ELAPSED:-未知}"
           echo "=========================================="
+
+          if [ "$COPY_EXIT" -ne 0 ]; then
+            echo "::warning::rclone copy exited with code $COPY_EXIT"
+          fi
 
       - name: 上传结果
         if: always()
@@ -1527,6 +1533,7 @@ jobs:
           fi
 
           echo ">>> 开始同步..."
+          set +eo pipefail
           rclone copy \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
@@ -1534,7 +1541,6 @@ jobs:
             --checkers "$RCLONE_CHECKERS" \
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
-            --stats-one-line \
             --stats-log-level NOTICE \
             --low-level-retries=10 \
             --retries=10 \
@@ -1543,7 +1549,9 @@ jobs:
             --cutoff-mode soft \
             --timeout=5m \
             "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
-          echo ">>> 同步结束"
+          COPY_EXIT=${PIPESTATUS[0]}
+          set -eo pipefail
+          echo ">>> 同步结束 (exit: $COPY_EXIT)"
 
           # 解析 rclone 输出并生成汇总
           TRANSFERRED=$(grep -oP 'Transferred:\s+\K[^,]+' /tmp/rclone_output.log | tail -1)
@@ -1561,6 +1569,10 @@ jobs:
           echo "  错误: ${ERRORS:-0}"
           echo "  耗时: ${ELAPSED:-未知}"
           echo "=========================================="
+
+          if [ "$COPY_EXIT" -ne 0 ]; then
+            echo "::warning::rclone copy exited with code $COPY_EXIT"
+          fi
 
       # ============================================================
       # 清理（停止 OpenList 进程）

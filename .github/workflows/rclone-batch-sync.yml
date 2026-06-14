@@ -460,7 +460,7 @@ jobs:
           # 格式为 大小;路径（sp = size;path）
           rclone lsf -R --format "sp" --separator ";" \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
-            --files-only --absolute \
+            --files-only \
             --files-from-raw /tmp/transfer.txt \
             --tpslimit 1 \
             "$RCLONE_SRC" > files_with_size.txt
@@ -882,6 +882,10 @@ jobs:
 
           BATCH_FILE="batch_${{ matrix.batch.id }}.txt"
           DIFFER_FILE="/tmp/differ_${{ matrix.batch.id }}.txt"
+
+          echo ">>> Batch 文件内容 ($BATCH_FILE):"
+          cat "$BATCH_FILE"
+          echo ">>> 文件行数: $(wc -l < "$BATCH_FILE")"
 
           # 检查需要更新的文件（增强鲁棒性）
           echo ">>> 检查需要更新的文件..."
@@ -1652,8 +1656,9 @@ jobs:
             exit 1
           fi
 
-          echo "文件数: $(wc -l < "$BATCH_FILE")"
-          echo ""
+          echo ">>> Batch 文件内容 ($BATCH_FILE):"
+          cat "$BATCH_FILE"
+          echo ">>> 文件行数: $(wc -l < "$BATCH_FILE")"
 
           DIFFER_FILE="/tmp/differ_${{ inputs.batch_id }}.txt"
 

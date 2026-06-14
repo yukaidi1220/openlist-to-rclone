@@ -412,6 +412,15 @@ jobs:
             exit 1
           fi
 
+      - name: 计算 target ID
+        id: target_id
+        env:
+          RCLONE_DST: ${{ inputs.rclone_dst }}
+        run: |
+          TARGET_ID=$(echo -n "$RCLONE_DST" | md5sum | cut -c1-8)
+          echo "target_id=$TARGET_ID" >> "$GITHUB_OUTPUT"
+          echo ">>> Target ID: $TARGET_ID (from $RCLONE_DST)"
+
       - name: 对比源和目标差异
         id: diff
         env:
@@ -506,7 +515,7 @@ jobs:
         if: steps.split.outputs.batch_count != '' && steps.split.outputs.batch_count != '0'
         uses: actions/upload-artifact@v4
         with:
-          name: rclone-batches-${{ github.run_id }}
+          name: rclone-batches-${{ steps.target_id.outputs.target_id }}
           path: batch_*.txt
           retention-days: 3
           if-no-files-found: ignore
@@ -862,10 +871,19 @@ jobs:
             exit 1
           fi
 
+      - name: 计算 target ID
+        id: target_id
+        env:
+          RCLONE_DST: ${{ inputs.rclone_dst }}
+        run: |
+          TARGET_ID=$(echo -n "$RCLONE_DST" | md5sum | cut -c1-8)
+          echo "target_id=$TARGET_ID" >> "$GITHUB_OUTPUT"
+          echo ">>> Target ID: $TARGET_ID (from $RCLONE_DST)"
+
       - name: 下载 batch 文件
         uses: actions/download-artifact@v4
         with:
-          name: rclone-batches-${{ github.run_id }}
+          name: rclone-batches-${{ steps.target_id.outputs.target_id }}
 
       - name: 同步 batch ${{ matrix.batch.id }}
         env:
@@ -1632,10 +1650,19 @@ jobs:
             exit 1
           fi
 
+      - name: 计算 target ID
+        id: target_id
+        env:
+          RCLONE_DST: ${{ inputs.rclone_dst }}
+        run: |
+          TARGET_ID=$(echo -n "$RCLONE_DST" | md5sum | cut -c1-8)
+          echo "target_id=$TARGET_ID" >> "$GITHUB_OUTPUT"
+          echo ">>> Target ID: $TARGET_ID (from $RCLONE_DST)"
+
       - name: 下载 batch artifact
         uses: actions/download-artifact@v4
         with:
-          name: rclone-batches-${{ github.run_id }}
+          name: rclone-batches-${{ steps.target_id.outputs.target_id }}
           run-id: ${{ inputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 

@@ -936,6 +936,7 @@ jobs:
           echo ">>> 开始同步..."
           set +eo pipefail
           rclone copy \
+            -v \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
             --transfers "$RCLONE_TRANSFERS" \
@@ -1723,6 +1724,7 @@ jobs:
           echo ">>> 开始同步..."
           set +eo pipefail
           rclone copy \
+            -v \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
             --transfers "$RCLONE_TRANSFERS" \

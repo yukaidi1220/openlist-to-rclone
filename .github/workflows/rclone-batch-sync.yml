@@ -943,11 +943,11 @@ jobs:
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-log-level NOTICE \
-            --low-level-retries=10 \
-            --retries=10 \
-            --retries-sleep=30s \
+            --low-level-retries=3 \
+            --retries=3 \
+            --retries-sleep=60s \
             --cutoff-mode soft \
-            --timeout=5m \
+            --timeout=0 \
             "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
           COPY_EXIT=${PIPESTATUS[0]}
           set -eo pipefail
@@ -1284,10 +1284,10 @@ jobs:
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-log-level NOTICE \
-            --low-level-retries=10 \
-            --retries=10 \
-            --retries-sleep=30s \
-            --timeout=5m \
+            --low-level-retries=3 \
+            --retries=3 \
+            --retries-sleep=60s \
+            --timeout=0 \
             --max-size "${MAX_FILE_GB}G"
 
           echo ""
@@ -1730,11 +1730,11 @@ jobs:
             --tpslimit "$RCLONE_TPSLIMIT" \
             --stats "$RCLONE_STATS_INTERVAL" \
             --stats-log-level NOTICE \
-            --low-level-retries=10 \
-            --retries=10 \
-            --retries-sleep=30s \
+            --low-level-retries=3 \
+            --retries=3 \
+            --retries-sleep=60s \
             --cutoff-mode soft \
-            --timeout=5m \
+            --timeout=0 \
             "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
           COPY_EXIT=${PIPESTATUS[0]}
           set -eo pipefail

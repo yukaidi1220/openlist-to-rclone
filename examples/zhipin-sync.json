@@ -25,7 +25,7 @@
       "path": "list:cm/h",
       "disabled": false,
       "hosts": "139family-v4",
-      "prefer_ipv6": false,
+      "prefer_ipv6": true,
       "warp_v4": true,
       "max_batch_gb": 5,
       "max_file_gb": 8,

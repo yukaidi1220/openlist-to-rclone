@@ -14,7 +14,7 @@
       "path": "list:cr/qzy-cn",
       "disabled": false,
       "prefer_ipv6": true,
-      "warp_v4": false,
+      "warp_v4": true,
       "max_batch_gb": 5,
       "max_file_gb": 100,
       "cleanup_dst": true
@@ -22,7 +22,7 @@
     {
       "path": "list:cm/h",
       "disabled": false,
-      "prefer_ipv6": false,
+      "prefer_ipv6": true,
       "warp_v4": false,
       "max_batch_gb": 5,
       "max_file_gb": 8,

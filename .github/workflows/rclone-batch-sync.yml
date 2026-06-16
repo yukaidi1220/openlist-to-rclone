@@ -129,7 +129,7 @@ jobs:
 
           echo ">>> 下载 wgcf..."
           for i in {1..5}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 5 \
               -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64; then
               echo "wgcf 下载成功"
               break
@@ -387,7 +387,7 @@ jobs:
               echo ">>> 下载 OpenList: $OPENLIST_URL"
               CURL_OPTS="-fsSL"
             fi
-            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if curl $CURL_OPTS --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 5 \
               "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
               echo "OpenList 下载成功"
               break
@@ -463,7 +463,7 @@ jobs:
             else
               CURL_OPTS="-fsSL"
             fi
-            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+            if curl $CURL_OPTS --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 10 \
               https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
               sudo bash /tmp/install_rclone.sh && break
 
@@ -659,7 +659,7 @@ jobs:
 
           echo ">>> 下载 wgcf..."
           for i in {1..5}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 5 \
               -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64; then
               echo "wgcf 下载成功"
               break
@@ -917,7 +917,7 @@ jobs:
               echo ">>> 下载 OpenList: $OPENLIST_URL"
               CURL_OPTS="-fsSL"
             fi
-            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if curl $CURL_OPTS --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 5 \
               "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
               echo "OpenList 下载成功"
               break
@@ -993,7 +993,7 @@ jobs:
             else
               CURL_OPTS="-fsSL"
             fi
-            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+            if curl $CURL_OPTS --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 10 \
               https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
               sudo bash /tmp/install_rclone.sh && break
 
@@ -1202,7 +1202,7 @@ jobs:
 
           echo ">>> 下载 wgcf..."
           for i in {1..5}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 5 \
               -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64; then
               echo "wgcf 下载成功"
               break
@@ -1395,7 +1395,7 @@ jobs:
               echo ">>> 下载 OpenList: $OPENLIST_URL"
               CURL_OPTS="-fsSL"
             fi
-            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if curl $CURL_OPTS --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 5 \
               "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
               echo "OpenList 下载成功"
               break
@@ -1470,7 +1470,7 @@ jobs:
             else
               CURL_OPTS="-fsSL"
             fi
-            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+            if curl $CURL_OPTS --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 10 \
               https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
               sudo bash /tmp/install_rclone.sh && break
 
@@ -1613,7 +1613,7 @@ jobs:
 
           echo ">>> 下载 wgcf..."
           for i in {1..5}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 5 \
               -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64; then
               echo "wgcf 下载成功"
               break
@@ -1871,7 +1871,7 @@ jobs:
               echo ">>> 下载 OpenList: $OPENLIST_URL"
               CURL_OPTS="-fsSL"
             fi
-            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if curl $CURL_OPTS --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 5 \
               "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
               echo "OpenList 下载成功"
               break
@@ -1947,7 +1947,7 @@ jobs:
             else
               CURL_OPTS="-fsSL"
             fi
-            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+            if curl $CURL_OPTS --connect-timeout 15 --max-time 30 --retry 3 --retry-delay 10 \
               https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
               sudo bash /tmp/install_rclone.sh && break
 

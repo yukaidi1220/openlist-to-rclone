@@ -1,0 +1,6 @@
+# Hosts 文件放在此目录
+# 在 target 中设置 "hosts": "文件名" 即可注入
+#
+# 格式与 /etc/hosts 相同：
+# IP  Hostname
+# 1.2.3.4 example.com

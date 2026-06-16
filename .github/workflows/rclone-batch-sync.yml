@@ -43,6 +43,11 @@ on:
         required: false
         default: false
         type: boolean
+      hosts:
+        description: 'Hosts 文件名（仓库 hosts/ 目录下），追加到 /etc/hosts'
+        required: false
+        default: ''
+        type: string
       dryrun:
         description: '空跑模式（不实际复制/删除文件，仅列出差异）'
         required: false
@@ -81,6 +86,9 @@ on:
       warp_v4:
         type: boolean
         default: false
+      hosts:
+        type: string
+        default: ''
       dryrun:
         type: boolean
         default: false
@@ -114,6 +122,19 @@ jobs:
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
+
+      - name: 注入 Hosts
+        if: inputs.hosts != ''
+        run: |
+          HOSTS_FILE="$GITHUB_WORKSPACE/hosts/${{ inputs.hosts }}"
+          if [ -f "$HOSTS_FILE" ]; then
+            echo ">>> 注入 hosts: ${{ inputs.hosts }}"
+            cat "$HOSTS_FILE" | sudo tee -a /etc/hosts > /dev/null
+            echo ">>> /etc/hosts 尾部:"
+            tail -5 /etc/hosts
+          else
+            echo "::warning::hosts 文件不存在: $HOSTS_FILE"
+          fi
 
       # ============================================================
       # 安装 Cloudflare WARP（始终执行，提供 IPv6 连接）
@@ -645,6 +666,19 @@ jobs:
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
+
+      - name: 注入 Hosts
+        if: inputs.hosts != ''
+        run: |
+          HOSTS_FILE="$GITHUB_WORKSPACE/hosts/${{ inputs.hosts }}"
+          if [ -f "$HOSTS_FILE" ]; then
+            echo ">>> 注入 hosts: ${{ inputs.hosts }}"
+            cat "$HOSTS_FILE" | sudo tee -a /etc/hosts > /dev/null
+            echo ">>> /etc/hosts 尾部:"
+            tail -5 /etc/hosts
+          else
+            echo "::warning::hosts 文件不存在: $HOSTS_FILE"
+          fi
 
       # ============================================================
       # 安装 Cloudflare WARP（始终执行，提供 IPv6 连接）
@@ -1190,6 +1224,19 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
+      - name: 注入 Hosts
+        if: inputs.hosts != ''
+        run: |
+          HOSTS_FILE="$GITHUB_WORKSPACE/hosts/${{ inputs.hosts }}"
+          if [ -f "$HOSTS_FILE" ]; then
+            echo ">>> 注入 hosts: ${{ inputs.hosts }}"
+            cat "$HOSTS_FILE" | sudo tee -a /etc/hosts > /dev/null
+            echo ">>> /etc/hosts 尾部:"
+            tail -5 /etc/hosts
+          else
+            echo "::warning::hosts 文件不存在: $HOSTS_FILE"
+          fi
+
       # ============================================================
       # 安装 Cloudflare WARP
       # ============================================================
@@ -1601,6 +1648,19 @@ jobs:
 
       - name: 检出仓库
         uses: actions/checkout@v4
+
+      - name: 注入 Hosts
+        if: inputs.hosts != ''
+        run: |
+          HOSTS_FILE="$GITHUB_WORKSPACE/hosts/${{ inputs.hosts }}"
+          if [ -f "$HOSTS_FILE" ]; then
+            echo ">>> 注入 hosts: ${{ inputs.hosts }}"
+            cat "$HOSTS_FILE" | sudo tee -a /etc/hosts > /dev/null
+            echo ">>> /etc/hosts 尾部:"
+            tail -5 /etc/hosts
+          else
+            echo "::warning::hosts 文件不存在: $HOSTS_FILE"
+          fi
 
       # ============================================================
       # 安装 Cloudflare WARP（始终执行，提供 IPv6 连接）

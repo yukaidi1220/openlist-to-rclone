@@ -135,6 +135,7 @@ jobs:
           # 构建 matrix JSON（targets 对象数组，包含完整配置）
           MATRIX=$(jq -c '[.targets | map(select(.disabled != true)) | .[] | {
             path: .path,
+            hosts: (.hosts // ""),
             prefer_ipv6: (if .prefer_ipv6 == true then true else false end),
             warp_v4: (if .warp_v4 == true then true else false end),
             max_batch_gb: (.max_batch_gb // 50),
@@ -169,6 +170,7 @@ jobs:
         target: ${{ fromJSON(needs.parse-tasks.outputs.matrix) }}
     uses: ./.github/workflows/rclone-batch-sync.yml
     with:
+      hosts: ${{ matrix.target.hosts }}
       prefer_ipv6: ${{ matrix.target.prefer_ipv6 }}
       mode: 'full'
       rclone_src: ${{ needs.parse-tasks.outputs.source }}

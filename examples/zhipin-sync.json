@@ -14,7 +14,7 @@
     {
       "path": "list:cr/qzy-cn",
       "disabled": false,
-      "hosts": "bscstorage-cm",
+      "hosts": "bscstorage-ct",
       "prefer_ipv6": false,
       "warp_v4": false,
       "max_batch_gb": 5,

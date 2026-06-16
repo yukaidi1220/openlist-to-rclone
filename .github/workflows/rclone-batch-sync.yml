@@ -457,9 +457,16 @@ jobs:
       - name: 安装 rclone
         run: |
           for i in {1..3}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+            if [ "$i" -gt 1 ]; then
+              echo ">>> rclone install.sh retry $((i-1)), verbose"
+              CURL_OPTS="-Lvvvv"
+            else
+              CURL_OPTS="-fsSL"
+            fi
+            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
               https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
               sudo bash /tmp/install_rclone.sh && break
+
             fi
             echo "rclone 安装失败，重试 $i/3..."
             sleep $((i * 10))
@@ -980,9 +987,16 @@ jobs:
       - name: 安装 rclone
         run: |
           for i in {1..3}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+            if [ "$i" -gt 1 ]; then
+              echo ">>> rclone install.sh retry $((i-1)), verbose"
+              CURL_OPTS="-Lvvvv"
+            else
+              CURL_OPTS="-fsSL"
+            fi
+            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
               https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
               sudo bash /tmp/install_rclone.sh && break
+
             fi
             echo "rclone 安装失败，重试 $i/3..."
             sleep $((i * 10))
@@ -1450,9 +1464,16 @@ jobs:
       - name: 安装 rclone
         run: |
           for i in {1..3}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+            if [ "$i" -gt 1 ]; then
+              echo ">>> rclone install.sh retry $((i-1)), verbose"
+              CURL_OPTS="-Lvvvv"
+            else
+              CURL_OPTS="-fsSL"
+            fi
+            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
               https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
               sudo bash /tmp/install_rclone.sh && break
+
             fi
             echo "rclone 安装失败，重试 $i/3..."
             sleep $((i * 10))
@@ -1920,9 +1941,16 @@ jobs:
       - name: 安装 rclone
         run: |
           for i in {1..3}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
+            if [ "$i" -gt 1 ]; then
+              echo ">>> rclone install.sh retry $((i-1)), verbose"
+              CURL_OPTS="-Lvvvv"
+            else
+              CURL_OPTS="-fsSL"
+            fi
+            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 10 \
               https://rclone.org/install.sh -o /tmp/install_rclone.sh; then
               sudo bash /tmp/install_rclone.sh && break
+
             fi
             echo "rclone 安装失败，重试 $i/3..."
             sleep $((i * 10))

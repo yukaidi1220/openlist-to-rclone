@@ -177,7 +177,7 @@ jobs:
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
 
-          # warp_v4=true 时先添加 WARP 端点直连路由，避免路由死锁
+          # warp_v4=true 时先添加直连路由，避免路由死锁 / 局域网中断
           if [ "$WARP_V4" = "true" ]; then
             ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
@@ -188,6 +188,12 @@ jobs:
               sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
             fi
+            # 私有/保留网段走原始网关，不走 WARP
+            echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+              sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
+            done
           fi
 
           # 根据 warp_v4 决定 allowed-ips
@@ -673,7 +679,7 @@ jobs:
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
 
-          # warp_v4=true 时先添加 WARP 端点直连路由，避免路由死锁
+          # warp_v4=true 时先添加直连路由，避免路由死锁 / 局域网中断
           if [ "$WARP_V4" = "true" ]; then
             ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
@@ -684,6 +690,12 @@ jobs:
               sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
             fi
+            # 私有/保留网段走原始网关，不走 WARP
+            echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+              sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
+            done
           fi
 
           # 根据 warp_v4 决定 allowed-ips
@@ -1181,7 +1193,7 @@ jobs:
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
 
-          # warp_v4=true 时先添加 WARP 端点直连路由，避免路由死锁
+          # warp_v4=true 时先添加直连路由，避免路由死锁 / 局域网中断
           if [ "$WARP_V4" = "true" ]; then
             ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
@@ -1192,6 +1204,12 @@ jobs:
               sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
             fi
+            # 私有/保留网段走原始网关，不走 WARP
+            echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+              sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
+            done
           fi
 
           # 根据 warp_v4 决定 allowed-ips
@@ -1556,7 +1574,7 @@ jobs:
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
 
-          # warp_v4=true 时先添加 WARP 端点直连路由，避免路由死锁
+          # warp_v4=true 时先添加直连路由，避免路由死锁 / 局域网中断
           if [ "$WARP_V4" = "true" ]; then
             ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
@@ -1567,6 +1585,12 @@ jobs:
               sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
             fi
+            # 私有/保留网段走原始网关，不走 WARP
+            echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+              sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
+            done
           fi
 
           # 根据 warp_v4 决定 allowed-ips

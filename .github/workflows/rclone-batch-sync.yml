@@ -177,6 +177,19 @@ jobs:
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
 
+          # warp_v4=true 时先添加 WARP 端点直连路由，避免路由死锁
+          if [ "$WARP_V4" = "true" ]; then
+            ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
+            ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
+            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
+            ENDPOINT_IP=$(dig +short "$ENDPOINT_HOST" 2>/dev/null | head -1)
+            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
+              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
+              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
+            fi
+          fi
+
           # 根据 warp_v4 决定 allowed-ips
           if [ "$WARP_V4" = "true" ]; then
             echo ">>> warp_v4=true: v4 和 v6 都走 WARP"
@@ -659,6 +672,19 @@ jobs:
           INTERFACE=wgcf
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
+
+          # warp_v4=true 时先添加 WARP 端点直连路由，避免路由死锁
+          if [ "$WARP_V4" = "true" ]; then
+            ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
+            ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
+            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
+            ENDPOINT_IP=$(dig +short "$ENDPOINT_HOST" 2>/dev/null | head -1)
+            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
+              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
+              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
+            fi
+          fi
 
           # 根据 warp_v4 决定 allowed-ips
           if [ "$WARP_V4" = "true" ]; then
@@ -1155,6 +1181,19 @@ jobs:
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
 
+          # warp_v4=true 时先添加 WARP 端点直连路由，避免路由死锁
+          if [ "$WARP_V4" = "true" ]; then
+            ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
+            ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
+            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
+            ENDPOINT_IP=$(dig +short "$ENDPOINT_HOST" 2>/dev/null | head -1)
+            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
+              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
+              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
+            fi
+          fi
+
           # 根据 warp_v4 决定 allowed-ips
           if [ "$WARP_V4" = "true" ]; then
             echo ">>> warp_v4=true: v4 和 v6 都走 WARP"
@@ -1516,6 +1555,19 @@ jobs:
           INTERFACE=wgcf
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
+
+          # warp_v4=true 时先添加 WARP 端点直连路由，避免路由死锁
+          if [ "$WARP_V4" = "true" ]; then
+            ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
+            ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
+            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
+            ENDPOINT_IP=$(dig +short "$ENDPOINT_HOST" 2>/dev/null | head -1)
+            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
+              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
+              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
+            fi
+          fi
 
           # 根据 warp_v4 决定 allowed-ips
           if [ "$WARP_V4" = "true" ]; then

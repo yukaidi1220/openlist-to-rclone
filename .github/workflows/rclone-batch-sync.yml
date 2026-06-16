@@ -222,13 +222,16 @@ jobs:
             echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
           fi
 
-          # warp_v4=true 时设置 IPv4 默认路由走 WARP
-          if [ "$WARP_V4" = "true" ]; then
+          # warp_v4 非回退时设置 IPv4 默认路由走 WARP
+          if [ "$WARP_V4" = "true" ] && [ "$WARP_V4_FALLBACK" != "true" ]; then
             echo ">>> 设置 IPv4 默认路由走 WARP..."
             sudo ip -4 route replace 0.0.0.0/0 dev $INTERFACE 2>/dev/null || {
               echo "::warning::IPv4 路由替换失败，尝试 table main"
               sudo ip -4 route add 0.0.0.0/0 dev $INTERFACE table main 2>/dev/null || true
             }
+            # MSS 钳制：WARP MTU=1280，避免 PMTUD 失败导致 Connection reset
+            sudo iptables -t mangle -A OUTPUT -o $INTERFACE -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
             echo ">>> 验证 IPv4 走 WARP..."
             curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv4 WARP OK" || echo "::warning::IPv4 WARP 不通"
           fi
@@ -251,6 +254,9 @@ jobs:
           # 清理旧的 precedence 规则
           sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
 
+          # warp_v4=true 时两者都走 WARP，v4 不应被极端压低
+          V4_PRECEDENCE=$([ "$WARP_V4" = "true" ] && echo 35 || echo 1)
+
           # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
             printf '%s\n' \
@@ -258,7 +264,7 @@ jobs:
               "precedence ::/0          40" \
               "precedence 2002::/16     30" \
               "precedence ::/96         20" \
-              "precedence ::ffff:0:0/96 1" | \
+              "precedence ::ffff:0:0/96 $V4_PRECEDENCE" | \
               sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv6 优先"
 
@@ -729,13 +735,16 @@ jobs:
             echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
           fi
 
-          # warp_v4=true 时设置 IPv4 默认路由走 WARP
-          if [ "$WARP_V4" = "true" ]; then
+          # warp_v4 非回退时设置 IPv4 默认路由走 WARP
+          if [ "$WARP_V4" = "true" ] && [ "$WARP_V4_FALLBACK" != "true" ]; then
             echo ">>> 设置 IPv4 默认路由走 WARP..."
             sudo ip -4 route replace 0.0.0.0/0 dev $INTERFACE 2>/dev/null || {
               echo "::warning::IPv4 路由替换失败，尝试 table main"
               sudo ip -4 route add 0.0.0.0/0 dev $INTERFACE table main 2>/dev/null || true
             }
+            # MSS 钳制：WARP MTU=1280，避免 PMTUD 失败导致 Connection reset
+            sudo iptables -t mangle -A OUTPUT -o $INTERFACE -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
             echo ">>> 验证 IPv4 走 WARP..."
             curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv4 WARP OK" || echo "::warning::IPv4 WARP 不通"
           fi
@@ -758,6 +767,9 @@ jobs:
           # 清理旧的 precedence 规则
           sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
 
+          # warp_v4=true 时两者都走 WARP，v4 不应被极端压低
+          V4_PRECEDENCE=$([ "$WARP_V4" = "true" ] && echo 35 || echo 1)
+
           # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
             printf '%s\n' \
@@ -765,7 +777,7 @@ jobs:
               "precedence ::/0          40" \
               "precedence 2002::/16     30" \
               "precedence ::/96         20" \
-              "precedence ::ffff:0:0/96 1" | \
+              "precedence ::ffff:0:0/96 $V4_PRECEDENCE" | \
               sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv6 优先"
 
@@ -1246,8 +1258,8 @@ jobs:
             echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
           fi
 
-          # warp_v4=true 时设置 IPv4 默认路由走 WARP
-          if [ "$WARP_V4" = "true" ]; then
+          # warp_v4 非回退时设置 IPv4 默认路由走 WARP
+          if [ "$WARP_V4" = "true" ] && [ "$WARP_V4_FALLBACK" != "true" ]; then
             echo ">>> 设置 IPv4 默认路由走 WARP..."
             sudo ip -4 route replace 0.0.0.0/0 dev $INTERFACE 2>/dev/null || {
               echo "::warning::IPv4 路由替换失败，尝试 table main"
@@ -1263,6 +1275,12 @@ jobs:
           echo ">>> WARP 状态:"
           curl -sS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E 'warp|ip|colo' || true
 
+          # warp_v4=true 时钳制 TCP MSS，避免 MTU 1280 导致 Connection reset
+          if [ "$WARP_V4" = "true" ]; then
+            sudo iptables -t mangle -A OUTPUT -o $INTERFACE -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+          fi
+
       # ============================================================
       # 配置 IP 版本优先级
       # ============================================================
@@ -1274,6 +1292,9 @@ jobs:
 
           sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
 
+          # warp_v4=true 时两者都走 WARP，v4 不应被极端压低
+          V4_PRECEDENCE=$([ "$WARP_V4" = "true" ] && echo 35 || echo 1)
+
           # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
             printf '%s\n' \
@@ -1281,7 +1302,7 @@ jobs:
               "precedence ::/0          40" \
               "precedence 2002::/16     30" \
               "precedence ::/96         20" \
-              "precedence ::ffff:0:0/96 1" | \
+              "precedence ::ffff:0:0/96 $V4_PRECEDENCE" | \
               sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv6 优先"
 
@@ -1634,13 +1655,16 @@ jobs:
             echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
           fi
 
-          # warp_v4=true 时设置 IPv4 默认路由走 WARP
-          if [ "$WARP_V4" = "true" ]; then
+          # warp_v4 非回退时设置 IPv4 默认路由走 WARP
+          if [ "$WARP_V4" = "true" ] && [ "$WARP_V4_FALLBACK" != "true" ]; then
             echo ">>> 设置 IPv4 默认路由走 WARP..."
             sudo ip -4 route replace 0.0.0.0/0 dev $INTERFACE 2>/dev/null || {
               echo "::warning::IPv4 路由替换失败，尝试 table main"
               sudo ip -4 route add 0.0.0.0/0 dev $INTERFACE table main 2>/dev/null || true
             }
+            # MSS 钳制：WARP MTU=1280，避免 PMTUD 失败导致 Connection reset
+            sudo iptables -t mangle -A OUTPUT -o $INTERFACE -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
             echo ">>> 验证 IPv4 走 WARP..."
             curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv4 WARP OK" || echo "::warning::IPv4 WARP 不通"
           fi
@@ -1663,6 +1687,9 @@ jobs:
           # 清理旧的 precedence 规则
           sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
 
+          # warp_v4=true 时两者都走 WARP，v4 不应被极端压低
+          V4_PRECEDENCE=$([ "$WARP_V4" = "true" ] && echo 35 || echo 1)
+
           # 写入完整的 precedence 表（单条规则会替换整个默认表，导致 IPv4 无匹配）
           if [ "$PREFER_IPV6" = "true" ]; then
             printf '%s\n' \
@@ -1670,7 +1697,7 @@ jobs:
               "precedence ::/0          40" \
               "precedence 2002::/16     30" \
               "precedence ::/96         20" \
-              "precedence ::ffff:0:0/96 1" | \
+              "precedence ::ffff:0:0/96 $V4_PRECEDENCE" | \
               sudo tee -a /etc/gai.conf > /dev/null
             echo ">>> 已设置 IPv6 优先"
 

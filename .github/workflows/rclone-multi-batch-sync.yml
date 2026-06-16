@@ -108,8 +108,12 @@ jobs:
           fi
           echo "目标数量: $TARGET_COUNT"
 
+          # 过滤掉 disabled 的 target
+          ENABLED=$(jq '[.targets | map(select(.disabled != true))] | length' tasks.json)
+          echo "启用目标: $ENABLED / $TARGET_COUNT"
+
           # 校验每个 target 必须是对象且 path 为非空字符串
-          EMPTY_TARGETS=$(jq '[.targets[] | select(. == null or .path == null or .path == "" or (.path | type) != "string")] | length' tasks.json)
+          EMPTY_TARGETS=$(jq '[.targets | map(select(.disabled != true)) | .[] | select(.path == null or .path == "" or (.path | type) != "string")] | length' tasks.json)
           if [ "$EMPTY_TARGETS" -gt 0 ]; then
             echo "::error::有 $EMPTY_TARGETS 个目标缺少 path 字段或 path 不是字符串"
             exit 1
@@ -126,10 +130,10 @@ jobs:
               echo "::error::有目标路径包含非法字符（禁止 ; \$ ( ) \` 换行）"
               exit 1
             fi
-          done < <(jq -r '.targets[].path' tasks.json)
+          done < <(jq -r '.targets | map(select(.disabled != true)) | .[].path' tasks.json)
 
           # 构建 matrix JSON（targets 对象数组，包含完整配置）
-          MATRIX=$(jq -c '[.targets[] | {
+          MATRIX=$(jq -c '[.targets | map(select(.disabled != true)) | .[] | {
             path: .path,
             prefer_ipv6: (if .prefer_ipv6 == true then true else false end),
             warp_v4: (if .warp_v4 == true then true else false end),

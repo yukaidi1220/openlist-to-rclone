@@ -3,6 +3,7 @@
   "targets": [
     {
       "path": "list:cr/qzy-hk",
+      "disabled": true,
       "prefer_ipv6": false,
       "warp_v4": false,
       "max_batch_gb": 5,
@@ -11,6 +12,7 @@
     },
     {
       "path": "list:cr/qzy-cn",
+      "disabled": false,
       "prefer_ipv6": true,
       "warp_v4": false,
       "max_batch_gb": 5,
@@ -19,6 +21,7 @@
     },
     {
       "path": "list:cm/h",
+      "disabled": false,
       "prefer_ipv6": false,
       "warp_v4": false,
       "max_batch_gb": 5,
@@ -27,6 +30,7 @@
     },
     {
       "path": "list:ty/h",
+      "disabled": true,
       "prefer_ipv6": true,
       "warp_v4": false,
       "max_batch_gb": 5,

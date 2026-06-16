@@ -3,7 +3,7 @@
   "targets": [
     {
       "path": "list:cr/qzy-hk",
-      "disabled": true,
+      "disabled": false,
       "hosts": "",
       "prefer_ipv6": false,
       "warp_v4": false,
@@ -14,7 +14,7 @@
     {
       "path": "list:cr/qzy-cn",
       "disabled": false,
-      "hosts": "bscstorage-cu",
+      "hosts": "bscstorage-cm",
       "prefer_ipv6": false,
       "warp_v4": false,
       "max_batch_gb": 5,
@@ -33,7 +33,7 @@
     },
     {
       "path": "list:ty/h",
-      "disabled": true,
+      "disabled": false,
       "hosts": "",
       "prefer_ipv6": true,
       "warp_v4": false,

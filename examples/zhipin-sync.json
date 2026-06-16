@@ -5,14 +5,14 @@
       "path": "list:cr/qzy-hk",
       "prefer_ipv6": false,
       "warp_v4": false,
-      "max_batch_gb": 50,
+      "max_batch_gb": 5,
       "max_file_gb": 100,
       "cleanup_dst": true
     },
     {
       "path": "list:cr/qzy-cn",
       "prefer_ipv6": true,
-      "warp_v4": true,
+      "warp_v4": false,
       "max_batch_gb": 5,
       "max_file_gb": 100,
       "cleanup_dst": true
@@ -27,9 +27,9 @@
     },
     {
       "path": "list:ty/h",
-      "prefer_ipv6": false,
+      "prefer_ipv6": true,
       "warp_v4": false,
-      "max_batch_gb": 50,
+      "max_batch_gb": 5,
       "max_file_gb": 100,
       "cleanup_dst": true
     }

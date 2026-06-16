@@ -375,9 +375,15 @@ jobs:
 
           # 下载 OpenList 二进制
           OPENLIST_URL='https://github.com/yukaidi1220/OpenList/releases/latest/download/openlist-linux-amd64.tar.gz'
-          echo ">>> 下载 OpenList: $OPENLIST_URL"
           for i in {1..3}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if [ "$i" -gt 1 ]; then
+              echo ">>> 下载 OpenList (retry $((i-1)), verbose): $OPENLIST_URL"
+              CURL_OPTS="-vvvv"
+            else
+              echo ">>> 下载 OpenList: $OPENLIST_URL"
+              CURL_OPTS="-fsSL"
+            fi
+            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
               "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
               echo "OpenList 下载成功"
               break
@@ -888,9 +894,15 @@ jobs:
 
           # 下载 OpenList 二进制
           OPENLIST_URL='https://github.com/yukaidi1220/OpenList/releases/latest/download/openlist-linux-amd64.tar.gz'
-          echo ">>> 下载 OpenList: $OPENLIST_URL"
           for i in {1..3}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if [ "$i" -gt 1 ]; then
+              echo ">>> 下载 OpenList (retry $((i-1)), verbose): $OPENLIST_URL"
+              CURL_OPTS="-vvvv"
+            else
+              echo ">>> 下载 OpenList: $OPENLIST_URL"
+              CURL_OPTS="-fsSL"
+            fi
+            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
               "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
               echo "OpenList 下载成功"
               break
@@ -1349,9 +1361,15 @@ jobs:
           mkdir -p "${{ env.TOOLS_DIR }}"
 
           OPENLIST_URL='https://github.com/yukaidi1220/OpenList/releases/latest/download/openlist-linux-amd64.tar.gz'
-          echo ">>> 下载 OpenList: $OPENLIST_URL"
           for i in {1..3}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if [ "$i" -gt 1 ]; then
+              echo ">>> 下载 OpenList (retry $((i-1)), verbose): $OPENLIST_URL"
+              CURL_OPTS="-vvvv"
+            else
+              echo ">>> 下载 OpenList: $OPENLIST_URL"
+              CURL_OPTS="-fsSL"
+            fi
+            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
               "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
               echo "OpenList 下载成功"
               break
@@ -1808,9 +1826,15 @@ jobs:
 
           # 下载 OpenList 二进制
           OPENLIST_URL='https://github.com/yukaidi1220/OpenList/releases/latest/download/openlist-linux-amd64.tar.gz'
-          echo ">>> 下载 OpenList: $OPENLIST_URL"
           for i in {1..3}; do
-            if curl -fsSL --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
+            if [ "$i" -gt 1 ]; then
+              echo ">>> 下载 OpenList (retry $((i-1)), verbose): $OPENLIST_URL"
+              CURL_OPTS="-vvvv"
+            else
+              echo ">>> 下载 OpenList: $OPENLIST_URL"
+              CURL_OPTS="-fsSL"
+            fi
+            if curl $CURL_OPTS --connect-timeout 30 --max-time 120 --retry 3 --retry-delay 5 \
               "$OPENLIST_URL" -o "${{ env.TOOLS_DIR }}/openlist.tar.gz"; then
               echo "OpenList 下载成功"
               break

@@ -9,7 +9,8 @@
       "warp_v4": false,
       "max_batch_gb": 10,
       "max_file_gb": 100,
-      "cleanup_dst": true
+      "cleanup_dst": true,
+      "note": "纯v4，国际互联很快"
     },
     {
       "path": "list:cr/qzy-cn",
@@ -19,7 +20,8 @@
       "warp_v4": false,
       "max_batch_gb": 10,
       "max_file_gb": 100,
-      "cleanup_dst": true
+      "cleanup_dst": true,
+      "note": "纯v4，移动>联通>Zenlayer>AWS>电信"
     },
     {
       "path": "list:cm/h",
@@ -27,9 +29,10 @@
       "hosts": "139family-v6",
       "prefer_ipv6": true,
       "warp_v4": false,
-      "max_batch_gb": 10,
+      "max_batch_gb": 1,
       "max_file_gb": 8,
-      "cleanup_dst": true
+      "cleanup_dst": true,
+      "note": "双栈，傻逼一样，死慢的，传不动"
     },
     {
       "path": "list:ty/h",
@@ -39,7 +42,8 @@
       "warp_v4": false,
       "max_batch_gb": 10,
       "max_file_gb": 100,
-      "cleanup_dst": true
+      "cleanup_dst": true,
+      "note": "v6优先的速度还行"
     }
   ]
 }

@@ -110,6 +110,7 @@ jobs:
       TOOLS_DIR: /tmp/tasks/tools
       OPENLIST_DIR: /tmp/tasks/openlist
       WARP_V4: ${{ inputs.warp_v4 }}
+      GODEBUG: netdns=cgo
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -635,6 +636,7 @@ jobs:
       TOOLS_DIR: /tmp/tasks/tools
       OPENLIST_DIR: /tmp/tasks/openlist
       WARP_V4: ${{ inputs.warp_v4 }}
+      GODEBUG: netdns=cgo
     strategy:
       fail-fast: false
       max-parallel: 10
@@ -1183,6 +1185,7 @@ jobs:
       TOOLS_DIR: /tmp/tasks/tools
       OPENLIST_DIR: /tmp/tasks/openlist
       WARP_V4: ${{ inputs.warp_v4 }}
+      GODEBUG: netdns=cgo
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -1582,6 +1585,7 @@ jobs:
       TOOLS_DIR: /tmp/tasks/tools
       OPENLIST_DIR: /tmp/tasks/openlist
       WARP_V4: ${{ inputs.warp_v4 }}
+      GODEBUG: netdns=cgo
     steps:
       - name: 验证输入参数
         run: |

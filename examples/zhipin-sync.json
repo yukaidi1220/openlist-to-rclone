@@ -7,7 +7,7 @@
       "hosts": "",
       "prefer_ipv6": false,
       "warp_v4": false,
-      "max_batch_gb": 5,
+      "max_batch_gb": 10,
       "max_file_gb": 100,
       "cleanup_dst": true
     },
@@ -17,7 +17,7 @@
       "hosts": "bscstorage-cm",
       "prefer_ipv6": false,
       "warp_v4": false,
-      "max_batch_gb": 5,
+      "max_batch_gb": 10,
       "max_file_gb": 100,
       "cleanup_dst": true
     },
@@ -27,7 +27,7 @@
       "hosts": "139family-v6",
       "prefer_ipv6": true,
       "warp_v4": false,
-      "max_batch_gb": 5,
+      "max_batch_gb": 10,
       "max_file_gb": 8,
       "cleanup_dst": true
     },
@@ -37,7 +37,7 @@
       "hosts": "",
       "prefer_ipv6": true,
       "warp_v4": false,
-      "max_batch_gb": 5,
+      "max_batch_gb": 10,
       "max_file_gb": 100,
       "cleanup_dst": true
     }

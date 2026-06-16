@@ -4,7 +4,7 @@
     {
       "path": "list:cr/qzy-hk-mupan",
       "prefer_ipv6": false,
-      "max_batch_gb": 50,
+      "max_batch_gb": 10,
       "max_file_gb": 100,
       "cleanup_dst": true
     }

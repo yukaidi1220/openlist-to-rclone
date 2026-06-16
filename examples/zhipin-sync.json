@@ -32,7 +32,7 @@
       "max_batch_gb": 1,
       "max_file_gb": 8,
       "cleanup_dst": true,
-      "note": "双栈，傻逼一样，死慢的，传不动"
+      "note": "双栈，傻逼一样，死慢的，1分钟7M左右"
     },
     {
       "path": "list:ty/h",

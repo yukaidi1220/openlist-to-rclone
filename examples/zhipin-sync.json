@@ -19,8 +19,8 @@
     },
     {
       "path": "list:cm/h",
-      "prefer_ipv6": true,
-      "warp_v4": true,
+      "prefer_ipv6": false,
+      "warp_v4": false,
       "max_batch_gb": 5,
       "max_file_gb": 8,
       "cleanup_dst": true

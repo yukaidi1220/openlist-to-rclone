@@ -38,6 +38,16 @@ on:
         required: false
         default: false
         type: boolean
+      warp_v4:
+        description: '是否让 IPv4 也走 WARP（默认仅 IPv6 走 WARP）'
+        required: false
+        default: false
+        type: boolean
+      dryrun:
+        description: '空跑模式（不实际复制/删除文件，仅列出差异）'
+        required: false
+        default: false
+        type: boolean
       batch_id:
         description: 'rerun 模式下要重跑的 batch 编号'
         required: false
@@ -68,6 +78,12 @@ on:
       cleanup_dst:
         type: boolean
         default: false
+      warp_v4:
+        type: boolean
+        default: false
+      dryrun:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -93,6 +109,7 @@ jobs:
     env:
       TOOLS_DIR: /tmp/tasks/tools
       OPENLIST_DIR: /tmp/tasks/openlist
+      WARP_V4: ${{ inputs.warp_v4 }}
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -101,6 +118,8 @@ jobs:
       # 安装 Cloudflare WARP（始终执行，提供 IPv6 连接）
       # ============================================================
       - name: 安装 Cloudflare WARP
+        env:
+          WARP_V4: ${{ inputs.warp_v4 }}
         run: |
           set -e
 
@@ -157,7 +176,15 @@ jobs:
           INTERFACE=wgcf
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
-          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+
+          # 根据 warp_v4 决定 allowed-ips
+          if [ "$WARP_V4" = "true" ]; then
+            echo ">>> warp_v4=true: v4 和 v6 都走 WARP"
+            sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0,::/0"
+          else
+            echo ">>> warp_v4=false: 仅 v6 走 WARP"
+            sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+          fi
 
           # 先启用接口，再添加地址
           sudo ip link set mtu 1280 up dev $INTERFACE
@@ -169,6 +196,17 @@ jobs:
             sudo ip -6 route replace ::/0 dev $INTERFACE
           else
             echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
+          fi
+
+          # warp_v4=true 时设置 IPv4 默认路由走 WARP
+          if [ "$WARP_V4" = "true" ]; then
+            echo ">>> 设置 IPv4 默认路由走 WARP..."
+            sudo ip -4 route replace 0.0.0.0/0 dev $INTERFACE 2>/dev/null || {
+              echo "::warning::IPv4 路由替换失败，尝试 table main"
+              sudo ip -4 route add 0.0.0.0/0 dev $INTERFACE table main 2>/dev/null || true
+            }
+            echo ">>> 验证 IPv4 走 WARP..."
+            curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv4 WARP OK" || echo "::warning::IPv4 WARP 不通"
           fi
 
           echo ">>> 验证 IPv6..."
@@ -549,6 +587,7 @@ jobs:
     env:
       TOOLS_DIR: /tmp/tasks/tools
       OPENLIST_DIR: /tmp/tasks/openlist
+      WARP_V4: ${{ inputs.warp_v4 }}
     strategy:
       fail-fast: false
       max-parallel: 10
@@ -562,6 +601,8 @@ jobs:
       # 安装 Cloudflare WARP（始终执行，提供 IPv6 连接）
       # ============================================================
       - name: 安装 Cloudflare WARP
+        env:
+          WARP_V4: ${{ inputs.warp_v4 }}
         run: |
           set -e
 
@@ -618,7 +659,15 @@ jobs:
           INTERFACE=wgcf
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
-          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+
+          # 根据 warp_v4 决定 allowed-ips
+          if [ "$WARP_V4" = "true" ]; then
+            echo ">>> warp_v4=true: v4 和 v6 都走 WARP"
+            sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0,::/0"
+          else
+            echo ">>> warp_v4=false: 仅 v6 走 WARP"
+            sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+          fi
 
           # 先启用接口，再添加地址
           sudo ip link set mtu 1280 up dev $INTERFACE
@@ -630,6 +679,17 @@ jobs:
             sudo ip -6 route replace ::/0 dev $INTERFACE
           else
             echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
+          fi
+
+          # warp_v4=true 时设置 IPv4 默认路由走 WARP
+          if [ "$WARP_V4" = "true" ]; then
+            echo ">>> 设置 IPv4 默认路由走 WARP..."
+            sudo ip -4 route replace 0.0.0.0/0 dev $INTERFACE 2>/dev/null || {
+              echo "::warning::IPv4 路由替换失败，尝试 table main"
+              sudo ip -4 route add 0.0.0.0/0 dev $INTERFACE table main 2>/dev/null || true
+            }
+            echo ">>> 验证 IPv4 走 WARP..."
+            curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv4 WARP OK" || echo "::warning::IPv4 WARP 不通"
           fi
 
           echo ">>> 验证 IPv6..."
@@ -894,6 +954,7 @@ jobs:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
           MAX_FILE_GB: ${{ inputs.max_file_gb }}
+          DRYRUN: ${{ inputs.dryrun }}
         run: |
           set -eo pipefail
 
@@ -919,8 +980,22 @@ jobs:
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
 
+          # dryrun 模式提示
+          if [ "$DRYRUN" = "true" ]; then
+            echo "::notice::DRYRUN 模式：不会实际删除或复制文件"
+            DRY_FLAG="--dry-run"
+          else
+            DRY_FLAG=""
+          fi
+
           # 删除需要更新的文件（避免 WebDAV PUT 405 错误）
-          if [[ -s "$DIFFER_FILE" ]]; then
+          if [ "$DRYRUN" = "true" ]; then
+            if [[ -s "$DIFFER_FILE" ]]; then
+              echo ">>> DRYRUN: 将跳过删除 $(wc -l < "$DIFFER_FILE") 个需要更新的文件"
+            else
+              echo ">>> DRYRUN: 无需删除"
+            fi
+          elif [[ -s "$DIFFER_FILE" ]]; then
             echo ">>> 删除 $(wc -l < "$DIFFER_FILE") 个需要更新的文件..."
             while IFS= read -r file; do
               echo "  删除: $RCLONE_DST/$file"
@@ -949,6 +1024,7 @@ jobs:
             --retries-sleep=60s \
             --cutoff-mode soft \
             --timeout=0 \
+            $DRY_FLAG \
             "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
           COPY_EXIT=${PIPESTATUS[0]}
           set -eo pipefail
@@ -1012,6 +1088,7 @@ jobs:
     env:
       TOOLS_DIR: /tmp/tasks/tools
       OPENLIST_DIR: /tmp/tasks/openlist
+      WARP_V4: ${{ inputs.warp_v4 }}
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -1020,6 +1097,8 @@ jobs:
       # 安装 Cloudflare WARP
       # ============================================================
       - name: 安装 Cloudflare WARP
+        env:
+          WARP_V4: ${{ inputs.warp_v4 }}
         run: |
           set -e
 
@@ -1075,7 +1154,15 @@ jobs:
           INTERFACE=wgcf
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
-          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+
+          # 根据 warp_v4 决定 allowed-ips
+          if [ "$WARP_V4" = "true" ]; then
+            echo ">>> warp_v4=true: v4 和 v6 都走 WARP"
+            sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0,::/0"
+          else
+            echo ">>> warp_v4=false: 仅 v6 走 WARP"
+            sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+          fi
 
           sudo ip link set mtu 1280 up dev $INTERFACE
           sudo ip addr add "$ADDR_V4" dev $INTERFACE
@@ -1085,6 +1172,17 @@ jobs:
             sudo ip -6 route replace ::/0 dev $INTERFACE
           else
             echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
+          fi
+
+          # warp_v4=true 时设置 IPv4 默认路由走 WARP
+          if [ "$WARP_V4" = "true" ]; then
+            echo ">>> 设置 IPv4 默认路由走 WARP..."
+            sudo ip -4 route replace 0.0.0.0/0 dev $INTERFACE 2>/dev/null || {
+              echo "::warning::IPv4 路由替换失败，尝试 table main"
+              sudo ip -4 route add 0.0.0.0/0 dev $INTERFACE table main 2>/dev/null || true
+            }
+            echo ">>> 验证 IPv4 走 WARP..."
+            curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv4 WARP OK" || echo "::warning::IPv4 WARP 不通"
           fi
 
           echo ">>> 验证 IPv6..."
@@ -1269,8 +1367,17 @@ jobs:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
           MAX_FILE_GB: ${{ inputs.max_file_gb }}
+          DRYRUN: ${{ inputs.dryrun }}
         run: |
           set -eo pipefail
+
+          # dryrun 模式
+          if [ "$DRYRUN" = "true" ]; then
+            echo "::notice::DRYRUN 模式：不会实际 sync 文件"
+            DRY_FLAG="--dry-run"
+          else
+            DRY_FLAG=""
+          fi
 
           echo ">>> 使用 rclone sync 清理目的端多余文件..."
           echo "源: $RCLONE_SRC"
@@ -1289,7 +1396,8 @@ jobs:
             --retries=3 \
             --retries-sleep=60s \
             --timeout=0 \
-            --max-size "${MAX_FILE_GB}G"
+            --max-size "${MAX_FILE_GB}G" \
+            $DRY_FLAG
 
           echo ""
           echo "=========================================="
@@ -1297,7 +1405,11 @@ jobs:
           echo "=========================================="
           echo "  源: $RCLONE_SRC"
           echo "  目标: $RCLONE_DST"
-          echo "  rclone sync 已删除目的端多余文件"
+          if [ "$DRYRUN" = "true" ]; then
+            echo "  [DRYRUN] rclone sync 已模拟执行（未实际操作）"
+          else
+            echo "  rclone sync 已删除目的端多余文件"
+          fi
           echo "=========================================="
 
       # ============================================================
@@ -1325,6 +1437,7 @@ jobs:
     env:
       TOOLS_DIR: /tmp/tasks/tools
       OPENLIST_DIR: /tmp/tasks/openlist
+      WARP_V4: ${{ inputs.warp_v4 }}
     steps:
       - name: 验证输入参数
         run: |
@@ -1345,6 +1458,8 @@ jobs:
       # 安装 Cloudflare WARP（始终执行，提供 IPv6 连接）
       # ============================================================
       - name: 安装 Cloudflare WARP
+        env:
+          WARP_V4: ${{ inputs.warp_v4 }}
         run: |
           set -e
 
@@ -1401,7 +1516,15 @@ jobs:
           INTERFACE=wgcf
           sudo ip link add $INTERFACE type wireguard
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
-          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+
+          # 根据 warp_v4 决定 allowed-ips
+          if [ "$WARP_V4" = "true" ]; then
+            echo ">>> warp_v4=true: v4 和 v6 都走 WARP"
+            sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0,::/0"
+          else
+            echo ">>> warp_v4=false: 仅 v6 走 WARP"
+            sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+          fi
 
           # 先启用接口，再添加地址
           sudo ip link set mtu 1280 up dev $INTERFACE
@@ -1413,6 +1536,17 @@ jobs:
             sudo ip -6 route replace ::/0 dev $INTERFACE
           else
             echo "::warning::WARP 未分配 IPv6 地址，跳过 IPv6 配置"
+          fi
+
+          # warp_v4=true 时设置 IPv4 默认路由走 WARP
+          if [ "$WARP_V4" = "true" ]; then
+            echo ">>> 设置 IPv4 默认路由走 WARP..."
+            sudo ip -4 route replace 0.0.0.0/0 dev $INTERFACE 2>/dev/null || {
+              echo "::warning::IPv4 路由替换失败，尝试 table main"
+              sudo ip -4 route add 0.0.0.0/0 dev $INTERFACE table main 2>/dev/null || true
+            }
+            echo ">>> 验证 IPv4 走 WARP..."
+            curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv4 WARP OK" || echo "::warning::IPv4 WARP 不通"
           fi
 
           echo ">>> 验证 IPv6..."
@@ -1679,6 +1813,7 @@ jobs:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
           MAX_FILE_GB: ${{ inputs.max_file_gb }}
+          DRYRUN: ${{ inputs.dryrun }}
         run: |
           set -eo pipefail
 
@@ -1707,8 +1842,22 @@ jobs:
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
 
+          # dryrun 模式提示
+          if [ "$DRYRUN" = "true" ]; then
+            echo "::notice::DRYRUN 模式：不会实际删除或复制文件"
+            DRY_FLAG="--dry-run"
+          else
+            DRY_FLAG=""
+          fi
+
           # 删除需要更新的文件（避免 WebDAV PUT 405 错误）
-          if [[ -s "$DIFFER_FILE" ]]; then
+          if [ "$DRYRUN" = "true" ]; then
+            if [[ -s "$DIFFER_FILE" ]]; then
+              echo ">>> DRYRUN: 将跳过删除 $(wc -l < "$DIFFER_FILE") 个需要更新的文件"
+            else
+              echo ">>> DRYRUN: 无需删除"
+            fi
+          elif [[ -s "$DIFFER_FILE" ]]; then
             echo ">>> 删除 $(wc -l < "$DIFFER_FILE") 个需要更新的文件..."
             while IFS= read -r file; do
               echo "  删除: $RCLONE_DST/$file"
@@ -1737,6 +1886,7 @@ jobs:
             --retries-sleep=60s \
             --cutoff-mode soft \
             --timeout=0 \
+            $DRY_FLAG \
             "$RCLONE_SRC" "$RCLONE_DST" 2>&1 | tee /tmp/rclone_output.log
           COPY_EXIT=${PIPESTATUS[0]}
           set -eo pipefail

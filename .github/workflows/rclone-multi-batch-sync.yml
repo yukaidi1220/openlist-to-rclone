@@ -15,6 +15,11 @@ on:
         description: '自定义 JSON 链接（非空时覆盖上方预置选择）'
         required: false
         type: string
+      dryrun:
+        description: '空跑模式（不实际复制/删除文件，仅列出差异）'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -127,6 +132,7 @@ jobs:
           MATRIX=$(jq -c '[.targets[] | {
             path: .path,
             prefer_ipv6: (if .prefer_ipv6 == true then true else false end),
+            warp_v4: (if .warp_v4 == true then true else false end),
             max_batch_gb: (.max_batch_gb // 50),
             max_file_gb: (.max_file_gb // 100),
             cleanup_dst: (.cleanup_dst // false)
@@ -166,4 +172,6 @@ jobs:
       max_batch_gb: ${{ matrix.target.max_batch_gb }}
       max_file_gb: ${{ matrix.target.max_file_gb }}
       cleanup_dst: ${{ matrix.target.cleanup_dst }}
+      warp_v4: ${{ matrix.target.warp_v4 }}
+      dryrun: ${{ inputs.dryrun }}
     secrets: inherit

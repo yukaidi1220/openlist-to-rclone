@@ -221,10 +221,12 @@ jobs:
               size = $f.Size
             }
           }
+          # 注意：不能用 "[${(...)}]" 写法，PowerShell 会把 ${...} 当变量名解析，导致空数组
+          $singleJson = $matrix | ConvertTo-Json -Depth 3 -Compress
           $matrixJson = if ($matrix.Count -eq 1) {
-            "[${($matrix | ConvertTo-Json -Depth 3 -Compress)}]"
+            "[$singleJson]"
           } else {
-            ($matrix | ConvertTo-Json -Depth 3 -Compress)
+            $singleJson
           }
 
           $out = $env:GITHUB_OUTPUT

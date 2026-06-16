@@ -178,30 +178,35 @@ jobs:
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
 
           # warp_v4=true 时先添加直连路由，避免路由死锁 / 局域网中断
+          WARP_V4_FALLBACK=false
           if [ "$WARP_V4" = "true" ]; then
             ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
-            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
-            ENDPOINT_IP=$(dig +short "$ENDPOINT_HOST" 2>/dev/null | head -1)
-            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
-              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
-              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
-                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
-            fi
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
             for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
             done
+            # 解析 WARP 端点 IP（加超时避免 DNS 卡死）
+            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
+            ENDPOINT_IP=$(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null | head -1)
+            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
+              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
+              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
+            else
+              echo "::warning::warp_v4: 无法解析 WARP 端点，回退到仅 v6 走 WARP"
+              WARP_V4_FALLBACK=true
+            fi
           fi
 
           # 根据 warp_v4 决定 allowed-ips
-          if [ "$WARP_V4" = "true" ]; then
+          if [ "$WARP_V4" = "true" ] && [ "$WARP_V4_FALLBACK" != "true" ]; then
             echo ">>> warp_v4=true: v4 和 v6 都走 WARP"
             sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0,::/0"
           else
-            echo ">>> warp_v4=false: 仅 v6 走 WARP"
+            echo ">>> 仅 v6 走 WARP"
             sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
           fi
 
@@ -680,30 +685,35 @@ jobs:
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
 
           # warp_v4=true 时先添加直连路由，避免路由死锁 / 局域网中断
+          WARP_V4_FALLBACK=false
           if [ "$WARP_V4" = "true" ]; then
             ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
-            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
-            ENDPOINT_IP=$(dig +short "$ENDPOINT_HOST" 2>/dev/null | head -1)
-            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
-              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
-              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
-                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
-            fi
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
             for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
             done
+            # 解析 WARP 端点 IP（加超时避免 DNS 卡死）
+            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
+            ENDPOINT_IP=$(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null | head -1)
+            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
+              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
+              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
+            else
+              echo "::warning::warp_v4: 无法解析 WARP 端点，回退到仅 v6 走 WARP"
+              WARP_V4_FALLBACK=true
+            fi
           fi
 
           # 根据 warp_v4 决定 allowed-ips
-          if [ "$WARP_V4" = "true" ]; then
+          if [ "$WARP_V4" = "true" ] && [ "$WARP_V4_FALLBACK" != "true" ]; then
             echo ">>> warp_v4=true: v4 和 v6 都走 WARP"
             sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0,::/0"
           else
-            echo ">>> warp_v4=false: 仅 v6 走 WARP"
+            echo ">>> 仅 v6 走 WARP"
             sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
           fi
 
@@ -1194,30 +1204,35 @@ jobs:
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
 
           # warp_v4=true 时先添加直连路由，避免路由死锁 / 局域网中断
+          WARP_V4_FALLBACK=false
           if [ "$WARP_V4" = "true" ]; then
             ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
-            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
-            ENDPOINT_IP=$(dig +short "$ENDPOINT_HOST" 2>/dev/null | head -1)
-            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
-              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
-              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
-                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
-            fi
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
             for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
             done
+            # 解析 WARP 端点 IP（加超时避免 DNS 卡死）
+            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
+            ENDPOINT_IP=$(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null | head -1)
+            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
+              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
+              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
+            else
+              echo "::warning::warp_v4: 无法解析 WARP 端点，回退到仅 v6 走 WARP"
+              WARP_V4_FALLBACK=true
+            fi
           fi
 
           # 根据 warp_v4 决定 allowed-ips
-          if [ "$WARP_V4" = "true" ]; then
+          if [ "$WARP_V4" = "true" ] && [ "$WARP_V4_FALLBACK" != "true" ]; then
             echo ">>> warp_v4=true: v4 和 v6 都走 WARP"
             sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0,::/0"
           else
-            echo ">>> warp_v4=false: 仅 v6 走 WARP"
+            echo ">>> 仅 v6 走 WARP"
             sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
           fi
 
@@ -1575,30 +1590,35 @@ jobs:
           echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
 
           # warp_v4=true 时先添加直连路由，避免路由死锁 / 局域网中断
+          WARP_V4_FALLBACK=false
           if [ "$WARP_V4" = "true" ]; then
             ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
-            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
-            ENDPOINT_IP=$(dig +short "$ENDPOINT_HOST" 2>/dev/null | head -1)
-            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
-              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
-              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
-                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
-            fi
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
             for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
             done
+            # 解析 WARP 端点 IP（加超时避免 DNS 卡死）
+            ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
+            ENDPOINT_IP=$(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null | head -1)
+            if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
+              echo ">>> warp_v4: WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
+              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+                sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
+            else
+              echo "::warning::warp_v4: 无法解析 WARP 端点，回退到仅 v6 走 WARP"
+              WARP_V4_FALLBACK=true
+            fi
           fi
 
           # 根据 warp_v4 决定 allowed-ips
-          if [ "$WARP_V4" = "true" ]; then
+          if [ "$WARP_V4" = "true" ] && [ "$WARP_V4_FALLBACK" != "true" ]; then
             echo ">>> warp_v4=true: v4 和 v6 都走 WARP"
             sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0,::/0"
           else
-            echo ">>> warp_v4=false: 仅 v6 走 WARP"
+            echo ">>> 仅 v6 走 WARP"
             sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
           fi
 

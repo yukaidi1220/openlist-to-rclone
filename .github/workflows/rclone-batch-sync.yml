@@ -184,7 +184,7 @@ jobs:
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
-            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8; do
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8 185.199.0.0/16; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
             done
@@ -714,7 +714,7 @@ jobs:
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
-            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8; do
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8 185.199.0.0/16; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
             done
@@ -1256,7 +1256,7 @@ jobs:
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
-            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8; do
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8 185.199.0.0/16; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
             done
@@ -1668,7 +1668,7 @@ jobs:
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
-            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8; do
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8 185.199.0.0/16; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
             done

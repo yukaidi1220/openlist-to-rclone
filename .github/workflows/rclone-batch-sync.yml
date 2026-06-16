@@ -184,9 +184,13 @@ jobs:
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
-            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
+            done
+            # IPv6 直连（私有 ULA+GitHub 走原始网卡，绕过 WARP）
+            for NET6 in fc00::/7 2a01::/16 2620::/16; do
+              sudo ip -6 route add "$NET6" dev "$ORIG_IF" 2>/dev/null || true
             done
             # 解析 WARP 端点 IP（加超时避免 DNS 卡死）
             ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
@@ -703,9 +707,13 @@ jobs:
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
-            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
+            done
+            # IPv6 直连（私有 ULA+GitHub 走原始网卡，绕过 WARP）
+            for NET6 in fc00::/7 2a01::/16 2620::/16; do
+              sudo ip -6 route add "$NET6" dev "$ORIG_IF" 2>/dev/null || true
             done
             # 解析 WARP 端点 IP（加超时避免 DNS 卡死）
             ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
@@ -1234,9 +1242,13 @@ jobs:
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
-            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
+            done
+            # IPv6 直连（私有 ULA+GitHub 走原始网卡，绕过 WARP）
+            for NET6 in fc00::/7 2a01::/16 2620::/16; do
+              sudo ip -6 route add "$NET6" dev "$ORIG_IF" 2>/dev/null || true
             done
             # 解析 WARP 端点 IP（加超时避免 DNS 卡死）
             ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
@@ -1635,9 +1647,13 @@ jobs:
             ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
             # 私有/保留网段走原始网关，不走 WARP
             echo ">>> warp_v4: 私有/保留网段走原始网关 $ORIG_GW"
-            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8; do
               sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
                 sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
+            done
+            # IPv6 直连（私有 ULA+GitHub 走原始网卡，绕过 WARP）
+            for NET6 in fc00::/7 2a01::/16 2620::/16; do
+              sudo ip -6 route add "$NET6" dev "$ORIG_IF" 2>/dev/null || true
             done
             # 解析 WARP 端点 IP（加超时避免 DNS 卡死）
             ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)

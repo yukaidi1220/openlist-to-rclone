@@ -122,9 +122,6 @@ jobs:
       WGCF_ACCOUNT: wgcf/wgcf-account.toml
       REG_RETRY: "6"
       REG_BACKOFF: "5"
-      WGCF_ACCOUNT: wgcf/wgcf-account.toml
-      REG_RETRY: "6"
-      REG_BACKOFF: "5"
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4

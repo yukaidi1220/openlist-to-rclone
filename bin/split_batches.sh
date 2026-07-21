@@ -27,6 +27,8 @@ mapfile -t sorted < <(grep -E '^[0-9]+;' "$FILES_FILE" | sort -t';' -k1 -rn)
 
 # batch_remaining[i] = 当前 batch 剩余可用字节
 declare -a batch_remaining=()
+# batch_bytes[i] = 当前 batch 已使用字节
+declare -a batch_bytes=()
 # batch_paths[i] = 当前 batch 的文件路径（换行分隔）
 declare -a batch_paths=()
 batch_count=0
@@ -35,9 +37,9 @@ for entry in "${sorted[@]}"; do
     [[ -z "$entry" ]] && continue
     size="${entry%%;*}"
     path="${entry#*;}"
-    # 清理空白字符
+    # size 必须是纯数字；路径中的空格是文件名的一部分，不能删除
     size="${size//[$'\t\r\n ']}"
-    path="${path//[$'\t\r\n ']}"
+    path="${path%$'\r'}"
 
     [[ -z "$size" || -z "$path" ]] && continue
 
@@ -46,6 +48,7 @@ for entry in "${sorted[@]}"; do
     for ((i = 0; i < batch_count; i++)); do
         if ((batch_remaining[i] >= size)); then
             batch_remaining[i]=$((batch_remaining[i] - size))
+            batch_bytes[i]=$((batch_bytes[i] + size))
             batch_paths[$i]+="$path"$'\n'
             placed=1
             break
@@ -58,6 +61,7 @@ for entry in "${sorted[@]}"; do
             echo "WARNING: $path ($size bytes = $(awk "BEGIN{printf \"%.2f\", $size/1024/1024/1024}") GiB) exceeds batch limit,单独一批" >&2
         fi
         batch_remaining[$batch_count]=$((MAX_BYTES - size))
+        batch_bytes[$batch_count]=$size
         batch_paths[$batch_count]="$path"$'\n'
         batch_count=$((batch_count + 1))
     fi
@@ -70,16 +74,7 @@ for ((i = 0; i < batch_count; i++)); do
     printf '%s' "${batch_paths[$i]}" > "$batch_file"
     count=$(wc -l < "$batch_file" | tr -d ' ')
 
-    # 用 grep 批量计算本批总大小
-    total=0
-    while IFS= read -r p; do
-        [[ -z "$p" ]] && continue
-        # 从原始文件中精确匹配路径（使用 awk 避免子串误匹配）
-        s=$(awk -F';' -v p="$p" '$2 == p {print $1; exit}' "$FILES_FILE")
-        if [[ -n "$s" ]]; then
-            total=$((total + s))
-        fi
-    done < "$batch_file"
+    total="${batch_bytes[$i]}"
 
     gb=$(awk "BEGIN{printf \"%.2f\", $total / 1024 / 1024 / 1024}")
     echo "Batch $i: $count files, ${gb} GiB" >&2

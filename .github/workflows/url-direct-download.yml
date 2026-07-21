@@ -107,11 +107,18 @@ jobs:
     needs: list-files
     if: ${{ needs.list-files.outputs.file-count != '0' }}
     runs-on: ubuntu-latest
+    env:
+      WGCF_ACCOUNT: wgcf/wgcf-account.toml
+      REG_RETRY: "6"
+      REG_BACKOFF: "5"
     strategy:
       fail-fast: false
       matrix:
         file: ${{ fromJSON(needs.list-files.outputs.matrix) }}
     steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
       # ============================================================
       # Step 1: 条件安装 WARP（IPv6）
       # ============================================================
@@ -125,27 +132,38 @@ jobs:
           sudo apt-get install -y -qq wireguard-tools resolvconf
 
           echo ">>> 下载 wgcf..."
-          curl -fsSL -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
-          chmod +x wgcf
-          sudo mv wgcf /usr/local/bin/wgcf
+          curl -fsSL -o wgcf-bin https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
+          chmod +x wgcf-bin
+          sudo mv wgcf-bin /usr/local/bin/wgcf
+          wgcf --help >/dev/null 2>&1 || true
 
-          echo ">>> 注册 WARP 账户..."
-          REGISTERED=false
-          for i in {1..5}; do
+          echo ">>> 备份仓库既有账号..."
+          cp -f "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}" wgcf-account.bak 2>/dev/null || true
+
+          echo ">>> 注册 WARP 账户（注册优先，失败回退复用）..."
+          reg_ok=false
+          for i in $(seq 1 "${{ env.REG_RETRY }}"); do
             if wgcf register --accept-tos; then
-              REGISTERED=true
+              mv -f wgcf-account.toml "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}"
+              cp -f "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}" wgcf-account.toml
+              reg_ok=true
               break
             fi
-            echo "注册失败，重试 $i/5..."
-            sleep $((i * 10))
+            echo "::warning::新注册失败，等待 $((i * ${{ env.REG_BACKOFF }}))s 后重试 ($i/${{ env.REG_RETRY }})..."
+            sleep $((i * ${{ env.REG_BACKOFF }}))
           done
 
-          # 检查注册是否成功
-          if [ "$REGISTERED" = false ] || [ ! -f wgcf-account.toml ]; then
-            echo "::error::WARP 注册失败，已重试 5 次"
-            exit 1
+          if [ "$reg_ok" != "true" ]; then
+            echo "::warning::新注册全部失败，回退复用仓库持久化账号"
+            cp -f wgcf-account.bak "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}" 2>/dev/null || true
+            if [ -f "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}" ]; then
+              cp -f "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}" wgcf-account.toml
+            else
+              echo "::error::无可用 WARP 账号（仓库也未保存）"
+              exit 1
+            fi
           fi
-          echo ">>> 注册成功"
+          echo ">>> WARP 账号就绪"
 
           echo ">>> 生成 WireGuard 配置..."
           wgcf generate

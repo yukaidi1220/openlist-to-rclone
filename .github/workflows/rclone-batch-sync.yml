@@ -145,6 +145,8 @@ jobs:
       - name: 安装 Cloudflare WARP
         env:
           WARP_V4: ${{ inputs.warp_v4 }}
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           set -e
 
@@ -169,6 +171,21 @@ jobs:
           chmod +x wgcf-bin
           sudo mv wgcf-bin /usr/local/bin/wgcf
           wgcf --help >/dev/null 2>&1 || true
+
+          echo ">>> 从 rclone-action 仓库拉取 wgcf-account.toml..."
+          mkdir -p "$(dirname "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}")"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
+              -o "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}"; then
+              echo "wgcf-account.toml 拉取成功"
+              break
+            fi
+            echo "拉取失败，重试 $i/3..."
+            sleep $((i * 5))
+          done
 
           echo ">>> 备份仓库既有账号..."
           cp -f "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}" wgcf-account.bak 2>/dev/null || true
@@ -703,6 +720,8 @@ jobs:
       - name: 安装 Cloudflare WARP
         env:
           WARP_V4: ${{ inputs.warp_v4 }}
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           set -e
 
@@ -727,6 +746,21 @@ jobs:
           chmod +x wgcf-bin
           sudo mv wgcf-bin /usr/local/bin/wgcf
           wgcf --help >/dev/null 2>&1 || true
+
+          echo ">>> 从 rclone-action 仓库拉取 wgcf-account.toml..."
+          mkdir -p "$(dirname "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}")"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
+              -o "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}"; then
+              echo "wgcf-account.toml 拉取成功"
+              break
+            fi
+            echo "拉取失败，重试 $i/3..."
+            sleep $((i * 5))
+          done
 
           echo ">>> 备份仓库既有账号..."
           cp -f "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}" wgcf-account.bak 2>/dev/null || true
@@ -1274,6 +1308,8 @@ jobs:
       - name: 安装 Cloudflare WARP
         env:
           WARP_V4: ${{ inputs.warp_v4 }}
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           set -e
 
@@ -1298,6 +1334,21 @@ jobs:
           chmod +x wgcf-bin
           sudo mv wgcf-bin /usr/local/bin/wgcf
           wgcf --help >/dev/null 2>&1 || true
+
+          echo ">>> 从 rclone-action 仓库拉取 wgcf-account.toml..."
+          mkdir -p "$(dirname "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}")"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
+              -o "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}"; then
+              echo "wgcf-account.toml 拉取成功"
+              break
+            fi
+            echo "拉取失败，重试 $i/3..."
+            sleep $((i * 5))
+          done
 
           echo ">>> 备份仓库既有账号..."
           cp -f "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}" wgcf-account.bak 2>/dev/null || true
@@ -1714,6 +1765,8 @@ jobs:
       - name: 安装 Cloudflare WARP
         env:
           WARP_V4: ${{ inputs.warp_v4 }}
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           set -e
 
@@ -1738,6 +1791,21 @@ jobs:
           chmod +x wgcf-bin
           sudo mv wgcf-bin /usr/local/bin/wgcf
           wgcf --help >/dev/null 2>&1 || true
+
+          echo ">>> 从 rclone-action 仓库拉取 wgcf-account.toml..."
+          mkdir -p "$(dirname "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}")"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
+              -o "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}"; then
+              echo "wgcf-account.toml 拉取成功"
+              break
+            fi
+            echo "拉取失败，重试 $i/3..."
+            sleep $((i * 5))
+          done
 
           echo ">>> 备份仓库既有账号..."
           cp -f "$GITHUB_WORKSPACE/${{ env.WGCF_ACCOUNT }}" wgcf-account.bak 2>/dev/null || true

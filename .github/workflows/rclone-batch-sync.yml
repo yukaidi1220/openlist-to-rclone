@@ -33,6 +33,11 @@ on:
         required: false
         default: '100'
         type: number
+      force_json_max_mb:
+        description: '强制重传的 .json 文件大小上限（MB）：≤此大小的 json 文件始终先删后传，绕过 size-only 盲区'
+        required: false
+        default: '1'
+        type: number
       cleanup_dst:
         description: '是否清理目的端多余文件'
         required: false
@@ -80,6 +85,9 @@ on:
       max_file_gb:
         type: number
         default: 100
+      force_json_max_mb:
+        type: number
+        default: 1
       cleanup_dst:
         type: boolean
         default: false
@@ -567,6 +575,7 @@ jobs:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
           MAX_FILE_GB: ${{ inputs.max_file_gb }}
+          FORCE_JSON_MAX_MB: ${{ inputs.force_json_max_mb }}
         run: |
           echo ">>> 对比源和目标差异..."
           echo "源: $RCLONE_SRC"
@@ -587,6 +596,23 @@ jobs:
 
           # 合并需要传输的文件列表
           cat /tmp/missing.txt /tmp/differ.txt > /tmp/transfer.txt 2>/dev/null || true
+
+          # 强制纳入：源端所有 ≤${FORCE_JSON_MAX_MB}M 的 .json 文件（绕过 size-only 盲区，确保内容更新）
+          echo ">>> 强制纳入源端 ≤${FORCE_JSON_MAX_MB}M 的 .json 文件..."
+          rclone lsf -R --files-only \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --include "*.json" \
+            --max-size ${FORCE_JSON_MAX_MB}M \
+            --tpslimit 1 \
+            "$RCLONE_SRC" > /tmp/force_json_all.txt 2>/dev/null || true
+          if [[ -s /tmp/force_json_all.txt ]]; then
+            while IFS= read -r f; do
+              [[ -z "$f" ]] && continue
+              grep -qxF "$f" /tmp/transfer.txt 2>/dev/null || echo "$f" >> /tmp/transfer.txt
+            done < /tmp/force_json_all.txt
+            echo "强制纳入 $(wc -l < /tmp/force_json_all.txt) 个 ≤${FORCE_JSON_MAX_MB}M json 文件"
+          fi
+
           transfer_count=$(wc -l < /tmp/transfer.txt 2>/dev/null || echo "0")
           echo "需要同步的文件数: $transfer_count"
 
@@ -1146,6 +1172,7 @@ jobs:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
           MAX_FILE_GB: ${{ inputs.max_file_gb }}
+          FORCE_JSON_MAX_MB: ${{ inputs.force_json_max_mb }}
           DRYRUN: ${{ inputs.dryrun }}
         run: |
           set -eo pipefail
@@ -1171,6 +1198,20 @@ jobs:
             --differ "$DIFFER_FILE" \
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
+
+          # 强制重传：≤${FORCE_JSON_MAX_MB}M 的 .json 文件（绕过 size-only 盲区，确保内容更新）
+          echo ">>> 强制重传 ≤${FORCE_JSON_MAX_MB}M 的 .json 文件..."
+          FORCE_JSON="/tmp/force_json_$$.txt"
+          rclone lsf -R --files-only --format "p" \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --files-from-raw "$BATCH_FILE" \
+            --include "*.json" \
+            --max-size ${FORCE_JSON_MAX_MB}M \
+            "$RCLONE_SRC" 2>/dev/null > "$FORCE_JSON" || true
+          if [[ -s "$FORCE_JSON" ]]; then
+            echo "  强制删除并重传 $(wc -l < "$FORCE_JSON") 个 ≤${FORCE_JSON_MAX_MB}M json 文件"
+            cat "$FORCE_JSON" >> "$DIFFER_FILE"
+          fi
 
           # dryrun 模式提示
           if [ "$DRYRUN" = "true" ]; then
@@ -2193,6 +2234,7 @@ jobs:
           RCLONE_SRC: ${{ inputs.rclone_src }}
           RCLONE_DST: ${{ inputs.rclone_dst }}
           MAX_FILE_GB: ${{ inputs.max_file_gb }}
+          FORCE_JSON_MAX_MB: ${{ inputs.force_json_max_mb }}
           DRYRUN: ${{ inputs.dryrun }}
         run: |
           set -eo pipefail
@@ -2221,6 +2263,20 @@ jobs:
             --differ "$DIFFER_FILE" \
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
+
+          # 强制重传：≤${FORCE_JSON_MAX_MB}M 的 .json 文件（绕过 size-only 盲区，确保内容更新）
+          echo ">>> 强制重传 ≤${FORCE_JSON_MAX_MB}M 的 .json 文件..."
+          FORCE_JSON="/tmp/force_json_$$.txt"
+          rclone lsf -R --files-only --format "p" \
+            --config "$GITHUB_WORKSPACE/rclone.conf" \
+            --files-from-raw "$BATCH_FILE" \
+            --include "*.json" \
+            --max-size ${FORCE_JSON_MAX_MB}M \
+            "$RCLONE_SRC" 2>/dev/null > "$FORCE_JSON" || true
+          if [[ -s "$FORCE_JSON" ]]; then
+            echo "  强制删除并重传 $(wc -l < "$FORCE_JSON") 个 ≤${FORCE_JSON_MAX_MB}M json 文件"
+            cat "$FORCE_JSON" >> "$DIFFER_FILE"
+          fi
 
           # dryrun 模式提示
           if [ "$DRYRUN" = "true" ]; then

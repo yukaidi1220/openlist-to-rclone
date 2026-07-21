@@ -1204,12 +1204,13 @@ jobs:
           # 强制重传：≤${FORCE_JSON_MAX_MB}M 的 .json 文件（绕过 size-only 盲区，确保内容更新）
           echo ">>> 强制重传 ≤${FORCE_JSON_MAX_MB}M 的 .json 文件..."
           FORCE_JSON="/tmp/force_json_$$.txt"
-          rclone lsf -R --files-only --format "p" \
+          MAX_BYTES=$(( ${FORCE_JSON_MAX_MB} * 1048576 ))
+          # --files-from 模式下 --include/--max-size 不生效，故改为列出本批 size;path 后本地用 awk 筛选
+          rclone lsf -R --files-only --format "sp" --separator ";" \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
-            --include "*.json" \
-            --max-size ${FORCE_JSON_MAX_MB}M \
-            "$RCLONE_SRC" 2>/dev/null > "$FORCE_JSON" || true
+            "$RCLONE_SRC" 2>/dev/null > /tmp/ls_all_$$.txt || true
+          awk -F';' -v max="$MAX_BYTES" 'tolower($2) ~ /\.json$/ && ($1 + 0) <= max {print $2}' /tmp/ls_all_$$.txt > "$FORCE_JSON"
           if [[ -s "$FORCE_JSON" ]]; then
             echo "  强制删除并重传 $(wc -l < "$FORCE_JSON") 个 ≤${FORCE_JSON_MAX_MB}M json 文件"
             cat "$FORCE_JSON" >> "$DIFFER_FILE"
@@ -2269,12 +2270,13 @@ jobs:
           # 强制重传：≤${FORCE_JSON_MAX_MB}M 的 .json 文件（绕过 size-only 盲区，确保内容更新）
           echo ">>> 强制重传 ≤${FORCE_JSON_MAX_MB}M 的 .json 文件..."
           FORCE_JSON="/tmp/force_json_$$.txt"
-          rclone lsf -R --files-only --format "p" \
+          MAX_BYTES=$(( ${FORCE_JSON_MAX_MB} * 1048576 ))
+          # --files-from 模式下 --include/--max-size 不生效，故改为列出本批 size;path 后本地用 awk 筛选
+          rclone lsf -R --files-only --format "sp" --separator ";" \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
-            --include "*.json" \
-            --max-size ${FORCE_JSON_MAX_MB}M \
-            "$RCLONE_SRC" 2>/dev/null > "$FORCE_JSON" || true
+            "$RCLONE_SRC" 2>/dev/null > /tmp/ls_all_$$.txt || true
+          awk -F';' -v max="$MAX_BYTES" 'tolower($2) ~ /\.json$/ && ($1 + 0) <= max {print $2}' /tmp/ls_all_$$.txt > "$FORCE_JSON"
           if [[ -s "$FORCE_JSON" ]]; then
             echo "  强制删除并重传 $(wc -l < "$FORCE_JSON") 个 ≤${FORCE_JSON_MAX_MB}M json 文件"
             cat "$FORCE_JSON" >> "$DIFFER_FILE"

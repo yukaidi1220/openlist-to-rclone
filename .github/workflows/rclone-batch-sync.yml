@@ -605,6 +605,8 @@ jobs:
             --max-size ${FORCE_JSON_MAX_MB}M \
             --tpslimit 1 \
             "$RCLONE_SRC" > /tmp/force_json_all.txt 2>/dev/null || true
+          # 归一化可能的 CRLF 行尾，避免 grep -x 去重失败导致重复纳入
+          sed -i 's/\r$//' /tmp/force_json_all.txt 2>/dev/null || true
           if [[ -s /tmp/force_json_all.txt ]]; then
             while IFS= read -r f; do
               [[ -z "$f" ]] && continue

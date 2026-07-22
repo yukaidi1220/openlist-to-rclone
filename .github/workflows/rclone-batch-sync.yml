@@ -597,14 +597,16 @@ jobs:
           # 合并需要传输的文件列表
           cat /tmp/missing.txt /tmp/differ.txt > /tmp/transfer.txt 2>/dev/null || true
 
-          # 强制纳入：源端所有 ≤${FORCE_JSON_MAX_MB}M 的 .json 文件（绕过 size-only 盲区，确保内容更新）
-          echo ">>> 强制纳入源端 ≤${FORCE_JSON_MAX_MB}M 的 .json 文件..."
-          rclone lsf -R --files-only \
+          # 强制纳入：源端所有 ≤${FORCE_JSON_MAX_MB}MiB 的 .json 文件（绕过 size-only 盲区，确保内容更新）
+          echo ">>> 强制纳入源端 ≤${FORCE_JSON_MAX_MB}MiB 的 .json 文件..."
+          MAX_BYTES=$(( ${FORCE_JSON_MAX_MB} * 1048576 ))
+          # 统一用 awk 按字节过滤（不依赖 rclone 的 M/Mi 后缀语义），并保留含分号的完整路径
+          rclone lsf -R --files-only --format "sp" --separator ";" \
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --include "*.json" \
-            --max-size ${FORCE_JSON_MAX_MB}M \
             --tpslimit 1 \
-            "$RCLONE_SRC" > /tmp/force_json_all.txt 2>/dev/null || true
+            "$RCLONE_SRC" 2>/dev/null | \
+            awk -F';' -v max="$MAX_BYTES" '{ sz=$1; sub(/^[0-9]+;/, ""); p=$0; if (tolower(p) ~ /\.json$/ && (sz+0) <= max) print p }' > /tmp/force_json_all.txt || true
           # 归一化可能的 CRLF 行尾，避免 grep -x 去重失败导致重复纳入
           sed -i 's/\r$//' /tmp/force_json_all.txt 2>/dev/null || true
           if [[ -s /tmp/force_json_all.txt ]]; then
@@ -1201,8 +1203,8 @@ jobs:
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
 
-          # 强制重传：≤${FORCE_JSON_MAX_MB}M 的 .json 文件（绕过 size-only 盲区，确保内容更新）
-          echo ">>> 强制重传 ≤${FORCE_JSON_MAX_MB}M 的 .json 文件..."
+          # 强制重传：≤${FORCE_JSON_MAX_MB}MiB 的 .json 文件（绕过 size-only 盲区，确保内容更新）
+          echo ">>> 强制重传 ≤${FORCE_JSON_MAX_MB}MiB 的 .json 文件..."
           FORCE_JSON="/tmp/force_json_$$.txt"
           MAX_BYTES=$(( ${FORCE_JSON_MAX_MB} * 1048576 ))
           # --files-from 模式下 --include/--max-size 不生效，故改为列出本批 size;path 后本地用 awk 筛选
@@ -1210,7 +1212,7 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" 2>/dev/null > /tmp/ls_all_$$.txt || true
-          awk -F';' -v max="$MAX_BYTES" 'tolower($2) ~ /\.json$/ && ($1 + 0) <= max {print $2}' /tmp/ls_all_$$.txt > "$FORCE_JSON"
+          awk -F';' -v max="$MAX_BYTES" '{ sz=$1; sub(/^[0-9]+;/, ""); p=$0; if (tolower(p) ~ /\.json$/ && (sz+0) <= max) print p }' /tmp/ls_all_$$.txt > "$FORCE_JSON"
           if [[ -s "$FORCE_JSON" ]]; then
             echo "  强制删除并重传 $(wc -l < "$FORCE_JSON") 个 ≤${FORCE_JSON_MAX_MB}M json 文件"
             cat "$FORCE_JSON" >> "$DIFFER_FILE"
@@ -2267,8 +2269,8 @@ jobs:
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" "$RCLONE_DST" || true
 
-          # 强制重传：≤${FORCE_JSON_MAX_MB}M 的 .json 文件（绕过 size-only 盲区，确保内容更新）
-          echo ">>> 强制重传 ≤${FORCE_JSON_MAX_MB}M 的 .json 文件..."
+          # 强制重传：≤${FORCE_JSON_MAX_MB}MiB 的 .json 文件（绕过 size-only 盲区，确保内容更新）
+          echo ">>> 强制重传 ≤${FORCE_JSON_MAX_MB}MiB 的 .json 文件..."
           FORCE_JSON="/tmp/force_json_$$.txt"
           MAX_BYTES=$(( ${FORCE_JSON_MAX_MB} * 1048576 ))
           # --files-from 模式下 --include/--max-size 不生效，故改为列出本批 size;path 后本地用 awk 筛选
@@ -2276,7 +2278,7 @@ jobs:
             --config "$GITHUB_WORKSPACE/rclone.conf" \
             --files-from-raw "$BATCH_FILE" \
             "$RCLONE_SRC" 2>/dev/null > /tmp/ls_all_$$.txt || true
-          awk -F';' -v max="$MAX_BYTES" 'tolower($2) ~ /\.json$/ && ($1 + 0) <= max {print $2}' /tmp/ls_all_$$.txt > "$FORCE_JSON"
+          awk -F';' -v max="$MAX_BYTES" '{ sz=$1; sub(/^[0-9]+;/, ""); p=$0; if (tolower(p) ~ /\.json$/ && (sz+0) <= max) print p }' /tmp/ls_all_$$.txt > "$FORCE_JSON"
           if [[ -s "$FORCE_JSON" ]]; then
             echo "  强制删除并重传 $(wc -l < "$FORCE_JSON") 个 ≤${FORCE_JSON_MAX_MB}M json 文件"
             cat "$FORCE_JSON" >> "$DIFFER_FILE"

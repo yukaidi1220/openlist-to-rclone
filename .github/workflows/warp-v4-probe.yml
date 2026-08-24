@@ -174,21 +174,51 @@ jobs:
           curl -fsSL --max-time 15 -A "Mozilla/5.0" \
             https://www.cloudflare.com/ips-v4 -o /tmp/cfips.txt 2>/dev/null || true
 
+          # 读取初始 WARP 端点信息(端口是可变的)
+          EP_ORIG=$(sudo wg show wgcf 2>/dev/null | grep endpoint | awk '{print $2}')
+          EP_HOST=$(echo "$EP_ORIG" | cut -d: -f1)
+          # 尝试多个端口换不同 PoP 以改变出口 IP
+          PORTS=(2408 500 854 859)
+          PI=0
+
           HIT_IP=""
           ROUNDS=$((LOOP_RETRY))
-          echo ">>> 开始循环重连 WARP,最多 $ROUNDS 轮:"
+          ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
+          ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
+          echo ">>> 开始循环重连 WARP,最多 $ROUNDS 轮(原始网关 $ORIG_GW dev $ORIG_IF):"
           for r in $(seq 1 "$ROUNDS"); do
-            # 断开再重启接口,强制重新协商会话(出口 IP 可能变化)
+            # 断开接口(路由会被删除)
             sudo ip link set wgcf down 2>/dev/null || true
             sleep 2
+            # 轮换端口,尝试不同 PoP
+            PORT="${PORTS[$PI]}"
+            PI=$(( (PI+1) % ${#PORTS[@]} ))
+            echo "轮次 $r: 更换端点端口 $PORT"
+            sudo wg set wgcf peer "$(sudo wg show wgcf 2>/dev/null | grep 'peer:' | awk '{print $2}')" \
+              endpoint "${EP_HOST}:${PORT}" 2>/dev/null || true
+            # 恢复接口
             sudo ip link set wgcf up 2>/dev/null || true
-            sleep 3
-            IP=$(curl -4 -sS --max-time 8 https://ip.sb 2>/dev/null || true)
-            if [ -z "$IP" ]; then
-              echo "轮次 $r: 未取到出口 IP,继续"
+            # 恢复默认路由和 MSS 钳制(down 时被删除了)
+            sudo ip -4 route add 0.0.0.0/0 dev wgcf 2>/dev/null || \
+              sudo ip -4 route replace 0.0.0.0/0 dev wgcf 2>/dev/null || true
+            sudo iptables -t mangle -C OUTPUT -o wgcf -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+              sudo iptables -t mangle -A OUTPUT -o wgcf -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+            # 等待握手完成
+            for w in $(seq 1 6); do
+              HS=$(sudo wg show wgcf 2>/dev/null | grep 'latest handshake' | awk '{print $3}')
+              [ -n "$HS" ] && break
+              sleep 2
+            done
+            [ -z "$HS" ] && echo "轮次 $r: 握手未完成,继续" && continue
+
+            # 确认走了 WARP(不是直连)
+            IP=$(curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null || true)
+            WARP=$(curl -4 -sS --max-time 10 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -o 'warp=on' || true)
+            if [ -z "$IP" ] || [ "$WARP" != "warp=on" ]; then
+              echo "轮次 $r: 未走 WARP(IP=$IP warp=$WARP),继续"
               continue
             fi
-            # 判断是否命中网段(单行 python -c,避免 heredoc 与 YAML 缩进冲突)
+            # 判断是否命中网段(cfips.txt 存在时)
             IP_HIT=$(python3 -c "import ipaddress,sys;ip=ipaddress.ip_address(sys.argv[1]);lines=open('/tmp/cfips.txt').read().split();sys.exit(0) if any(ip in ipaddress.ip_network(x) for x in lines) else sys.exit(1)" "$IP" 2>/dev/null && echo yes || echo no)
             if [ "$IP_HIT" = "yes" ]; then
               HIT_IP="$IP"

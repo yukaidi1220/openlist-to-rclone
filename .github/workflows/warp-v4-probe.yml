@@ -30,6 +30,28 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
+      # ============================================================
+      # 对照测试:未启用 WARP 时,runner 正常公网出口直连源桶
+      # 与后续 WARP 出口的结果对比,判定差异是否确由出口 IP 造成
+      # ============================================================
+      - name: 对照测试 - 未启用 WARP 时直连源桶
+        env:
+          TEST_URL: "https://silver-uk-03.oss-eu-west-1.yukaidi.com/08887b268e7c818bb6a0baf0/1/puresys/250327/Pure_Windows11_24h2_X64_2025.4.esd?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=LTAI5t6TXkgzxMtcayy2XQou%2F20260824%2Feu-west-1%2Fs3%2Faws4_request&X-Amz-Date=20260824T122904Z&X-Amz-Expires=12000&X-Amz-SignedHeaders=host&response-content-disposition=attachment%3B%20filename%3D%22Pure_Windows11_24h2_X64_2025.4.esd%22%3B%20filename%2A%3DUTF-8%27%27Pure_Windows11_24h2_X64_2025.4.esd&X-Amz-Signature=6ae37a5834c0c72dd11dde25902ec10283be0c4ac7d7f3a2cf501f1b3b325d60"
+        run: |
+          echo ">>> 未启用 WARP(直连出口)GET 源桶:"
+          CODE=$(curl -4 -sS -o /tmp/direct.bin -w '%{http_code}' --max-time 20 "$TEST_URL" 2>&1 || echo "curl_exit")
+          echo "direct status: $CODE"
+          DIRECT_SIZE=$(stat -c%s /tmp/direct.bin 2>/dev/null || echo "?")
+          echo "direct size: $DIRECT_SIZE"
+          # 记录供后续对比
+          echo "DIRECT_CODE=$CODE" >> "$GITHUB_ENV"
+          echo "DIRECT_SIZE=$DIRECT_SIZE" >> "$GITHUB_ENV"
+          if [ "$CODE" = "200" ]; then
+            echo ">>> 未启用 WARP 即 200 —— 说明策略并不按 Cloudflare 回源 IP 放行(或该域名本就公开),后续 WARP 对比无意义"
+          else
+            echo ">>> 未启用 WARP 返回 $CODE —— 正常(预期被白名单拒绝)"
+          fi
+
       - name: 安装 Cloudflare WARP(仅 IPv4 走 WARP)
         env:
           RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
@@ -173,29 +195,35 @@ jobs:
           sudo wg show wgcf 2>/dev/null | sed -n '1,12p' || true
 
       # ============================================================
-      # 决定性测试:WARP 出口直接 GET 源桶一个小对象
-      # 区分"按 IP 白名单放行" 还是 "按回源链路鉴权"
-      # 需填 SRC_ENDPOINT / SRC_BUCKET / SRC_OBJECT
+      # 决定性测试:WARP 出口直接 GET 同一个预签名 URL
+      # 与"对照测试"的直连状态码对比,即可判定白名单是否按 IP 放行
       # ============================================================
       - name: 决定性测试 - WARP 出口 GET 源桶对象
         env:
-          SRC_ENDPOINT: "占位-源桶-endpoint-如oss-ap-southeast-1.aliyuncs.com"
-          SRC_BUCKET: "占位-源桶名"
-          SRC_OBJECT: "占位-源桶内一个小对象路径"
+          TEST_URL: "https://silver-uk-03.oss-eu-west-1.yukaidi.com/08887b268e7c818bb6a0baf0/1/puresys/250327/Pure_Windows11_24h2_X64_2025.4.esd?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=LTAI5t6TXkgzxMtcayy2XQou%2F20260824%2Feu-west-1%2Fs3%2Faws4_request&X-Amz-Date=20260824T122904Z&X-Amz-Expires=12000&X-Amz-SignedHeaders=host&response-content-disposition=attachment%3B%20filename%3D%22Pure_Windows11_24h2_X64_2025.4.esd%22%3B%20filename%2A%3DUTF-8%27%27Pure_Windows11_24h2_X64_2025.4.esd&X-Amz-Signature=6ae37a5834c0c72dd11dde25902ec10283be0c4ac7d7f3a2cf501f1b3b325d60"
         run: |
-          echo ">>> 经 WARP 直连源桶(virtual-host 风格):"
-          URL="https://${SRC_BUCKET}.${SRC_ENDPOINT}/${SRC_OBJECT}"
-          echo "GET $URL"
-          CODE=$(curl -4 -sS -o /tmp/srcobj.bin -w '%{http_code}' --max-time 20 "$URL" 2>&1 || echo "curl_exit=$?")
-          echo "HTTP status: $CODE"
+          echo ">>> 经 WARP 出口 GET 同一个源桶对象:"
+          echo "直连(对照): $DIRECT_CODE, $DIRECT_SIZE bytes"
+          CODE=$(curl -4 -sS -o /tmp/warp.bin -w '%{http_code}' --max-time 60 "$TEST_URL" 2>&1 || echo "curl_exit")
+          echo "WARP status: $CODE"
+          WARP_SIZE=$(stat -c%s /tmp/warp.bin 2>/dev/null || echo "?")
+          echo "WARP size: $WARP_SIZE"
+          echo ">>> 判定:"
           if [ "$CODE" = "200" ]; then
-            SIZE=$(stat -c%s /tmp/srcobj.bin 2>/dev/null || echo "?")
-            echo ">>> 结果: HTTP 200,拉到 ${SIZE} 字节 —— WARP 出口直连源桶被放行"
-            echo ">>> 结论: 情况A(按IP白名单),WARP直连源桶可行"
+            echo ">>> WARP 出口 GET 源桶 = 200,拉到 ${WARP_SIZE} 字节"
+            if [ "$DIRECT_CODE" = "403" ] || [ "$DIRECT_CODE" = "404" ] || [ "$DIRECT_CODE" = "curl_exit" ]; then
+              echo ">>> 结论(情况A): 直连被拒($DIRECT_CODE)但 WARP 出口 200 —— 白名单按 Cloudflare 回源 IP 放行,WARP 直连源桶可行!"
+            else
+              echo ">>> 结论: 直连也返回 $DIRECT_CODE —— 白名单并非依赖出口 IP 差异,请复核桶策略"
+            fi
           elif [ "$CODE" = "403" ]; then
-            echo ">>> 结果: HTTP 403 —— WARP 出口直连源桶被拒"
-            echo ">>> 结论: 情况B(按回源链路鉴权),WARP直连不可行,必须走CDN回源"
+            echo ">>> WARP 出口 GET 源桶 = 403"
+            if [ "$DIRECT_CODE" = "403" ]; then
+              echo ">>> 结论(情况B): 直连与 WARP 均 403 —— OSS 按回源链路鉴权,而非单纯 IP,WARP 直连不可行,必须走 CDN 回源"
+            else
+              echo ">>> 结论: WARP 403 但直连 $DIRECT_CODE,方向反直觉,请复核"
+            fi
           else
-            echo ">>> 结果: 非预期状态 $CODE,需检查 endpoint/桶名/对象路径是否正确"
-            cat /tmp/srcobj.bin 2>/dev/null | head -c 300 || true
+            echo ">>> 非预期状态 $CODE(直连对照 $DIRECT_CODE),需检查签名是否过期或 URL 有效性"
+            head -c 300 /tmp/warp.bin 2>/dev/null || true
           fi

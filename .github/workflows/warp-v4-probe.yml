@@ -79,6 +79,20 @@ jobs:
           chmod +x "$WGCF"
           cd "$(dirname "$WGCF")"
 
+          echo ">>> 先拉取私有仓持久化账号(注册失败时回退用,避免 generate 找不到账号)..."
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml?ref=main" \
+              -o wgcf-account.toml; then
+              echo "持久化账号拉取成功"
+              break
+            fi
+            echo "拉取失败,重试 $i/3..."
+            sleep $((i * 5))
+          done
+
           echo ">>> 注册 WARP 账户(注册优先,失败回退复用仓库持久化账号)..."
           reg_ok=false
           for i in $(seq 1 "$REG_RETRY"); do
@@ -90,8 +104,8 @@ jobs:
             sleep "$REG_BACKOFF"
           done
           if [ "$reg_ok" != "true" ]; then
-            echo "::warning::新注册全部失败,回退复用仓库持久化账号"
-            cp -f "$GITHUB_WORKSPACE/wgcf/wgcf-account.toml" wgcf-account.toml 2>/dev/null || true
+            echo "::warning::新注册全部失败,使用已拉取的持久化账号"
+            ls -la wgcf-account.toml 2>/dev/null || echo "::error::持久化账号文件不存在"
           fi
 
           echo ">>> 生成 WireGuard 配置..."

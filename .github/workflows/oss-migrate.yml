@@ -102,7 +102,7 @@ jobs:
           sudo mv "rclone-${VER}-linux-amd64/rclone" /usr/local/bin/rclone
           rclone version
 
-      # ---- 预检:签名 API 双向连通(验证 runner 境外 IP 未被源桶策略拦截) ----
+      # ---- 预检:签名 API 双向连通(验证 AK/SK 可用、源桶策略不拦签名 API) ----
       - name: Preflight - signed API access
         if: inputs.mode != 'cleanup'
         run: |

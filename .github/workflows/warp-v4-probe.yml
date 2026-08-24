@@ -24,8 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      REG_RETRY: "6"
-      REG_BACKOFF: "5"
+      REG_RETRY: "8"
+      REG_BACKOFF: "8"
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -106,6 +106,16 @@ jobs:
           if [ "$reg_ok" != "true" ]; then
             echo "::warning::新注册全部失败,使用已拉取的持久化账号"
             ls -la wgcf-account.toml 2>/dev/null || echo "::error::持久化账号文件不存在"
+          else
+            # 注册成功:把新账号 POST 回私有仓,供后续 run 复用(内容量小,失败不阻塞)
+            echo ">>> 注册成功,尝试同步新账号回私有仓..."
+            UPLOAD_B64=$(base64 -w0 wgcf-account.toml)
+            curl -fsSL -X PUT \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              -d "{\"message\":\"chore: 更新 wgcf-account.toml (probe auto)\",\"content\":\"$UPLOAD_B64\",\"branch\":\"main\"}" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
+              > /dev/null && echo "账号已同步" || echo "::warning::账号同步失败(不影响本次运行)"
           fi
 
           echo ">>> 生成 WireGuard 配置..."
@@ -155,7 +165,13 @@ jobs:
             --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
           echo ">>> 验证 IPv4 走 WARP..."
-          curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv4 WARP OK" || echo "::warning::IPv4 WARP 不通"
+          curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv4 WARP OK" || {
+            echo "::warning::IPv4 WARP 不通,输出隧道诊断:"
+            sudo wg show wgcf 2>/dev/null || true
+            sudo ip -4 route | grep -E "default|wgcf" || true
+            echo "--- ping 端点(若通说明网络层可达,握手失败多为账号问题) ---"
+            ping -c 2 -W 3 162.159.192.1 2>/dev/null || true
+          }
 
       - name: 探测 WARP 出口 IP 并核对 CF 网段
         run: |

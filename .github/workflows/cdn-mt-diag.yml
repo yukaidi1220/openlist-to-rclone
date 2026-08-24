@@ -1,0 +1,82 @@
+# 临时实验:定位多线程分片下载内容损坏的根因
+# 同一文件分别用 单流 / 多流 经 CDN 下载,比对 MD5;
+# 并用 --dump headers 抓取多流实际发出的请求。
+# 凭据从私有仓 rclone-action 的 oss-migrate.conf 拉取(与迁移工作流同模式)。
+
+name: CDN multithread diagnosis
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RCLONE_CONFIG: /tmp/oss-migrate.conf
+      TEST_FILE: "08887b268e7c8195afa0baf1/1/模拟高考环境虚拟机/6byjSjCp_VMware-Workstation-Lite-17.6.4-24832109-精简安装注册版-含运行库.exe"
+      EXPECT_MD5: "94bf51868432da9a852b4ab3a38cd57b"
+    steps:
+      - name: Fetch config & rclone
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          umask 077
+          curl -fsSL --retry 3 -H "Authorization: token $RCLONE_PAT" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss-migrate.conf" \
+            -o "$RCLONE_CONFIG"
+          curl -fsSL --retry 3 -H "Authorization: token $RCLONE_PAT" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/rclone-cdn/rclone-cdn-linux-amd64" \
+            -o /tmp/rclone
+          chmod +x /tmp/rclone
+          /tmp/rclone version | head -2
+          grep -c "download_host" "$RCLONE_CONFIG" && echo "conf has download_host"
+
+      - name: Baseline - rclone cat (single stream, no Range)
+        run: |
+          /tmp/rclone cat "src:$TEST_FILE" | md5sum
+          echo "expect: $EXPECT_MD5"
+
+      - name: Multithread copy - 4 streams
+        run: |
+          /tmp/rclone copyto "src:$TEST_FILE" /tmp/mt4.bin \
+            --multi-thread-streams 4 --multi-thread-cutoff 1M -P --stats 0 2>&1 | tail -2
+          md5sum /tmp/mt4.bin
+          echo "expect: $EXPECT_MD5"
+
+      - name: Multithread copy - 1 stream (forced single)
+        run: |
+          /tmp/rclone copyto "src:$TEST_FILE" /tmp/mt1.bin \
+            --multi-thread-streams 1 --multi-thread-cutoff 1M -P --stats 0 2>&1 | tail -2
+          md5sum /tmp/mt1.bin
+          echo "expect: $EXPECT_MD5"
+
+      - name: Dump actual requests (multithread, 2 streams)
+        if: always()
+        run: |
+          /tmp/rclone copyto "src:$TEST_FILE" /tmp/dump.bin \
+            --multi-thread-streams 2 --multi-thread-cutoff 1M \
+            --dump headers --log-file /tmp/dump.log -P --stats 0 2>&1 | tail -1 || true
+          grep -aE "^GET |Range:" /tmp/dump.log | sed -E 's/(X-Amz-(Credential|Signature)=[^& ]*)/REDACTED/g' | head -40
+          echo "=== 2-stream download result ==="
+          md5sum /tmp/dump.bin
+          echo "expect: $EXPECT_MD5"
+
+      - name: Byte-level diff (mt4 vs mt1)
+        if: always()
+        run: |
+          if [ -f /tmp/mt4.bin ] && [ -f /tmp/mt1.bin ]; then
+            cmp /tmp/mt4.bin /tmp/mt1.bin 2>&1 | head -2 || true
+            A=$(cmp -l /tmp/mt4.bin /tmp/mt1.bin 2>/dev/null | wc -l)
+            echo "differing bytes between mt4 and mt1: $A"
+            OFF=$(cmp -l /tmp/mt4.bin /tmp/mt1.bin 2>/dev/null | head -1 | awk '{print $2}')
+            if [ -n "$OFF" ]; then
+              OFF=$((OFF-1))
+              echo "first diff at byte offset $OFF"
+              echo "mt4 around offset:"; xxd -s $((OFF>16 ? OFF-16 : 0)) -l 64 /tmp/mt4.bin | head -4
+              echo "mt1 around offset:"; xxd -s $((OFF>16 ? OFF-16 : 0)) -l 64 /tmp/mt1.bin | head -4
+            fi
+          fi

@@ -142,7 +142,7 @@ jobs:
       - name: Preflight - CDN presigned GET probe
         if: ${{ inputs.mode != 'cleanup' }}
         run: |
-          if ! rclone config dump src: | grep -q '^download_host'; then
+          if ! rclone config dump | jq -e '.src.download_host' > /dev/null 2>&1; then
             echo "未配置 download_host,下载将签名直连桶域名(跳过探测)"
             exit 0
           fi

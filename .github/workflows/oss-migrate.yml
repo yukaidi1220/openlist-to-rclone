@@ -231,12 +231,27 @@ jobs:
           echo "total files: $total"
           mapfile -t picks < <(jq -r '.[].Path' files.json | shuf -n 5)
           : > sample.log
+          fail=0
           for p in "${picks[@]}"; do
             size=$(jq -r --arg p "$p" '.[] | select(.Path==$p) | .Size' files.json)
             echo "== sample: $p ($size bytes)" | tee -a sample.log
-            rclone check "$SRC/$p" "$DST/$p" --download 2>&1 | tee -a sample.log
+            # 单文件比对:分别下载两端内容,逐字节比较哈希
+            src_md5=$(rclone cat "$SRC/$p" | md5sum | awk '{print $1}')
+            dst_md5=$(rclone cat "$DST/$p" | md5sum | awk '{print $1}')
+            echo "   src md5: $src_md5" | tee -a sample.log
+            echo "   dst md5: $dst_md5" | tee -a sample.log
+            if [ "$src_md5" != "$dst_md5" ]; then
+              echo "   MISMATCH" | tee -a sample.log
+              fail=1
+            else
+              echo "   MATCH" | tee -a sample.log
+            fi
           done
-          echo "random sample byte-compare PASSED" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$fail" != "0" ]; then
+            echo "::error::随机抽样逐字节比对发现不一致,详见 sample.log"
+            exit 1
+          fi
+          echo "random sample byte-compare PASSED (5 files)" >> "$GITHUB_STEP_SUMMARY"
 
       # ---- 清理目标桶孤儿分片(copy 被强杀后的残留) ----
       - name: Cleanup aborted multipart uploads

@@ -11,11 +11,11 @@ on:
 jobs:
   diag:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       RCLONE_CONFIG: /tmp/oss-migrate.conf
-      TEST_FILE: "08887b268e7c8195afa0baf1/1/模拟高考环境虚拟机/6byjSjCp_VMware-Workstation-Lite-17.6.4-24832109-精简安装注册版-含运行库.exe"
-      EXPECT_MD5: "94bf51868432da9a852b4ab3a38cd57b"
+      TEST_FILE: "08887b268e7c8195afa0baf1/1/模拟题题库提取/LIScVhqD_网络设备.7z"
+      EXPECT_MD5: "dc65ad2c694153a07b93fb47085ffe67"
     steps:
       - name: Fetch config & rclone
         env:
@@ -60,7 +60,10 @@ jobs:
           /tmp/rclone copyto "src:$TEST_FILE" /tmp/dump.bin \
             --multi-thread-streams 2 --multi-thread-cutoff 1M \
             --dump headers --log-file /tmp/dump.log -P --stats 0 2>&1 | tail -1 || true
+          echo "=== 请求行与 Range 头 ==="
           grep -aE "^GET |Range:" /tmp/dump.log | sed -E 's/(X-Amz-(Credential|Signature)=[^& ]*)/REDACTED/g' | head -40
+          echo "=== 响应状态码(关键证据:Range 请求应答 206 还是 200) ==="
+          grep -aE "^< HTTP|Response" /tmp/dump.log | head -20
           echo "=== 2-stream download result ==="
           md5sum /tmp/dump.bin
           echo "expect: $EXPECT_MD5"

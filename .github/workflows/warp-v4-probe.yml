@@ -1,0 +1,161 @@
+# WARP IPv4 出口 IP 探针(一次性验证)
+#
+# 目的:让 runner 的 IPv4 默认路由走 WARP(复用 rclone-batch-sync.yml 的
+# 成熟配置逻辑),然后探测 WARP 出口公网 IP,并核对是否命中
+# Cloudflare 公布的 CDN/回源网段(即 OSS 桶策略白名单网段)。
+#
+# 结论解读:
+# - 若出口 IP 命中白名单网段 => runner 可经 WARP 直连源桶,迁移无需 CDN 中转
+# - 若未命中 => 放弃 WARP 直连思路,回到 Pages/Worker 回源方案
+# 注意:单次命中不代表稳定,出口分配可能随时间/机房变化;若命中,
+# 建议多跑几次本探针观察一致性后再下结论。
+
+name: WARP v4 egress probe
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: warp-v4-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      REG_RETRY: "6"
+      REG_BACKOFF: "5"
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Cloudflare WARP(仅 IPv4 走 WARP)
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -e
+
+          echo ">>> 安装 WireGuard 依赖..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools resolvconf
+
+          echo ">>> 下载 wgcf(公开 GitHub releases)..."
+          WGCF=/tmp/tasks/tools/wgcf
+          mkdir -p "$(dirname "$WGCF")"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 60 --retry 2 --retry-delay 5 \
+              -o "$WGCF" \
+              https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64; then
+              break
+            fi
+            echo "下载失败,重试 $i/3..."
+            sleep $((i * 5))
+          done
+          [ -f "$WGCF" ] || { echo "::error::wgcf 下载失败"; exit 1; }
+          chmod +x "$WGCF"
+          cd "$(dirname "$WGCF")"
+
+          echo ">>> 注册 WARP 账户(注册优先,失败回退复用仓库持久化账号)..."
+          reg_ok=false
+          for i in $(seq 1 "$REG_RETRY"); do
+            if "$WGCF" register --accept-tos; then
+              reg_ok=true
+              break
+            fi
+            echo "注册失败,${REG_BACKOFF}s 后重试 $i/$REG_RETRY..."
+            sleep "$REG_BACKOFF"
+          done
+          if [ "$reg_ok" != "true" ]; then
+            echo "::warning::新注册全部失败,回退复用仓库持久化账号"
+            cp -f "$GITHUB_WORKSPACE/wgcf/wgcf-account.toml" wgcf-account.toml 2>/dev/null || true
+          fi
+
+          echo ">>> 生成 WireGuard 配置..."
+          "$WGCF" generate
+
+          echo ">>> 手动拉起 WARP 接口..."
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          ADDRESSES=$(grep 'Address' wgcf-profile.conf | awk -F'= ' '{print $2}')
+          ADDR_V4=$(echo "$ADDRESSES" | awk -F', ' '{print $1}' | sed 's/,$//')
+          ADDR_V6=$(echo "$ADDRESSES" | awk -F', ' '{print $2}')
+          PEER_KEY=$(grep  'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep  'Endpoint' wgcf-profile.conf  | awk '{print $NF}')
+
+          INTERFACE=wgcf
+          sudo ip link add $INTERFACE type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set $INTERFACE private-key /dev/stdin
+
+          # IPv4 走 WARP:先给私有/保留网段与 WARP 端点保留直连路由,避免路由死锁
+          ORIG_GW=$(ip route | awk '/^default/ {print $3; exit}')
+          ORIG_IF=$(ip route | awk '/^default/ {print $5; exit}')
+          echo ">>> 私有/保留网段走原始网关 $ORIG_GW"
+          for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8 185.199.0.0/16; do
+            sudo ip route add "$NET" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+              sudo ip route add "$NET" via "$ORIG_GW" 2>/dev/null || true
+          done
+          ENDPOINT_HOST=$(echo "$ENDPOINT" | cut -d: -f1)
+          ENDPOINT_IP=$(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null | head -1)
+          if [ -n "$ENDPOINT_IP" ] && [ -n "$ORIG_GW" ]; then
+            echo ">>> WARP 端点直连 $ENDPOINT_HOST -> $ENDPOINT_IP via $ORIG_GW"
+            sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" dev "$ORIG_IF" 2>/dev/null || \
+              sudo ip route add "$ENDPOINT_IP/32" via "$ORIG_GW" 2>/dev/null || true
+          else
+            echo "::warning::无法解析 WARP 端点,继续尝试(可能握手失败)"
+          fi
+
+          sudo wg set $INTERFACE peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0"
+          sudo ip link set mtu 1280 up dev $INTERFACE
+          sudo ip addr add "$ADDR_V4" dev $INTERFACE
+
+          echo ">>> 设置 IPv4 默认路由走 WARP..."
+          sudo ip -4 route replace 0.0.0.0/0 dev $INTERFACE 2>/dev/null || {
+            echo "::warning::IPv4 路由替换失败,尝试 table main"
+            sudo ip -4 route add 0.0.0.0/0 dev $INTERFACE table main 2>/dev/null || true
+          }
+          # MSS 钳制:WARP MTU=1280,避免 PMTUD 失败导致 Connection reset
+          sudo iptables -t mangle -A OUTPUT -o $INTERFACE -p tcp \
+            --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+          echo ">>> 验证 IPv4 走 WARP..."
+          curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null && echo "IPv4 WARP OK" || echo "::warning::IPv4 WARP 不通"
+
+      - name: 探测 WARP 出口 IP 并核对 CF 网段
+        run: |
+          echo ">>> 多源探测出口 IPv4(取一致值):"
+          IP1=$(curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null || true)
+          IP2=$(curl -4 -sS --max-time 10 https://api.ipify.org 2>/dev/null || true)
+          IP3=$(curl -4 -sS --max-time 10 https://ifconfig.me 2>/dev/null || true)
+          echo "ip.sb        : ${IP1:-failed}"
+          echo "api.ipify.org: ${IP2:-failed}"
+          echo "ifconfig.me  : ${IP3:-failed}"
+
+          EGRESS=""
+          for c in "$IP1" "$IP2" "$IP3"; do
+            [ -n "$c" ] && { EGRESS="$c"; break; }
+          done
+          [ -n "$EGRESS" ] || { echo "::error::三个探测源均失败"; exit 1; }
+
+          echo ">>> cloudflare trace(确认 warp=on):"
+          curl -4 -sS --max-time 10 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|warp|colo)=' || true
+
+          echo ">>> 核对是否命中 Cloudflare 公布网段(CDN 回源白名单):"
+          python3 - "$EGRESS" <<'PY'
+          import ipaddress, sys, urllib.request
+          egress = ipaddress.ip_address(sys.argv[1])
+          nets = [ipaddress.ip_network(l.strip()) for l in
+                  urllib.request.urlopen('https://www.cloudflare.com/ips-v4', timeout=15)
+                  .read().decode().split() if l.strip()]
+          hit = [str(n) for n in nets if egress in n]
+          print(f"egress={egress}")
+          print(f"cloudflare published v4 nets: {len(nets)}")
+          if hit:
+              print(f"MATCH: {', '.join(hit)}")
+              print("RESULT: WARP 出口命中 Cloudflare 网段(有希望通过白名单,建议多次运行复核)")
+          else:
+              print("RESULT: 未命中 —— WARP 出口不在 CDN 回源网段内,WARP 直连方案不可行")
+          PY
+
+          echo ">>> 附:WARP 隧道内地址(非公网出口,仅供参考):"
+          sudo wg show wgcf 2>/dev/null | sed -n '1,12p' || true

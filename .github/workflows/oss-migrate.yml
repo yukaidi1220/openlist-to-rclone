@@ -56,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     env:
-      RCLONE_CONFIG: ${{ runner.temp }}/oss-migrate.conf
+      RCLONE_CONFIG: /tmp/oss-migrate.conf
     steps:
       - name: Fetch oss-migrate.conf from private repo
         env:

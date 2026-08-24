@@ -241,14 +241,16 @@ jobs:
             echo "   src md5: $src_md5" | tee -a sample.log
             echo "   dst md5: $dst_md5" | tee -a sample.log
             if [ "$src_md5" != "$dst_md5" ]; then
-              echo "   MISMATCH" | tee -a sample.log
+              echo "   MISMATCH -> 删除目标桶坏文件以便重传" | tee -a sample.log
+              rclone deletefile "$DST/$p"
               fail=1
             else
               echo "   MATCH" | tee -a sample.log
             fi
           done
           if [ "$fail" != "0" ]; then
-            echo "::error::随机抽样逐字节比对发现不一致,详见 sample.log"
+            echo "::warning::抽样发现内容不一致的目标文件已被删除,重跑 copy 模式即可自动重传(源桶未做任何改动)"
+            echo "REPAIRED=1" >> "$GITHUB_ENV"
             exit 1
           fi
           echo "random sample byte-compare PASSED (5 files)" >> "$GITHUB_STEP_SUMMARY"

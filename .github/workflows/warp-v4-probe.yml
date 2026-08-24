@@ -26,6 +26,7 @@ jobs:
     env:
       REG_RETRY: "8"
       REG_BACKOFF: "8"
+      LOOP_RETRY: "15"
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -173,66 +174,64 @@ jobs:
             ping -c 2 -W 3 162.159.192.1 2>/dev/null || true
           }
 
-      - name: 探测 WARP 出口 IP 并核对 CF 网段
+      - name: 循环刷 WARP 出口 IP(命中白名单网段即停)
         run: |
-          echo ">>> 多源探测出口 IPv4(取一致值):"
-          IP1=$(curl -4 -sS --max-time 10 https://ip.sb 2>/dev/null || true)
-          IP2=$(curl -4 -sS --max-time 10 https://api.ipify.org 2>/dev/null || true)
-          IP3=$(curl -4 -sS --max-time 10 https://ifconfig.me 2>/dev/null || true)
-          echo "ip.sb        : ${IP1:-failed}"
-          echo "api.ipify.org: ${IP2:-failed}"
-          echo "ifconfig.me  : ${IP3:-failed}"
-
-          EGRESS=""
-          for c in "$IP1" "$IP2" "$IP3"; do
-            [ -n "$c" ] && { EGRESS="$c"; break; }
-          done
-          [ -n "$EGRESS" ] || { echo "::error::三个探测源均失败"; exit 1; }
-
-          echo ">>> cloudflare trace(确认 warp=on):"
-          curl -4 -sS --max-time 10 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|warp|colo)=' || true
-
-          echo ">>> 核对是否命中 Cloudflare 公布网段(CDN 回源白名单):"
-          # 用 curl 拉清单(Cloudflare 会拦 Python urllib 的默认 UA,故不用 urllib)
+          # 先拉完整 CF 清单(拿不到则用内置网段)
           curl -fsSL --max-time 15 -A "Mozilla/5.0" \
-            https://www.cloudflare.com/ips-v4 -o /tmp/cfips.txt 2>/dev/null \
-            || echo "::warning::拉取 CF 清单失败,改用内置网段表"
-          python3 - "$EGRESS" <<'PY'
-          import ipaddress, sys, os
-          egress = ipaddress.ip_address(sys.argv[1])
-          nets = []
-          if os.path.exists('/tmp/cfips.txt'):
-              with open('/tmp/cfips.txt') as f:
-                  nets = [ipaddress.ip_network(l.strip()) for l in f if l.strip()]
-          if not nets:
-              # 兜底:用你贴的内置网段
-              raw = ('173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 '
-                     '141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 '
-                     '197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 '
-                     '104.24.0.0/14 172.64.0.0/13 131.0.72.0/22')
-              nets = [ipaddress.ip_network(x) for x in raw.split()]
-          hit = [str(n) for n in nets if egress in n]
-          print(f"egress={egress}")
-          print(f"cloudflare published v4 nets: {len(nets)}")
-          if hit:
-              print(f"MATCH: {', '.join(hit)}")
-              print("RESULT: WARP 出口命中 Cloudflare 网段(有通过 IP 白名单的可能,仍需实测源桶)")
-          else:
-              print("RESULT: 未命中 —— WARP 出口不在 CDN 回源网段内,WARP 直连方案不可行")
-          PY
+            https://www.cloudflare.com/ips-v4 -o /tmp/cfips.txt 2>/dev/null || true
 
-          echo ">>> 附:WARP 隧道内地址(非公网出口,仅供参考):"
-          sudo wg show wgcf 2>/dev/null | sed -n '1,12p' || true
+          HIT_IP=""
+          ROUNDS=$((LOOP_RETRY))
+          echo ">>> 开始循环重连 WARP,最多 $ROUNDS 轮:"
+          for r in $(seq 1 "$ROUNDS"); do
+            # 断开再重启接口,强制重新协商会话(出口 IP 可能变化)
+            sudo ip link set wgcf down 2>/dev/null || true
+            sleep 2
+            sudo ip link set wgcf up 2>/dev/null || true
+            sleep 3
+            IP=$(curl -4 -sS --max-time 8 https://ip.sb 2>/dev/null || true)
+            if [ -z "$IP" ]; then
+              echo "轮次 $r: 未取到出口 IP,继续"
+              continue
+            fi
+            # 判断是否命中网段(写临时脚本再执行;python 代码行与 run: 块同缩进 10 空格,
+            # YAML 剥离公共缩进后即为合法 python)
+            cat > /tmp/match.py <<'PYEOF'
+            import ipaddress, sys, os
+            ip = ipaddress.ip_address(sys.argv[1])
+            nets = []
+            if os.path.exists('/tmp/cfips.txt'):
+                with open('/tmp/cfips.txt') as f:
+                    nets = [ipaddress.ip_network(l.strip()) for l in f if l.strip()]
+            hit = [str(n) for n in nets if ip in n]
+            print(",".join(hit))
+            PYEOF
+            HITS=$(python3 /tmp/match.py "$IP" 2>/dev/null || true)
+            if [ -n "$HITS" ]; then
+              HIT_IP="$IP"
+              echo "轮次 $r: $IP -> 命中 $HITS !!!"
+              echo "hit_ip=$IP" >> "$GITHUB_ENV"
+              echo "hit_nets=$HITS" >> "$GITHUB_ENV"
+              break
+            else
+              echo "轮次 $r: $IP -> 未命中"
+            fi
+          done
 
-      # ============================================================
-      # 决定性测试:WARP 出口直接 GET 同一个预签名 URL
-      # 与"对照测试"的直连状态码对比,即可判定白名单是否按 IP 放行
-      # ============================================================
-      - name: 决定性测试 - WARP 出口 GET 源桶对象
+          if [ -z "$HIT_IP" ]; then
+            echo "::warning::$ROUNDS 轮均未命中白名单网段,WARP 刷 IP 未成功,后续决定性测试将跳过"
+            echo "hit_ip=" >> "$GITHUB_ENV"
+          else
+            echo ">>> 命中 IP: $HIT_IP (网段 $HITS)"
+            echo "本 IP 距离 X-Amz-Date 后 12000s 内有效,立即进行决定性测试"
+          fi
+
+      - name: 决定性测试 - 命中IP GET 源桶对象(未命中则跳过)
+        if: ${{ env.hit_ip != '' }}
         env:
           TEST_URL: "https://silver-uk-03.oss-eu-west-1.yukaidi.com/08887b268e7c818bb6a0baf0/1/puresys/250327/Pure_Windows11_24h2_X64_2025.4.esd?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=LTAI5t6TXkgzxMtcayy2XQou%2F20260824%2Feu-west-1%2Fs3%2Faws4_request&X-Amz-Date=20260824T122904Z&X-Amz-Expires=12000&X-Amz-SignedHeaders=host&response-content-disposition=attachment%3B%20filename%3D%22Pure_Windows11_24h2_X64_2025.4.esd%22%3B%20filename%2A%3DUTF-8%27%27Pure_Windows11_24h2_X64_2025.4.esd&X-Amz-Signature=6ae37a5834c0c72dd11dde25902ec10283be0c4ac7d7f3a2cf501f1b3b325d60"
         run: |
-          echo ">>> 经 WARP 出口 GET 同一个源桶对象:"
+          echo ">>> 用命中网段的出口 IP($hit_ip)GET 源桶对象:"
           echo "直连(对照): $DIRECT_CODE, $DIRECT_SIZE bytes"
           CODE=$(curl -4 -sS -o /tmp/warp.bin -w '%{http_code}' --max-time 60 "$TEST_URL" 2>&1 || echo "curl_exit")
           echo "WARP status: $CODE"

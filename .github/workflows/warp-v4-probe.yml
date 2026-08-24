@@ -141,21 +141,61 @@ jobs:
           curl -4 -sS --max-time 10 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|warp|colo)=' || true
 
           echo ">>> 核对是否命中 Cloudflare 公布网段(CDN 回源白名单):"
+          # 用 curl 拉清单(Cloudflare 会拦 Python urllib 的默认 UA,故不用 urllib)
+          curl -fsSL --max-time 15 -A "Mozilla/5.0" \
+            https://www.cloudflare.com/ips-v4 -o /tmp/cfips.txt 2>/dev/null \
+            || echo "::warning::拉取 CF 清单失败,改用内置网段表"
           python3 - "$EGRESS" <<'PY'
-          import ipaddress, sys, urllib.request
+          import ipaddress, sys, os
           egress = ipaddress.ip_address(sys.argv[1])
-          nets = [ipaddress.ip_network(l.strip()) for l in
-                  urllib.request.urlopen('https://www.cloudflare.com/ips-v4', timeout=15)
-                  .read().decode().split() if l.strip()]
+          nets = []
+          if os.path.exists('/tmp/cfips.txt'):
+              with open('/tmp/cfips.txt') as f:
+                  nets = [ipaddress.ip_network(l.strip()) for l in f if l.strip()]
+          if not nets:
+              # 兜底:用你贴的内置网段
+              raw = ('173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 '
+                     '141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 '
+                     '197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 '
+                     '104.24.0.0/14 172.64.0.0/13 131.0.72.0/22')
+              nets = [ipaddress.ip_network(x) for x in raw.split()]
           hit = [str(n) for n in nets if egress in n]
           print(f"egress={egress}")
           print(f"cloudflare published v4 nets: {len(nets)}")
           if hit:
               print(f"MATCH: {', '.join(hit)}")
-              print("RESULT: WARP 出口命中 Cloudflare 网段(有希望通过白名单,建议多次运行复核)")
+              print("RESULT: WARP 出口命中 Cloudflare 网段(有通过 IP 白名单的可能,仍需实测源桶)")
           else:
               print("RESULT: 未命中 —— WARP 出口不在 CDN 回源网段内,WARP 直连方案不可行")
           PY
 
           echo ">>> 附:WARP 隧道内地址(非公网出口,仅供参考):"
           sudo wg show wgcf 2>/dev/null | sed -n '1,12p' || true
+
+      # ============================================================
+      # 决定性测试:WARP 出口直接 GET 源桶一个小对象
+      # 区分"按 IP 白名单放行" 还是 "按回源链路鉴权"
+      # 需填 SRC_ENDPOINT / SRC_BUCKET / SRC_OBJECT
+      # ============================================================
+      - name: 决定性测试 - WARP 出口 GET 源桶对象
+        env:
+          SRC_ENDPOINT: "占位-源桶-endpoint-如oss-ap-southeast-1.aliyuncs.com"
+          SRC_BUCKET: "占位-源桶名"
+          SRC_OBJECT: "占位-源桶内一个小对象路径"
+        run: |
+          echo ">>> 经 WARP 直连源桶(virtual-host 风格):"
+          URL="https://${SRC_BUCKET}.${SRC_ENDPOINT}/${SRC_OBJECT}"
+          echo "GET $URL"
+          CODE=$(curl -4 -sS -o /tmp/srcobj.bin -w '%{http_code}' --max-time 20 "$URL" 2>&1 || echo "curl_exit=$?")
+          echo "HTTP status: $CODE"
+          if [ "$CODE" = "200" ]; then
+            SIZE=$(stat -c%s /tmp/srcobj.bin 2>/dev/null || echo "?")
+            echo ">>> 结果: HTTP 200,拉到 ${SIZE} 字节 —— WARP 出口直连源桶被放行"
+            echo ">>> 结论: 情况A(按IP白名单),WARP直连源桶可行"
+          elif [ "$CODE" = "403" ]; then
+            echo ">>> 结果: HTTP 403 —— WARP 出口直连源桶被拒"
+            echo ">>> 结论: 情况B(按回源链路鉴权),WARP直连不可行,必须走CDN回源"
+          else
+            echo ">>> 结果: 非预期状态 $CODE,需检查 endpoint/桶名/对象路径是否正确"
+            cat /tmp/srcobj.bin 2>/dev/null | head -c 300 || true
+          fi

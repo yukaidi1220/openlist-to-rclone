@@ -207,7 +207,9 @@ jobs:
         if: inputs.mode == 'copy'
         run: |
           set -o pipefail
-          rclone copy "$SRC" "$DST" \
+          # --no-check-certificate: yukaidi.com CNAME 到 aliyuncs,阿里主机
+          # 不出示 yukaidi 证书,HeadObject 等 SDK 请求会 TLS 验证失败
+          rclone copy "$SRC" "$DST" --no-check-certificate \
             --fast-list \
             --transfers 8 --checkers 16 \
             --s3-chunk-size 64M --s3-upload-concurrency 4 \
@@ -219,7 +221,7 @@ jobs:
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
         run: |
           set -o pipefail
-          rclone check "$SRC" "$DST" --one-way -v 2>&1 | tee check.log
+          rclone check "$SRC" "$DST" --one-way -v --no-check-certificate 2>&1 | tee check.log
           echo "full one-way check PASSED" >> "$GITHUB_STEP_SUMMARY"
 
       # ---- 校验:随机抽 5 个文件双端逐字节比对(--download 会真实下载两端内容) ----

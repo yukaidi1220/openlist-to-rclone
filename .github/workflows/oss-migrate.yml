@@ -119,12 +119,17 @@ jobs:
           sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version
 
-      # ---- 预检:签名 API 双向连通(验证 AK/SK 可用、源桶策略不拦签名 API) ----
-      - name: Preflight - signed API access
+      # ---- 预检:签名 API 双向连通 ----
+      # 注意:endpoint 域名是泛解析 *.oss-<region>.yukaidi.com,裸域名无 DNS。
+      # 因此不能用 lsd(会触发 ListBuckets 打裸域名),必须用带桶名的操作
+      # (size/lsjson 打 bucket.endpoint,命中泛解析)。
+      - name: Preflight - signed API access (bucket-scoped)
         if: inputs.mode != 'cleanup'
         run: |
-          rclone lsd src: > /dev/null && echo "src signed API OK"
-          rclone lsd dst: > /dev/null && echo "dst signed API OK"
+          rclone size "$SRC" --json > /dev/null 2>&1 || rclone lsjson "$SRC" --max-depth 1 > /dev/null
+          echo "src signed API OK (bucket-scoped)"
+          # 目标桶:列根目录(只读操作,不写任何数据)
+          rclone lsjson "$DST" --max-depth 1 > /dev/null && echo "dst signed API OK (bucket-scoped)"
 
       # ---- 预检:源桶规模对账单 ----
       - name: Preflight - source stats

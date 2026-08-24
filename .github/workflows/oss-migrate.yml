@@ -1,8 +1,11 @@
-# 跨账号、跨地域 阿里云 OSS 桶迁移(CDN 域名下载版)
+# 跨账号、跨地域 阿里云 OSS 桶迁移(CDN 预签名下载版)
 #
-# 原理:源桶 remote 配置 download_url 后,rclone 的列表/元数据/校验走带
-# AK 签名的桶 endpoint(SigV4),文件内容下载改走匿名 GET 的 CDN 域名
-# (见 rclone s3 后端 downloadFromURL 实现)。目标桶为普通签名写入。
+# 原理:源桶 remote 配置 download_host 后,rclone 下载对象时生成 SigV4
+# 预签名 URL(签名锚定 endpoint,即桶名.endpoint 的自定义域名),仅把
+# URL host 替换为 CDN 域名后发 GET;Cloudflare Worker 按原 host 回源,
+# OSS 验签通过。列表/元数据/上传仍走签名 endpoint,与生产下载链路同构。
+# 需要定制版 rclone(含 download_host 选项),二进制由私有仓
+# rclone-action 的 rclone-cdn/ 目录分发。
 #
 # 凭据管理(本工作流在公开仓库运行,故凭据绝不经由 inputs 传入):
 #   入口在私有仓 rclone-action 的 "OSS Migrate launcher" 工作流:
@@ -93,13 +96,27 @@ jobs:
           echo "SRC=$SRC"
           echo "DST=$DST"
 
-      - name: Install rclone (pinned)
+      - name: Install rclone (custom build with download_host)
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
-          VER=v1.74.4
-          cd "$(mktemp -d)"
-          curl -fsSLO "https://downloads.rclone.org/${VER}/rclone-${VER}-linux-amd64.zip"
-          unzip -oq "rclone-${VER}-linux-amd64.zip"
-          sudo mv "rclone-${VER}-linux-amd64/rclone" /usr/local/bin/rclone
+          # 定制版 rclone:含 s3 后端 download_host(预签名 + CDN host 替换)
+          # 二进制由私有仓 rclone-action 分发
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 120 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/rclone-cdn/rclone-cdn-linux-amd64" \
+              -o /tmp/rclone; then
+              break
+            fi
+            echo "拉取失败,重试 $i/3..."
+            sleep $((i * 5))
+          done
+          [ -f /tmp/rclone ] || { echo "::error::无法拉取定制版 rclone,请检查私有仓 rclone-cdn/rclone-cdn-linux-amd64"; exit 1; }
+          chmod +x /tmp/rclone
+          sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version
 
       # ---- 预检:签名 API 双向连通(验证 AK/SK 可用、源桶策略不拦签名 API) ----
@@ -116,12 +133,12 @@ jobs:
           rclone size --json "$SRC" | tee source-size.json
           jq -r '"objects=\(.files) bytes=\(.bytes)"' source-size.json >> "$GITHUB_STEP_SUMMARY" || true
 
-      # ---- 预检:匿名经 CDN 拉一个小对象,验证下载域名与路径映射 ----
-      - name: Preflight - CDN anonymous GET probe
+      # ---- 预检:经 CDN 预签名下载一个小对象,验证 host 替换链路 ----
+      - name: Preflight - CDN presigned GET probe
         if: ${{ inputs.mode != 'cleanup' }}
         run: |
-          if ! rclone config dump src: | grep -q '^download_url'; then
-            echo "未配置 download_url,下载将直连桶域名(跳过探测)"
+          if ! rclone config dump src: | grep -q '^download_host'; then
+            echo "未配置 download_host,下载将签名直连桶域名(跳过探测)"
             exit 0
           fi
           probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1 --max-size 8Mi \
@@ -135,7 +152,7 @@ jobs:
           got=$(rclone cat "$SRC/$probe" | wc -c)
           echo "got: $got bytes"
           if [ "$got" -ne "$expect" ]; then
-            echo "::error::CDN 下载字节数($got)与源对象($expect)不符——请检查 oss-migrate.conf 中 download_url 是否直达桶根(结尾须带 / 且无额外路径前缀)"
+            echo "::error::CDN 预签名下载字节数($got)与源对象($expect)不符——请检查 download_host 与 endpoint(签名 Host=桶名.endpoint,须与 Worker 回源 Host 一致)"
             exit 1
           fi
           echo "CDN anonymous GET OK"

@@ -80,7 +80,7 @@ jobs:
           chmod +x "$WGCF"
           cd "$(dirname "$WGCF")"
 
-          echo ">>> 先拉取私有仓持久化账号(注册失败时回退用,避免 generate 找不到账号)..."
+          echo ">>> 拉取私有仓持久化账号(优先使用,其有效性已被上轮验证)..."
           for i in {1..3}; do
             if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
               -H "Authorization: token $RCLONE_PAT" \
@@ -94,33 +94,27 @@ jobs:
             sleep $((i * 5))
           done
 
-          echo ">>> 注册 WARP 账户(注册优先,失败回退复用仓库持久化账号)..."
-          reg_ok=false
-          for i in $(seq 1 "$REG_RETRY"); do
-            if "$WGCF" register --accept-tos; then
-              reg_ok=true
-              break
-            fi
-            echo "注册失败,${REG_BACKOFF}s 后重试 $i/$REG_RETRY..."
-            sleep "$REG_BACKOFF"
-          done
-          if [ "$reg_ok" != "true" ]; then
-            echo "::warning::新注册全部失败,使用已拉取的持久化账号"
-            ls -la wgcf-account.toml 2>/dev/null || echo "::error::持久化账号文件不存在"
+          echo ">>> 用户态验证持久化账号有效性(generate 成功即有效)..."
+          if "$WGCF" generate > /dev/null 2>&1 && [ -f wgcf-profile.conf ]; then
+            echo ">>> 持久化账号有效,直接使用(跳过注册,避免 429)"
           else
-            # 注册成功:把新账号 POST 回私有仓,供后续 run 复用(内容量小,失败不阻塞)
-            echo ">>> 注册成功,尝试同步新账号回私有仓..."
-            UPLOAD_B64=$(base64 -w0 wgcf-account.toml)
-            curl -fsSL -X PUT \
-              -H "Authorization: token $RCLONE_PAT" \
-              -H "Accept: application/vnd.github.v3.raw" \
-              -d "{\"message\":\"chore: 更新 wgcf-account.toml (probe auto)\",\"content\":\"$UPLOAD_B64\",\"branch\":\"main\"}" \
-              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
-              > /dev/null && echo "账号已同步" || echo "::warning::账号同步失败(不影响本次运行)"
+            echo "::warning::持久化账号失效(generate 失败),回退尝试注册新账号..."
+            reg_ok=false
+            for i in $(seq 1 "$REG_RETRY"); do
+              if "$WGCF" register --accept-tos; then
+                reg_ok=true
+                break
+              fi
+              echo "注册失败,${REG_BACKOFF}s 后重试 $i/$REG_RETRY..."
+              sleep "$REG_BACKOFF"
+            done
+            if [ "$reg_ok" != "true" ]; then
+              echo "::error::注册也全部失败,无可用账号"
+              exit 1
+            fi
+            echo ">>> 注册成功,重新生成配置..."
+            "$WGCF" generate
           fi
-
-          echo ">>> 生成 WireGuard 配置..."
-          "$WGCF" generate
 
           echo ">>> 手动拉起 WARP 接口..."
           PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
@@ -194,24 +188,12 @@ jobs:
               echo "轮次 $r: 未取到出口 IP,继续"
               continue
             fi
-            # 判断是否命中网段(写临时脚本再执行;python 代码行与 run: 块同缩进 10 空格,
-            # YAML 剥离公共缩进后即为合法 python)
-            cat > /tmp/match.py <<'PYEOF'
-            import ipaddress, sys, os
-            ip = ipaddress.ip_address(sys.argv[1])
-            nets = []
-            if os.path.exists('/tmp/cfips.txt'):
-                with open('/tmp/cfips.txt') as f:
-                    nets = [ipaddress.ip_network(l.strip()) for l in f if l.strip()]
-            hit = [str(n) for n in nets if ip in n]
-            print(",".join(hit))
-            PYEOF
-            HITS=$(python3 /tmp/match.py "$IP" 2>/dev/null || true)
-            if [ -n "$HITS" ]; then
+            # 判断是否命中网段(单行 python -c,避免 heredoc 与 YAML 缩进冲突)
+            IP_HIT=$(python3 -c "import ipaddress,sys;ip=ipaddress.ip_address(sys.argv[1]);lines=open('/tmp/cfips.txt').read().split();sys.exit(0) if any(ip in ipaddress.ip_network(x) for x in lines) else sys.exit(1)" "$IP" 2>/dev/null && echo yes || echo no)
+            if [ "$IP_HIT" = "yes" ]; then
               HIT_IP="$IP"
-              echo "轮次 $r: $IP -> 命中 $HITS !!!"
+              echo "轮次 $r: $IP -> 命中白名单网段 !!!"
               echo "hit_ip=$IP" >> "$GITHUB_ENV"
-              echo "hit_nets=$HITS" >> "$GITHUB_ENV"
               break
             else
               echo "轮次 $r: $IP -> 未命中"
@@ -222,7 +204,7 @@ jobs:
             echo "::warning::$ROUNDS 轮均未命中白名单网段,WARP 刷 IP 未成功,后续决定性测试将跳过"
             echo "hit_ip=" >> "$GITHUB_ENV"
           else
-            echo ">>> 命中 IP: $HIT_IP (网段 $HITS)"
+            echo ">>> 命中 IP: $HIT_IP"
             echo "本 IP 距离 X-Amz-Date 后 12000s 内有效,立即进行决定性测试"
           fi
 

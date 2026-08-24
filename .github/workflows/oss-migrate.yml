@@ -1,0 +1,206 @@
+# 跨账号、跨地域 阿里云 OSS 桶迁移(CDN 域名下载版)
+#
+# 原理:源桶 remote 配置 download_url 后,rclone 的列表/元数据/校验走带
+# AK 签名的桶 endpoint(SigV4),文件内容下载改走匿名 GET 的 CDN 域名
+# (见 rclone s3 后端 downloadFromURL 实现)。目标桶为普通签名写入。
+#
+# 凭据管理(本工作流在公开仓库运行,故凭据绝不经由 inputs 传入):
+#   入口在私有仓 rclone-action 的 "OSS Migrate launcher" 工作流:
+#   在那里填入新旧桶与 CDN 信息 → 自动生成/提交 oss-migrate.conf 到私有仓
+#   → 再由它触发本工作流。本工作流运行时用已有的 secrets.RCLONE_PAT
+#   通过 GitHub API 拉取 oss-migrate.conf——凭据不进任何 run 历史,
+#   不新建 secret,公开库无 Actions 时长上限。
+#
+# 用法(正常情况下不需要直接触发本工作流,去私有仓的 launcher 触发):
+#   mode:
+#     dry-run  连通性自检 + 模拟复制,不写任何数据(首次必跑)
+#     copy     正式迁移,结束后自动执行校验
+#     verify   只做校验(copy 因超时中断后可单独补跑)
+#     cleanup  清理目标桶残留的分片上传(job 被强杀后的孤儿分片)
+#   path: 留空 = 整个桶;填子路径如 "logs/2024" 则只迁移该前缀
+#   (可用于先小规模试跑)。
+#
+# 断点续传:GitHub 单 job 上限 6 小时(本工作流设 350 分钟)。数据量大时
+# copy 会被截断:rclone 会跳过已完成的文件,重新触发即续传,循环直到一轮
+# 完整跑完;再跑一次 copy 让校验 PASSED 即为终态。
+
+name: OSS Migrate (cross-account CDN)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式"
+        type: choice
+        required: true
+        default: "dry-run"
+        options:
+          - dry-run
+          - copy
+          - verify
+          - cleanup
+      path:
+        description: "迁移路径前缀(留空=整桶,如 logs/2024)"
+        required: false
+        default: ""
+
+concurrency:
+  group: oss-migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      RCLONE_CONFIG: ${{ runner.temp }}/oss-migrate.conf
+    steps:
+      - name: Fetch oss-migrate.conf from private repo
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          umask 077
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss-migrate.conf" \
+              -o "$RCLONE_CONFIG"; then
+              echo "配置获取成功"
+              break
+            fi
+            echo "获取失败,重试 $i/3..."
+            sleep $((i * 5))
+          done
+          [ -f "$RCLONE_CONFIG" ] || { echo "::error::无法获取 oss-migrate.conf,请检查 RCLONE_PAT 权限或私有仓中是否存在该文件"; exit 1; }
+
+      - name: Parse config & set paths
+        env:
+          PATH_PREFIX: ${{ inputs.path }}
+        run: |
+          # 从配置读取两个桶名,拼出远端路径(src:/dst:)
+          SRC_BUCKET=$(awk -F' *= *' '/^\[src\]/{f=1;next} /^\[/{f=0} f&&$1=="bucket"{print $2}' "$RCLONE_CONFIG")
+          DST_BUCKET=$(awk -F' *= *' '/^\[dst\]/{f=1;next} /^\[/{f=0} f&&$1=="bucket"{print $2}' "$RCLONE_CONFIG")
+          [ -n "$SRC_BUCKET" ] && [ -n "$DST_BUCKET" ] || { echo "::error::oss-migrate.conf 缺少 src/dst 的 bucket 字段"; exit 1; }
+          if [ -n "$PATH_PREFIX" ]; then
+            echo "SRC=src:$SRC_BUCKET/$PATH_PREFIX" >> "$GITHUB_ENV"
+            echo "DST=dst:$DST_BUCKET/$PATH_PREFIX" >> "$GITHUB_ENV"
+          else
+            echo "SRC=src:$SRC_BUCKET" >> "$GITHUB_ENV"
+            echo "DST=dst:$DST_BUCKET" >> "$GITHUB_ENV"
+          fi
+          echo "SRC=$SRC"
+          echo "DST=$DST"
+
+      - name: Install rclone (pinned)
+        run: |
+          VER=v1.74.4
+          cd "$(mktemp -d)"
+          curl -fsSLO "https://downloads.rclone.org/${VER}/rclone-${VER}-linux-amd64.zip"
+          unzip -oq "rclone-${VER}-linux-amd64.zip"
+          sudo mv "rclone-${VER}-linux-amd64/rclone" /usr/local/bin/rclone
+          rclone version
+
+      # ---- 预检:签名 API 双向连通(验证 runner 境外 IP 未被源桶策略拦截) ----
+      - name: Preflight - signed API access
+        if: inputs.mode != 'cleanup'
+        run: |
+          rclone lsd src: > /dev/null && echo "src signed API OK"
+          rclone lsd dst: > /dev/null && echo "dst signed API OK"
+
+      # ---- 预检:源桶规模对账单 ----
+      - name: Preflight - source stats
+        if: inputs.mode != 'cleanup'
+        run: |
+          rclone size --json "$SRC" | tee source-size.json
+          jq -r '"objects=\(.files) bytes=\(.bytes)"' source-size.json >> "$GITHUB_STEP_SUMMARY" || true
+
+      # ---- 预检:匿名经 CDN 拉一个小对象,验证下载域名与路径映射 ----
+      - name: Preflight - CDN anonymous GET probe
+        if: ${{ inputs.mode != 'cleanup' }}
+        run: |
+          if ! rclone config dump src: | grep -q '^download_url'; then
+            echo "未配置 download_url,下载将直连桶域名(跳过探测)"
+            exit 0
+          fi
+          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1 --max-size 8Mi \
+                    | jq -r 'sort_by(.Size) | .[0].Path // empty')
+          if [ -z "$probe" ]; then
+            echo "::warning::范围内没有 8MiB 以下的小文件,跳过 CDN 探测(正式复制时若 CDN 配置有误会直接报错)"
+            exit 0
+          fi
+          expect=$(rclone lsjson "$SRC/$probe" | jq -r '.[0].Size')
+          echo "probing: $probe ($expect bytes)"
+          got=$(rclone cat "$SRC/$probe" | wc -c)
+          echo "got: $got bytes"
+          if [ "$got" -ne "$expect" ]; then
+            echo "::error::CDN 下载字节数($got)与源对象($expect)不符——请检查 oss-migrate.conf 中 download_url 是否直达桶根(结尾须带 / 且无额外路径前缀)"
+            exit 1
+          fi
+          echo "CDN anonymous GET OK"
+
+      # ---- 复制(dry-run 只模拟) ----
+      - name: Copy (dry-run)
+        if: inputs.mode == 'dry-run'
+        run: |
+          rclone copy "$SRC" "$DST" --dry-run \
+            --fast-list --transfers 8 --checkers 16 \
+            --stats-one-line --stats 60s -v 2>&1 | tee copy.log
+
+      - name: Copy
+        if: inputs.mode == 'copy'
+        run: |
+          set -o pipefail
+          rclone copy "$SRC" "$DST" \
+            --fast-list \
+            --transfers 8 --checkers 16 \
+            --s3-chunk-size 64M --s3-upload-concurrency 4 \
+            --retries 5 --low-level-retries 20 \
+            --stats-one-line --stats 30s -v 2>&1 | tee copy.log
+
+      # ---- 校验:全量清单比对(非分片文件比 MD5,分片上传的退化为比大小+元数据) ----
+      - name: Verify - full one-way check
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
+        run: |
+          set -o pipefail
+          rclone check "$SRC" "$DST" --one-way -v 2>&1 | tee check.log
+          echo "full one-way check PASSED" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- 校验:随机抽 5 个文件双端逐字节比对(--download 会真实下载两端内容) ----
+      - name: Verify - random sample byte-compare
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
+        run: |
+          rclone lsjson "$SRC" -R --files-only > files.json
+          total=$(jq 'length' files.json)
+          echo "total files: $total"
+          mapfile -t picks < <(jq -r '.[].Path' files.json | shuf -n 5)
+          : > sample.log
+          for p in "${picks[@]}"; do
+            size=$(jq -r --arg p "$p" '.[] | select(.Path==$p) | .Size' files.json)
+            echo "== sample: $p ($size bytes)" | tee -a sample.log
+            rclone check "$SRC/$p" "$DST/$p" --download 2>&1 | tee -a sample.log
+          done
+          echo "random sample byte-compare PASSED" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- 清理目标桶孤儿分片(copy 被强杀后的残留) ----
+      - name: Cleanup aborted multipart uploads
+        if: inputs.mode == 'cleanup'
+        run: "rclone cleanup dst: -v"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss-migrate-logs-${{ github.run_number }}
+          path: |
+            source-size.json
+            copy.log
+            check.log
+            sample.log
+          if-no-files-found: ignore
+
+      - name: Remove fetched config
+        if: always()
+        run: |
+          if [ -f "$RCLONE_CONFIG" ]; then shred -u "$RCLONE_CONFIG" || rm -f "$RCLONE_CONFIG"; fi

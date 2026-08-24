@@ -154,6 +154,39 @@ jobs:
           fi
           expect=$(rclone lsjson "$SRC/$probe" | jq -r '.[0].Size')
           echo "probing: $probe ($expect bytes)"
+
+          # 生成一个预签名 URL,先直连源桶验签,再走 CDN 验签,分离定位问题
+          SIGN_URL=$(rclone link "$SRC/$probe" --expire 1h 2>/dev/null)
+          if [ -z "$SIGN_URL" ]; then
+            echo "::warning::rclone link 未生成预签名 URL,跳过对照,直接用 cat 探测"
+          else
+            CDN_HOST=$(rclone config dump | jq -r '.src.download_host')
+            # 直连源桶(签名锚定 host)
+            ORIGIN_CODE=$(curl -sS -o /tmp/direct.bin -w '%{http_code}' --max-time 30 "$SIGN_URL")
+            ORIGIN_SIZE=$(stat -c%s /tmp/direct.bin 2>/dev/null || echo 0)
+            echo "direct-to-origin: HTTP $ORIGIN_CODE, $ORIGIN_SIZE bytes"
+            if [ "$ORIGIN_CODE" != "200" ]; then
+              echo "::error::直连源桶验签失败(HTTP $ORIGIN_CODE)——rclone 预签名本身有问题,与 Worker 无关"
+              head -c 300 /tmp/direct.bin || true
+              exit 1
+            fi
+            # 走 CDN(Worker 改写回源):仅替换 URL 的 host 部分
+            CDN_URL=$(printf '%s' "$SIGN_URL" | sed -E "s#^https://[^/]+/#https://$CDN_HOST/#")
+            echo "cdn url host: $CDN_HOST"
+            CDN_CODE=$(curl -sS -o /tmp/cdn.bin -w '%{http_code}' --max-time 30 "$CDN_URL")
+            CDN_SIZE=$(stat -c%s /tmp/cdn.bin 2>/dev/null || echo 0)
+            echo "via-cdn: HTTP $CDN_CODE, $CDN_SIZE bytes"
+            if [ "$CDN_CODE" != "200" ]; then
+              echo "::error::直连验签 OK 但经 CDN 失败(HTTP $CDN_CODE)——Worker 回源过程破坏了签名(query/路径编码或头改动)"
+              head -c 300 /tmp/cdn.bin || true
+              exit 1
+            fi
+            if [ "$CDN_SIZE" = "$expect" ]; then
+              echo "CDN presigned GET OK"
+              exit 0
+            fi
+          fi
+
           got=$(rclone cat "$SRC/$probe" | wc -c)
           echo "got: $got bytes"
           if [ "$got" -ne "$expect" ]; then

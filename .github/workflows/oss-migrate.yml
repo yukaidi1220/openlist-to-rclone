@@ -83,16 +83,23 @@ jobs:
         env:
           PATH_PREFIX: ${{ inputs.path }}
         run: |
-          # 从配置读取两个桶名,拼出远端路径(src:/dst:)
+          # 从配置读取桶名与 RC4 加密名,拼出远端路径(src:/dst:)。
+          # 桶内对象 key 自带加密桶名前缀(Worker 回源不剥首段),因此
+          # 用 path 前缀做映射:src 读 afa0baf1/X,写入 dst 变为 afa0baf6/X。
+          # 注意:s3 后端没有 root 配置项,conf 里的 root 会被忽略,绝不能
+          # 依赖它做前缀注入(曾因此把源前缀原样复制进目标桶)。
           SRC_BUCKET=$(awk -F' *= *' '/^\[src\]/{f=1;next} /^\[/{f=0} f&&$1=="bucket"{print $2}' "$RCLONE_CONFIG")
           DST_BUCKET=$(awk -F' *= *' '/^\[dst\]/{f=1;next} /^\[/{f=0} f&&$1=="bucket"{print $2}' "$RCLONE_CONFIG")
+          SRC_PREFIX=$(awk -F' *= *' '/^\[src\]/{f=1;next} /^\[/{f=0} f&&$1=="cdn_prefix"{print $2}' "$RCLONE_CONFIG")
+          DST_PREFIX=$(awk -F' *= *' '/^\[dst\]/{f=1;next} /^\[/{f=0} f&&$1=="cdn_prefix"{print $2}' "$RCLONE_CONFIG")
           [ -n "$SRC_BUCKET" ] && [ -n "$DST_BUCKET" ] || { echo "::error::oss-migrate.conf 缺少 src/dst 的 bucket 字段"; exit 1; }
+          [ -n "$SRC_PREFIX" ] && [ -n "$DST_PREFIX" ] || { echo "::error::oss-migrate.conf 缺少 src/dst 的 cdn_prefix 字段"; exit 1; }
           if [ -n "$PATH_PREFIX" ]; then
-            echo "SRC=src:$SRC_BUCKET/$PATH_PREFIX" >> "$GITHUB_ENV"
-            echo "DST=dst:$DST_BUCKET/$PATH_PREFIX" >> "$GITHUB_ENV"
+            echo "SRC=src:$SRC_BUCKET/$SRC_PREFIX/$PATH_PREFIX" >> "$GITHUB_ENV"
+            echo "DST=dst:$DST_BUCKET/$DST_PREFIX/$PATH_PREFIX" >> "$GITHUB_ENV"
           else
-            echo "SRC=src:$SRC_BUCKET" >> "$GITHUB_ENV"
-            echo "DST=dst:$DST_BUCKET" >> "$GITHUB_ENV"
+            echo "SRC=src:$SRC_BUCKET/$SRC_PREFIX" >> "$GITHUB_ENV"
+            echo "DST=dst:$DST_BUCKET/$DST_PREFIX" >> "$GITHUB_ENV"
           fi
           echo "SRC=$SRC"
           echo "DST=$DST"

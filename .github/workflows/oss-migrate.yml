@@ -147,7 +147,10 @@ jobs:
             echo "未配置 download_host,下载将签名直连桶域名(跳过探测)"
             exit 0
           fi
-          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1 --max-size 8Mi \
+          # --fast-list: 大桶必须。不带它 rclone 逐目录列举,海量目录下
+          # 是小时级灾难(source stats 的 size 命令自带 fast-list 所以 13s);
+          # 内存代价 ~每对象几百字节,百万级文件约数百 MB,runner 可承受
+          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1 --max-size 8Mi --fast-list \
                     | jq -r 'sort_by(.Size) | .[0].Path // empty')
           if [ -z "$probe" ]; then
             echo "::warning::范围内没有 8MiB 以下的小文件,跳过 CDN 探测(正式复制时若 CDN 配置有误会直接报错)"

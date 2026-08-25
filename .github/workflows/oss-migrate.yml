@@ -101,8 +101,6 @@ jobs:
             echo "SRC=src:$SRC_BUCKET/$SRC_PREFIX" >> "$GITHUB_ENV"
             echo "DST=dst:$DST_BUCKET/$DST_PREFIX" >> "$GITHUB_ENV"
           fi
-          echo "SRC=$SRC"
-          echo "DST=$DST"
 
       - name: Install rclone (custom build with download_host)
         run: |

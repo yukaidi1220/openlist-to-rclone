@@ -26,6 +26,8 @@
 # 断点续传:GitHub 单 job 上限 6 小时(本工作流设 350 分钟)。数据量大时
 # copy 会被截断:rclone 会跳过已完成的文件,重新触发即续传,循环直到一轮
 # 完整跑完;再跑一次 copy 让校验 PASSED 即为终态。
+# 注意:本场景下目标桶 ACL 拦截直连 HeadObject,copy 无法探测目标文件
+# 是否已存在,中断重跑会把范围内文件整体重传(覆盖写,数据仍一致)。
 
 name: OSS Migrate (cross-account CDN)
 
@@ -201,6 +203,7 @@ jobs:
         run: |
           rclone copy "$SRC" "$DST" --dry-run \
             --fast-list --transfers 8 --checkers 16 \
+            --multi-thread-cutoff 0 --s3-no-head \
             --stats-one-line --stats 60s -v 2>&1 | tee copy.log
 
       - name: Copy
@@ -209,10 +212,20 @@ jobs:
           set -o pipefail
           # --no-check-certificate: yukaidi.com CNAME 到 aliyuncs,阿里主机
           # 不出示 yukaidi 证书,HeadObject 等 SDK 请求会 TLS 验证失败
+          # --multi-thread-cutoff 0: 禁用大文件分片直写(multi-thread copy)。
+          #   该路径完成后会用目标 remote 直连 HeadObject 验证
+          #   (fs/operations/multithread.go),而两桶 ACL 仅放行 CDN 回源 IP
+          #   的读请求,直连 HeadObject 必 403,整个文件会被误判为失败。
+          # --s3-no-head: 单流 PUT(含分片上传)完成后同样会直连 HeadObject
+          #   验证(backend/s3/s3.go),同理关闭;元数据改从 PUT 响应提取
+          #   (单分片 ETag 即 MD5,check 仍可比哈希)。
+          #   数据正确性由 verify 模式(全量比对+抽样逐字节)兜底。
           rclone copy "$SRC" "$DST" --no-check-certificate \
             --fast-list \
             --transfers 8 --checkers 16 \
+            --multi-thread-cutoff 0 \
             --s3-chunk-size 64M --s3-upload-concurrency 4 \
+            --s3-no-head \
             --retries 5 --low-level-retries 20 \
             --stats-one-line --stats 30s -v 2>&1 | tee copy.log
 

@@ -1,11 +1,12 @@
 # 跨账号、跨地域 阿里云 OSS 桶迁移(CDN 预签名下载版)
 #
-# 原理:源桶 remote 配置 download_host 后,rclone 下载对象时生成 SigV4
-# 预签名 URL(签名锚定 endpoint,即桶名.endpoint 的自定义域名),仅把
-# URL host 替换为 CDN 域名后发 GET;Cloudflare Worker 按原 host 回源,
-# OSS 验签通过。列表/元数据/上传仍走签名 endpoint,与生产下载链路同构。
-# 需要定制版 rclone(含 download_host 选项),二进制由私有仓
-# rclone-action 的 rclone-cdn/ 目录分发。
+# 原理:源桶 remote 配置 download_host 后,rclone 对对象读操作(GET 与
+# HeadObject)生成 SigV4 预签名 URL(签名锚定 endpoint,即桶名.endpoint
+# 的自定义域名),仅把 URL host 替换为 CDN 域名后发出;Cloudflare Worker
+# 按原 host 回源,OSS 验签通过。列表/上传仍走签名 endpoint,与生产下载
+# 链路同构。
+# 需要定制版 rclone(含 download_host 选项),由公开库 yukaidi1220/rclone
+# 的 CI 构建并发布 release,此处直接拉取 latest。
 #
 # 凭据管理(本工作流在公开仓库运行,故凭据绝不经由 inputs 传入):
 #   入口在私有仓 rclone-action 的 "OSS Migrate launcher" 工作流:
@@ -26,8 +27,6 @@
 # 断点续传:GitHub 单 job 上限 6 小时(本工作流设 350 分钟)。数据量大时
 # copy 会被截断:rclone 会跳过已完成的文件,重新触发即续传,循环直到一轮
 # 完整跑完;再跑一次 copy 让校验 PASSED 即为终态。
-# 注意:本场景下目标桶 ACL 拦截直连 HeadObject,copy 无法探测目标文件
-# 是否已存在,中断重跑会把范围内文件整体重传(覆盖写,数据仍一致)。
 
 name: OSS Migrate (cross-account CDN)
 
@@ -99,24 +98,19 @@ jobs:
           echo "DST=$DST"
 
       - name: Install rclone (custom build with download_host)
-        env:
-          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
-          REPO_OWNER: ${{ github.repository_owner }}
         run: |
-          # 定制版 rclone:含 s3 后端 download_host(预签名 + CDN host 替换)
-          # 二进制由私有仓 rclone-action 分发
+          # 定制版 rclone:含 s3 后端 download_host(预签名 + CDN host 替换,
+          # GET 与 HeadObject 均经 CDN),由公开库 CI 构建并发布 release
           for i in {1..3}; do
             if curl -fsSL --connect-timeout 15 --max-time 120 --retry 2 --retry-delay 5 \
-              -H "Authorization: token $RCLONE_PAT" \
-              -H "Accept: application/vnd.github.v3.raw" \
-              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/rclone-cdn/rclone-cdn-linux-amd64" \
+              "https://github.com/yukaidi1220/rclone/releases/latest/download/rclone-cdn-linux-amd64" \
               -o /tmp/rclone; then
               break
             fi
             echo "拉取失败,重试 $i/3..."
             sleep $((i * 5))
           done
-          [ -f /tmp/rclone ] || { echo "::error::无法拉取定制版 rclone,请检查私有仓 rclone-cdn/rclone-cdn-linux-amd64"; exit 1; }
+          [ -f /tmp/rclone ] || { echo "::error::无法拉取定制版 rclone,请检查 yukaidi1220/rclone 的 latest release"; exit 1; }
           chmod +x /tmp/rclone
           sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version
@@ -203,7 +197,6 @@ jobs:
         run: |
           rclone copy "$SRC" "$DST" --dry-run \
             --fast-list --transfers 8 --checkers 16 \
-            --multi-thread-cutoff 0 --s3-no-head \
             --stats-one-line --stats 60s -v 2>&1 | tee copy.log
 
       - name: Copy
@@ -212,20 +205,13 @@ jobs:
           set -o pipefail
           # --no-check-certificate: yukaidi.com CNAME 到 aliyuncs,阿里主机
           # 不出示 yukaidi 证书,HeadObject 等 SDK 请求会 TLS 验证失败
-          # --multi-thread-cutoff 0: 禁用大文件分片直写(multi-thread copy)。
-          #   该路径完成后会用目标 remote 直连 HeadObject 验证
-          #   (fs/operations/multithread.go),而两桶 ACL 仅放行 CDN 回源 IP
-          #   的读请求,直连 HeadObject 必 403,整个文件会被误判为失败。
-          # --s3-no-head: 单流 PUT(含分片上传)完成后同样会直连 HeadObject
-          #   验证(backend/s3/s3.go),同理关闭;元数据改从 PUT 响应提取
-          #   (单分片 ETag 即 MD5,check 仍可比哈希)。
-          #   数据正确性由 verify 模式(全量比对+抽样逐字节)兜底。
+          # 定制版 rclone 会把 HeadObject(上传后验证/目标探测等)也经
+          # download_host 预签名走 CDN,因此无需禁用 multi-thread 直写、
+          # 也无需 --s3-no-head:multi-thread 性能与真实 HEAD 校验均保留。
           rclone copy "$SRC" "$DST" --no-check-certificate \
             --fast-list \
             --transfers 8 --checkers 16 \
-            --multi-thread-cutoff 0 \
             --s3-chunk-size 64M --s3-upload-concurrency 4 \
-            --s3-no-head \
             --retries 5 --low-level-retries 20 \
             --stats-one-line --stats 30s -v 2>&1 | tee copy.log
 

@@ -147,19 +147,13 @@ jobs:
             echo "未配置 download_host,下载将签名直连桶域名(跳过探测)"
             exit 0
           fi
-          # probe 只为验证 CDN 链路,不值得为挑"最小文件"扫描全桶:
-          # 全量 lsjson 要拉完整个桶的元数据(每对象约 300B)才开始筛,
-          # 大桶是十分钟到小时级灾难。改为只看前两层目录(秒级);
-          # 前两层没有 <=8MiB 文件时放宽大小限制,再没有才全量兜底。
-          probe=$(rclone lsjson "$SRC" --files-only --min-size 1 --max-size 8Mi --fast-list --max-depth 2 \
-                    | jq -r 'sort_by(.Size) | .[0].Path // empty')
+          # probe 只为验证 CDN 链路,不值得为挑"最小文件"扫描全桶。
+          # 用 rclone ls 流式输出(逐条打印)+ head -1:命中第一个
+          # <=8MiB 文件立即 SIGPIPE 停止列举,大桶也秒级。
+          # 兜底:全桶没有 <=8MiB 文件时取第一个文件(不限大小)。
+          probe=$(rclone ls "$SRC" --files-only --min-size 1 --max-size 8Mi --fast-list 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')
           if [ -z "$probe" ]; then
-            probe=$(rclone lsjson "$SRC" --files-only --min-size 1 --fast-list --max-depth 2 \
-                      | jq -r 'sort_by(.Size) | .[0].Path // empty')
-          fi
-          if [ -z "$probe" ]; then
-            probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1 --fast-list \
-                      | jq -r 'sort_by(.Size) | .[0].Path // empty')
+            probe=$(rclone ls "$SRC" --files-only --min-size 1 --fast-list 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')
           fi
           if [ -z "$probe" ]; then
             echo "::warning::范围内没有 8MiB 以下的小文件,跳过 CDN 探测(正式复制时若 CDN 配置有误会直接报错)"

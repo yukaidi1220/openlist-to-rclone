@@ -159,7 +159,10 @@ jobs:
           echo "probing: $probe ($expect bytes)"
 
           # 生成一个预签名 URL,先直连源桶验签,再走 CDN 验签,分离定位问题
+          # ::add-mask:: 确保即使后续调试输出(echo/set-x/curl 报错)带上
+          # 完整预签名 URL,也会在公开日志中被打码
           SIGN_URL=$(rclone link "$SRC/$probe" --expire 1h 2>/dev/null)
+          if [ -n "$SIGN_URL" ]; then echo "::add-mask::$SIGN_URL"; fi
           if [ -z "$SIGN_URL" ]; then
             echo "::warning::rclone link 未生成预签名 URL,跳过对照,直接用 cat 探测"
           else

@@ -214,14 +214,16 @@ jobs:
           # 不出示 yukaidi 证书,HeadObject 等 SDK 请求会 TLS 验证失败
           # 定制版 rclone 会把 HeadObject(上传后验证/目标探测等)也经
           # download_host 预签名走 CDN。
-          # --multi-thread-cutoff 0: CDN 对部分扩展名(.7z/.exe/.iso 等)的
-          #   首次 Range 分段请求会返回 200 全量而非 206 切片(2026-08-25
-          #   抽样证实:多线程直写的大文件大小正确但内容错乱),故禁用多线程
-          #   直写,改单流下载 + multipart 上传,用更高 --transfers 补速度。
+          # --multi-thread-streams 1: 禁用多线程直写。CDN 对部分扩展名
+          #   (.7z/.exe/.iso 等)的 Range 分段请求不可靠(2026-08-25 两轮
+          #   抽样证实:多线程上传的大文件大小正确但内容错乱),改纯单流
+          #   下载 + multipart 上传,用更高 --transfers 补速度。
+          #   注意:rclone 语义里 --multi-thread-cutoff 0 是"全部启用"
+          #   (size < cutoff 才跳过),禁用必须用 streams <= 1。
           rclone copy "$SRC" "$DST" --no-check-certificate \
             --fast-list \
             --transfers 16 --checkers 32 \
-            --multi-thread-cutoff 0 \
+            --multi-thread-streams 1 \
             --s3-chunk-size 64M --s3-upload-concurrency 2 \
             --retries 5 --low-level-retries 20 \
             --stats-one-line --stats 30s -v 2>&1 | tee copy.log

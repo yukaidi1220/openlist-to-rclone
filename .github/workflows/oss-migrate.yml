@@ -227,11 +227,15 @@ jobs:
           #   下载 + multipart 上传,用更高 --transfers 补速度。
           #   注意:rclone 语义里 --multi-thread-cutoff 0 是"全部启用"
           #   (size < cutoff 才跳过),禁用必须用 streams <= 1。
+          # --s3-no-head: 海量小文件场景下,每文件 4 次跨洋往返中省掉
+          #   上传验证这一次(延迟瓶颈);数据安全仍由下载侧 MD5 校验
+          #   (corrupted on transfer 拦截)与 verify 模式抽样兜底。
           rclone copy "$SRC" "$DST" --no-check-certificate \
             --fast-list \
-            --transfers 16 --checkers 32 \
+            --transfers 64 --checkers 64 \
             --multi-thread-streams 1 \
             --s3-chunk-size 64M --s3-upload-concurrency 2 \
+            --s3-no-head \
             --retries 5 --low-level-retries 20 \
             --stats-one-line --stats 30s -v 2>&1 | tee copy.log
 

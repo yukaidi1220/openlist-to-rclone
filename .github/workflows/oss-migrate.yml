@@ -232,7 +232,7 @@ jobs:
           #   (corrupted on transfer 拦截)与 verify 模式抽样兜底。
           rclone copy "$SRC" "$DST" --no-check-certificate \
             --fast-list \
-            --transfers 64 --checkers 64 \
+            --transfers 32 --checkers 32 \
             --multi-thread-streams 1 \
             --s3-chunk-size 64M --s3-upload-concurrency 2 \
             --s3-no-head \

@@ -41,6 +41,7 @@ on:
         options:
           - dry-run
           - copy
+          - sync
           - verify
           - cleanup
       path:
@@ -240,7 +241,7 @@ jobs:
             --stats-one-line --stats 30s -v 2>&1 | tee copy.log
 
       # ---- 镜像同步(源桶持续写入/删除场景) ----
-      - name: Sync (mirror: copies new/changed, deletes extra in dst)
+      - name: 'Sync (mirror: copies new/changed, deletes extra in dst)'
         if: inputs.mode == 'sync'
         run: |
           set -o pipefail

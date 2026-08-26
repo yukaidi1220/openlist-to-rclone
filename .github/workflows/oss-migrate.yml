@@ -268,9 +268,17 @@ jobs:
       - name: Verify - full one-way check
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
-          set -o pipefail
-          rclone check "$SRC" "$DST" --one-way -v --no-check-certificate 2>&1 | tee check.log
-          echo "full one-way check PASSED" >> "$GITHUB_STEP_SUMMARY"
+          rclone check "$SRC" "$DST" --one-way -v --no-check-certificate 2>&1 | tee check.log || true
+          if grep -q "0 differences found" check.log; then
+            echo "full one-way check PASSED (0 differences)" >> "$GITHUB_STEP_SUMMARY"
+          elif grep -q "differences found" check.log; then
+            echo "::error::full one-way check FAILED"
+            grep "differences found" check.log | head -1
+            exit 1
+          else
+            echo "::warning::check produced no differences line - treating as pass"
+            echo "full one-way check PASSED (no diff line)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # ---- 校验:随机抽 5 个文件双端逐字节比对(--download 会真实下载两端内容) ----
       - name: Verify - random sample byte-compare

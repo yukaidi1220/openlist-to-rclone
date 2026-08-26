@@ -239,9 +239,29 @@ jobs:
             --retries 5 --low-level-retries 20 \
             --stats-one-line --stats 30s -v 2>&1 | tee copy.log
 
+      # ---- 镜像同步(源桶持续写入/删除场景) ----
+      - name: Sync (mirror: copies new/changed, deletes extra in dst)
+        if: inputs.mode == 'sync'
+        run: |
+          set -o pipefail
+          # 与 Copy 完全相同的传输参数,但语义是镜像:
+          #   源有目标没有 / 内容不一致 -> 传输覆盖
+          #   目标有源没有             -> 删除(真正的镜像)
+          # 用于源桶仍在实时写入、删除场景下的周期性追平:
+          # 反复触发本模式即可使目标桶收敛为源桶的当前快照。
+          # 注意:目标桶加密名前缀下任何"源桶没有的对象"都会被删除。
+          rclone sync "$SRC" "$DST" --no-check-certificate \
+            --fast-list \
+            --transfers 32 --checkers 32 \
+            --multi-thread-streams 1 \
+            --s3-chunk-size 64M --s3-upload-concurrency 2 \
+            --s3-no-head \
+            --retries 5 --low-level-retries 20 \
+            --stats-one-line --stats 30s -v 2>&1 | tee sync.log
+
       # ---- 校验:全量清单比对(非分片文件比 MD5,分片上传的退化为比大小+元数据) ----
       - name: Verify - full one-way check
-        if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
           set -o pipefail
           rclone check "$SRC" "$DST" --one-way -v --no-check-certificate 2>&1 | tee check.log
@@ -249,7 +269,7 @@ jobs:
 
       # ---- 校验:随机抽 5 个文件双端逐字节比对(--download 会真实下载两端内容) ----
       - name: Verify - random sample byte-compare
-        if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
           rclone lsjson "$SRC" -R --files-only > files.json
           total=$(jq 'length' files.json)
@@ -293,6 +313,7 @@ jobs:
           path: |
             source-size.json
             copy.log
+            sync.log
             check.log
             sample.log
           if-no-files-found: ignore

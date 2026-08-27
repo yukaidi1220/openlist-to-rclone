@@ -272,21 +272,18 @@ jobs:
           set -o pipefail
 
           # 并行拉取双端 lsjson（只读操作，--hash-type MD5 加速）
-          rclone lsjson "$SRC" -R --files-only --hash --hash-type MD5 --no-check-certificate \
-            -o /tmp/src_ls.json --stats-one-line --stats 60s -v &
+          rclone lsjson "$SRC" -R --files-only --hash --hash-type MD5 --no-check-certificate > /tmp/src_ls.json &
           SRC_PID=$!
-          rclone lsjson "$DST" -R --files-only --hash --hash-type MD5 --no-check-certificate \
-            -o /tmp/dst_ls.json --stats-one-line --stats 60s -v &
+          rclone lsjson "$DST" -R --files-only --hash --hash-type MD5 --no-check-certificate > /tmp/dst_ls.json &
           DST_PID=$!
 
           wait $SRC_PID || { echo "::error::lsjson src failed"; exit 1; }
           wait $DST_PID || { echo "::error::lsjson dst failed"; exit 1; }
 
-          # 确保 lsjson 写了文件（-o 不一定生效时 fallback）
+          # 确保文件非空
           if [ ! -s /tmp/src_ls.json ] || [ ! -s /tmp/dst_ls.json ]; then
-            echo "::warning::lsjson -o 无输出, fallback 到直接重定向"
-            rclone lsjson "$SRC" -R --files-only --hash --hash-type MD5 --no-check-certificate > /tmp/src_ls.json
-            rclone lsjson "$DST" -R --files-only --hash --hash-type MD5 --no-check-certificate > /tmp/dst_ls.json
+            echo "::error::lsjson produced empty output"
+            exit 1
           fi
 
           SRC_COUNT=$(jq 'length' /tmp/src_ls.json)

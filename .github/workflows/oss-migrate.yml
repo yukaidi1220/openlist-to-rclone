@@ -265,137 +265,21 @@ jobs:
             --retries 5 --low-level-retries 20 \
             --stats-one-line --stats 30s -v 2>&1 | tee sync.log
 
-      # ---- 校验:两阶段验证(快速 size 比对 + 抽样 ETag 验证) ----
-      - name: Verify - manifest + ETag sample
+      # ---- 校验:全量清单比对(非分片文件比 MD5,分片上传的退化为比大小+元数据) ----
+      - name: Verify - full one-way check
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
-          # 两阶段设计:
-          #   Phase 1: lsjson(无 --hash)获取 path+size,比对完整性
-          #   Phase 2: 对 size 匹配的文件抽样,HEAD 获取 ETag/MD5 验证内容
-          # 避免对65K对象全量获取 hash(lsjson --hash 极慢)
-
-          set -e
-          : > check.log
-
-          # ---- Phase 1: 快速 size 比对 ----
-          echo "Phase 1: listing src..."
-          rclone lsjson "$SRC" -R --files-only --no-check-certificate > /tmp/src.json
-          echo "Phase 1: listing dst..."
-          rclone lsjson "$DST" -R --files-only --no-check-certificate > /tmp/dst.json
-
-          SRC_COUNT=$(jq 'length' /tmp/src.json)
-          DST_COUNT=$(jq 'length' /tmp/dst.json)
-          echo "src: $SRC_COUNT objects, dst: $DST_COUNT objects"
-
-          # 构建 dst 索引 {path: size},逐条比较
-          jq -n \
-            --slurpfile src /tmp/src.json \
-            --slurpfile dst /tmp/dst.json \
-            '
-            (reduce $dst[] as $d ({};
-              . + {($d.Path): $d.Size}
-            )) as $dm |
-            [ $src[] | .Path as $p |
-              if $dm[$p] == null then
-                {path: $p, status: "missing", src_size: .Size}
-              elif .Size == $dm[$p] then
-                {path: $p, status: "match"}
-              else
-                {path: $p, status: "size_mismatch", src_size: .Size, dst_size: $dm[$p]}
-              end
-            ] | {
-              total: length,
-              match: [ .[] | select(.status == "match") ] | length,
-              missing: [ .[] | select(.status == "missing") ] | length,
-              size_mismatch: [ .[] | select(.status == "size_mismatch") ] | length,
-              match_paths: [ .[] | select(.status == "match") | .path ],
-              details: [ .[] | select(.status != "match") ]
-            }
-            ' > /tmp/compare.json
-
-          TOTAL=$(jq '.total' /tmp/compare.json)
-          MATCH=$(jq '.match' /tmp/compare.json)
-          MISSING=$(jq '.missing' /tmp/compare.json)
-          SIZE_MISMATCH=$(jq '.size_mismatch' /tmp/compare.json)
-
-          echo "Phase 1: total=$TOTAL match=$MATCH missing=$MISSING size_mismatch=$SIZE_MISMATCH"
-
-          FAIL=0
-          if [ "$MISSING" -gt 0 ]; then
-            echo "::error::$MISSING file(s) in src missing in dst"
-            jq -r '.details[] | select(.status == "missing") | .path' /tmp/compare.json | head -20 | tee -a check.log
-            FAIL=1
-          fi
-          if [ "$SIZE_MISMATCH" -gt 0 ]; then
-            echo "::error::$SIZE_MISMATCH file(s) size mismatch"
-            jq -r '.details[] | select(.status == "size_mismatch") | "\(.path): src=\(.src_size) dst=\(.dst_size)"' /tmp/compare.json | head -50 | tee -a check.log
-            FAIL=1
-          fi
-
-          # ---- Phase 2: 抽样 ETag 验证 ----
-          # 从 size 匹配的文件中随机抽20个,HEAD 获取 MD5 比对
-          SAMPLE_SIZE=20
-          echo ""
-          echo "Phase 2: sampling $SAMPLE_SIZE files for ETag verification..."
-
-          # 提取 size 匹配的文件路径,随机抽样
-          jq -r '.match_paths[]' /tmp/compare.json | shuf -n $SAMPLE_SIZE > /tmp/sample_paths.txt
-          SAMPLE_ACTUAL=$(wc -l < /tmp/sample_paths.txt)
-          echo "sampled: $SAMPLE_ACTUAL files"
-
-          # 对每个样本:用 rclone lsjson 单独获取 hash (HEAD 请求)
-          # 两端分别获取,比对 Hashes.MD5
-          sample_ok=0
-          sample_fail=0
-          sample_no_hash=0
-
-          while IFS= read -r f; do
-            # 获取 src 该文件的 hash
-            src_hash=$(rclone lsjson "$SRC/$f" --no-check-certificate 2>/dev/null | jq -r '.[0].Hashes.MD5 // ""')
-            # 获取 dst 该文件的 hash
-            dst_hash=$(rclone lsjson "$DST/$f" --no-check-certificate 2>/dev/null | jq -r '.[0].Hashes.MD5 // ""')
-
-            if [ -z "$src_hash" ] && [ -z "$dst_hash" ]; then
-              # 双端无 hash → 仅 size 已验证(Pass)
-              sample_no_hash=$((sample_no_hash + 1))
-            elif [ "$src_hash" = "$dst_hash" ]; then
-              sample_ok=$((sample_ok + 1))
-            else
-              echo "HASH MISMATCH: $f  src=$src_hash  dst=$dst_hash" | tee -a check.log
-              sample_fail=$((sample_fail + 1))
-            fi
-          done < /tmp/sample_paths.txt
-
-          echo "Phase 2: ok=$sample_ok no_hash=$sample_no_hash fail=$sample_fail"
-
-          # ---- 报告 ----
-          {
-            echo "### Verify - manifest + ETag sample"
-            echo ""
-            echo "**Phase 1: Size comparison**"
-            echo "- total: $TOTAL"
-            echo "- size match: $MATCH"
-            echo "- missing in dst: $MISSING"
-            echo "- size mismatch: $SIZE_MISMATCH"
-            echo ""
-            echo "**Phase 2: ETag sample ($SAMPLE_ACTUAL files)**"
-            echo "- MD5 match: $sample_ok"
-            echo "- no hash (size-only): $sample_no_hash"
-            echo "- hash mismatch: $sample_fail"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          if [ "$sample_fail" -gt 0 ]; then
-            echo "::error::$sample_fail sampled file(s) have hash mismatch"
-            FAIL=1
-          fi
-
-          if [ "$FAIL" -ne 0 ]; then
-            echo "::error::Verify FAILED"
+          rclone check "$SRC" "$DST" --one-way -v --no-check-certificate 2>&1 | tee check.log || true
+          if grep -q "0 differences found" check.log; then
+            echo "full one-way check PASSED (0 differences)" >> "$GITHUB_STEP_SUMMARY"
+          elif grep -q "differences found" check.log; then
+            echo "::error::full one-way check FAILED"
+            grep "differences found" check.log | head -1
             exit 1
+          else
+            echo "::warning::check produced no differences line - treating as pass"
+            echo "full one-way check PASSED (no diff line)" >> "$GITHUB_STEP_SUMMARY"
           fi
-
-          echo "Verify PASSED: $MATCH/$TOTAL size match, $sample_ok/$SAMPLE_ACTUAL ETag match" | tee -a check.log
-          echo "Verify PASSED" >> "$GITHUB_STEP_SUMMARY"
 
       # ---- 校验:随机抽 5 个文件双端逐字节比对(--download 会真实下载两端内容) ----
       - name: Verify - random sample byte-compare

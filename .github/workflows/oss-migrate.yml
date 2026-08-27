@@ -275,12 +275,13 @@ jobs:
           # ls 输出格式: "        12345 path/to/file"
           # 提取 path+size 两列,按 path 排序后 join 比较
           # rclone ls 输出固定宽度 "%12d %s": path 从第14字符开始(含空格也安全)
-          rclone ls "$SRC" --files-only --no-check-certificate \
+          # rclone ls 不支持 --files-only, 它默认只输出文件(不含目录)
+          rclone ls "$SRC" --no-check-certificate \
             | awk '{printf "%s\t%s\n", substr($0, 14), $1}' \
             | sort -t$'\t' -k1,1 > /tmp/src_ps.tsv
           echo "src listed: $(wc -l < /tmp/src_ps.tsv) files"
 
-          rclone ls "$DST" --files-only --no-check-certificate \
+          rclone ls "$DST" --no-check-certificate \
             | awk '{printf "%s\t%s\n", substr($0, 14), $1}' \
             | sort -t$'\t' -k1,1 > /tmp/dst_ps.tsv
           echo "dst listed: $(wc -l < /tmp/dst_ps.tsv) files"

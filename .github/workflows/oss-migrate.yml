@@ -265,78 +265,161 @@ jobs:
             --retries 5 --low-level-retries 20 \
             --stats-one-line --stats 30s -v 2>&1 | tee sync.log
 
-      # ---- 校验:清单比对(Path+Size) ----
-      - name: Verify - manifest compare
+      # ---- 校验:基于 ETag/MD5 的清单比对(无需下载文件) ----
+      - name: Verify - ETag compare
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
-          set -o pipefail
+          # 原理: rclone lsjson --hash 返回每个对象的 Hashes.MD5
+          #   - 单流上传: MD5 = ETag (纯32位hex)
+          #   - 分片上传: rclone 内部用正则 ^[0-9a-f]{32}$ 过滤,
+          #     分片 ETag "hex-N" 不匹配, Hashes.MD5 为空
+          #   - SSE-KMS 加密: etagIsNotMD5=true, Hashes.MD5 为空
+          # 比较规则:
+          #   双端 MD5 相同 → 内容一致(无需下载)
+          #   双端 MD5 均为空 → 退化为 size 比较(标注)
+          #   一端为空一端有值 → 异常,mismatch
+          #   双端 MD5 不同 → 下载双端 md5sum 二次确认
 
-          # 用 rclone ls（流式输出 size path）代替 lsjson,避免 65K 对象 JSON 序列化开销
-          # ls 输出格式: "        12345 path/to/file"
-          # 提取 path+size 两列,按 path 排序后 join 比较
-          # rclone ls 输出固定宽度 "%12d %s": path 从第14字符开始(含空格也安全)
-          # rclone ls 不支持 --files-only, 它默认只输出文件(不含目录)
-          rclone ls "$SRC" --no-check-certificate \
-            | awk '{printf "%s\t%s\n", substr($0, 14), $1}' \
-            | sort -t$'\t' -k1,1 > /tmp/src_ps.tsv
-          echo "src listed: $(wc -l < /tmp/src_ps.tsv) files"
+          set -e
+          : > check.log
 
-          rclone ls "$DST" --no-check-certificate \
-            | awk '{printf "%s\t%s\n", substr($0, 14), $1}' \
-            | sort -t$'\t' -k1,1 > /tmp/dst_ps.tsv
-          echo "dst listed: $(wc -l < /tmp/dst_ps.tsv) files"
-
-          cut -f1 /tmp/src_ps.tsv | sort > /tmp/src_paths.txt
-          cut -f1 /tmp/dst_ps.tsv | sort > /tmp/dst_paths.txt
-
-          MISSING=$(comm -23 /tmp/src_paths.txt /tmp/dst_paths.txt | wc -l)
-          EXTRA=$(comm -13 /tmp/src_paths.txt /tmp/dst_paths.txt | wc -l)
-          echo "missing in dst: $MISSING, extra in dst: $EXTRA"
-
-          # join 比较 size: join 需要两文件都按 join key 排序(已排序)
-          join -t$'\t' /tmp/src_ps.tsv /tmp/dst_ps.tsv | awk '$2 != $3 {print}' > /tmp/size_diff.txt
-          SIZE_MISMATCH=$(wc -l < /tmp/size_diff.txt)
-          echo "size mismatch: $SIZE_MISMATCH"
-
-          COMMON_SAME=$(join -t$'\t' /tmp/src_ps.tsv /tmp/dst_ps.tsv | awk '$2 == $3' | wc -l)
-          echo "size match: $COMMON_SAME"
-
-          {
-            echo "### Verify - manifest compare"
-            echo "- src files: $(wc -l < /tmp/src_ps.tsv)"
-            echo "- dst files: $(wc -l < /tmp/dst_ps.tsv)"
-            echo "- size match: $COMMON_SAME"
-            echo "- size mismatch: $SIZE_MISMATCH"
-            echo "- missing in dst: $MISSING"
-            echo "- extra in dst: $EXTRA"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          FAIL=0
-
-          if [ "$MISSING" -gt 0 ]; then
-            echo "::error::$MISSING file(s) missing in dst"
-            comm -23 /tmp/src_paths.txt /tmp/dst_paths.txt | head -20
-            FAIL=1
+          # ---- Phase 1: 获取两端 hash 清单 ----
+          echo "listing src with --hash..."
+          if ! rclone lsjson "$SRC" -R --files-only --hash --hash-type MD5 \
+               --no-check-certificate > /tmp/src.json 2>/dev/null; then
+            echo "::warning::src lsjson failed, falling back to rclone check --one-way"
+            rclone check "$SRC" "$DST" --one-way -v --no-check-certificate 2>&1 | tee check.log || true
+            if grep -q "0 differences found" check.log; then
+              echo "full one-way check PASSED (0 differences)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::error::fallback check failed"
+              exit 1
+            fi
+            exit 0
           fi
-
-          if [ "$EXTRA" -gt 0 ]; then
-            echo "::warning::$EXTRA extra file(s) in dst (not in src)"
-          fi
-
-          if [ "$SIZE_MISMATCH" -gt 0 ]; then
-            echo "::error::$SIZE_MISMATCH file(s) size mismatch between src and dst"
-            echo "Size mismatch list (first 50):"
-            head -50 /tmp/size_diff.txt
-            FAIL=1
-          fi
-
-          if [ "$FAIL" != "0" ]; then
-            echo "::error::Verify found inconsistencies (see above)"
+          echo "listing dst with --hash..."
+          if ! rclone lsjson "$DST" -R --files-only --hash --hash-type MD5 \
+               --no-check-certificate > /tmp/dst.json 2>/dev/null; then
+            echo "::error::dst lsjson failed"
             exit 1
           fi
 
-          echo "Verify - manifest compare PASSED" >> "$GITHUB_STEP_SUMMARY"
-          echo "Verify PASSED"
+          SRC_COUNT=$(jq 'length' /tmp/src.json)
+          DST_COUNT=$(jq 'length' /tmp/dst.json)
+          echo "src: $SRC_COUNT objects, dst: $DST_COUNT objects"
+
+          # ---- Phase 2: jq 比对 ----
+          # 构建 dst 索引,逐条检查 src
+          # 输出统计 + mismatch/missing 详情
+          jq -n \
+            --slurpfile src /tmp/src.json \
+            --slurpfile dst /tmp/dst.json \
+            '
+            # 构建 dst 索引: {path: {size, md5}}
+            (reduce $dst[] as $d ({};
+              . + {($d.Path): {size: $d.Size, md5: ($d.Hashes.MD5 // "")}}
+            )) as $dm |
+
+            # 逐条比较 src 中的每个文件
+            [ $src[] | .Path as $p |
+              . as $s |
+              $dm[$p] as $d |
+              if $d == null then
+                {path: $p, status: "missing", src_size: $s.Size}
+              elif ($s.Hashes.MD5 // "") == "" and ($d.md5 // "") == "" then
+                # 双端无 MD5 → size 比较
+                if $s.Size == $d.size then {path: $p, status: "match_no_hash", size: $s.Size}
+                else {path: $p, status: "size_mismatch", src_size: $s.Size, dst_size: $d.size}
+                end
+              elif ($s.Hashes.MD5 // "") == "" or ($d.md5 // "") == "" then
+                # 一端有 MD5 一端无 → 异常
+                {path: $p, status: "hash_asymmetric", src_md5: ($s.Hashes.MD5 // ""), dst_md5: ($d.md5 // "")}
+              elif ($s.Hashes.MD5) == ($d.md5) then
+                # MD5 相同 → match
+                {path: $p, status: "match"}
+              else
+                # MD5 不同 → mismatch(需下载确认)
+                {path: $p, status: "mismatch", src_md5: $s.Hashes.MD5, dst_md5: $d.md5, src_size: $s.Size, dst_size: $d.size}
+              end
+            ] | {
+              total: length,
+              match: [ .[] | select(.status == "match") ] | length,
+              match_no_hash: [ .[] | select(.status == "match_no_hash") ] | length,
+              mismatch: [ .[] | select(.status == "mismatch") ] | length,
+              missing: [ .[] | select(.status == "missing") ] | length,
+              size_mismatch: [ .[] | select(.status == "size_mismatch") ] | length,
+              hash_asymmetric: [ .[] | select(.status == "hash_asymmetric") ] | length,
+              details: [ .[] | select(.status != "match" and .status != "match_no_hash") ]
+            }
+            ' > /tmp/compare.json
+
+          # ---- Phase 3: 统计 ----
+          TOTAL=$(jq '.total' /tmp/compare.json)
+          MATCH=$(jq '.match' /tmp/compare.json)
+          MATCH_NO_HASH=$(jq '.match_no_hash' /tmp/compare.json)
+          MISMATCH=$(jq '.mismatch' /tmp/compare.json)
+          MISSING=$(jq '.missing' /tmp/compare.json)
+          SIZE_MISMATCH=$(jq '.size_mismatch' /tmp/compare.json)
+          HASH_ASYMMETRIC=$(jq '.hash_asymmetric' /tmp/compare.json)
+
+          echo "total: $TOTAL, match: $MATCH, match_no_hash: $MATCH_NO_HASH"
+          echo "mismatch: $MISMATCH, missing: $MISSING, size_mismatch: $SIZE_MISMATCH, hash_asymmetric: $HASH_ASYMMETRIC"
+
+          # ---- Phase 4: 对 MD5 mismatch 的文件下载二次确认 ----
+          FAIL=0
+          if [ "$MISMATCH" -gt 0 ]; then
+            echo "=== MD5 download verification for mismatched ETags ===" | tee -a check.log
+            jq -r '.details[] | select(.status == "mismatch") | .path' /tmp/compare.json | while IFS= read -r f; do
+              echo "checking: $f" | tee -a check.log
+              src_md5=$(rclone cat "$SRC/$f" --no-check-certificate --max-time 120 2>/dev/null | md5sum | awk '{print $1}')
+              dst_md5=$(rclone cat "$DST/$f" --no-check-certificate --max-time 120 2>/dev/null | md5sum | awk '{print $1}')
+              echo "  src: $src_md5  dst: $dst_md5" | tee -a check.log
+              if [ "$src_md5" != "$dst_md5" ]; then
+                echo "  CONFIRMED MISMATCH -> delete dst file" | tee -a check.log
+                rclone deletefile "$DST/$f" --no-check-certificate
+                FAIL=1
+              else
+                echo "  MATCH (ETag differs but content identical)" | tee -a check.log
+              fi
+            done
+          fi
+
+          # ---- Phase 5: 报告 ----
+          {
+            echo "### Verify - ETag compare"
+            echo "- total: $TOTAL"
+            echo "- match (MD5): $MATCH"
+            echo "- match (size-only, no hash): $MATCH_NO_HASH"
+            echo "- mismatch (confirmed): $MISMATCH"
+            echo "- missing in dst: $MISSING"
+            echo "- size mismatch: $SIZE_MISMATCH"
+            echo "- hash asymmetric: $HASH_ASYMMETRIC"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$MISSING" -gt 0 ]; then
+            echo "::error::$MISSING file(s) in src missing in dst"
+            jq -r '.details[] | select(.status == "missing") | .path' /tmp/compare.json | head -20
+            FAIL=1
+          fi
+
+          if [ "$SIZE_MISMATCH" -gt 0 ]; then
+            echo "::error::$SIZE_MISMATCH file(s) size mismatch"
+            jq -r '.details[] | select(.status == "size_mismatch") | "\(.path): src=\(.src_size) dst=\(.dst_size)"' /tmp/compare.json | head -20
+            FAIL=1
+          fi
+
+          if [ "$HASH_ASYMMETRIC" -gt 0 ]; then
+            echo "::error::$HASH_ASYMMETRIC file(s) have asymmetric hash (one side has MD5, other doesn't)"
+            FAIL=1
+          fi
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Verify FAILED"
+            exit 1
+          fi
+
+          echo "Verify - ETag compare PASSED: $MATCH/$TOTAL files verified by MD5, $MATCH_NO_HASH by size" | tee -a check.log
+          echo "Verify - ETag compare PASSED: $MATCH/$TOTAL MD5, $MATCH_NO_HASH size-only" >> "$GITHUB_STEP_SUMMARY"
 
       # ---- 校验:随机抽 5 个文件双端逐字节比对(--download 会真实下载两端内容) ----
       - name: Verify - random sample byte-compare

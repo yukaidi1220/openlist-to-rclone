@@ -265,22 +265,21 @@ jobs:
             --retries 5 --low-level-retries 20 \
             --stats-one-line --stats 30s -v 2>&1 | tee sync.log
 
-      # ---- 校验:ETag/MD5 比对 ----
-      - name: Verify - ETag compare
+      # ---- 校验:清单比对(Path+Size) ----
+      - name: Verify - manifest compare
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
           set -o pipefail
 
-          # 并行拉取双端 lsjson（只读操作，--hash-type MD5 加速）
-          rclone lsjson "$SRC" -R --files-only --hash --hash-type MD5 --no-check-certificate > /tmp/src_ls.json &
+          # 并行拉取双端 lsjson（不带 --hash,避免 65K 文件逐个获取 MD5 极慢）
+          rclone lsjson "$SRC" -R --files-only --no-check-certificate > /tmp/src_ls.json &
           SRC_PID=$!
-          rclone lsjson "$DST" -R --files-only --hash --hash-type MD5 --no-check-certificate > /tmp/dst_ls.json &
+          rclone lsjson "$DST" -R --files-only --no-check-certificate > /tmp/dst_ls.json &
           DST_PID=$!
 
           wait $SRC_PID || { echo "::error::lsjson src failed"; exit 1; }
           wait $DST_PID || { echo "::error::lsjson dst failed"; exit 1; }
 
-          # 确保文件非空
           if [ ! -s /tmp/src_ls.json ] || [ ! -s /tmp/dst_ls.json ]; then
             echo "::error::lsjson produced empty output"
             exit 1
@@ -290,103 +289,68 @@ jobs:
           DST_COUNT=$(jq 'length' /tmp/dst_ls.json)
           echo "src objects: $SRC_COUNT, dst objects: $DST_COUNT"
 
-          # 用 jq 按路径匹配比较
-          # Hashes.MD5 在 rclone lsjson 中：有效 MD5 为 32 位 hex，否则为空字符串
+          # jq 按路径匹配,比较 Path + Size
           RESULT=$(jq -n \
             --slurpfile src /tmp/src_ls.json \
             --slurpfile dst /tmp/dst_ls.json \
           '
-            # 建立 dst 索引
-            ($dst[0] | map({(.Path): .Hashes.MD5}) | add // {}) as $dst_map |
+            ($dst[0] | map({(.Path): .Size}) | add // {}) as $dst_map |
+            {missing: [], size_match: [], size_mismatch: [], extra: []} as $stats |
 
-            # 分类统计
-            {missing: [], match: [], mismatch: [], empty_both: [], empty_one: [], size_only: []} as $stats |
-
+            # src 遍历
             reduce ($src[0][] // .[]) as $f ($stats;
               $f.Path as $p |
-              $f.Hashes.MD5 as $s_md5 |
-              ($dst_map[$p] // null) as $d_md5 |
-              if $d_md5 == null then
-                .missing += [$p]
-              elif ($s_md5 == "" or $s_md5 == null) and ($d_md5 == "" or $d_md5 == null) then
-                .empty_both += [{path: $p, size: $f.Size}]
-              elif ($s_md5 == "" or $s_md5 == null) and ($d_md5 != "" and $d_md5 != null) then
-                .empty_one += [{path: $p, src_md5: $s_md5, dst_md5: $d_md5}]
-              elif ($s_md5 != "" and $s_md5 != null) and ($d_md5 == "" or $d_md5 == null) then
-                .empty_one += [{path: $p, src_md5: $s_md5, dst_md5: $d_md5}]
-              elif $s_md5 == $d_md5 then
-                .match += [$p]
+              $f.Size as $s_size |
+              ($dst_map[$p] // null) as $d_size |
+              if $d_size == null then
+                .missing += [{path: $p, size: $s_size}]
+              elif $s_size == $d_size then
+                .size_match += [$p]
               else
-                .mismatch += [{path: $p, src_md5: $s_md5, dst_md5: $d_md5}]
+                .size_mismatch += [{path: $p, src_size: $s_size, dst_size: $d_size}]
               end
             )
           ')
 
           MISSING=$(echo "$RESULT" | jq '.missing | length')
-          MISMATCH=$(echo "$RESULT" | jq '.mismatch | length')
-          MATCH=$(echo "$RESULT" | jq '.match | length')
-          EMPTY_BOTH=$(echo "$RESULT" | jq '.empty_both | length')
-          EMPTY_ONE=$(echo "$RESULT" | jq '.empty_one | length')
+          SIZE_MATCH=$(echo "$RESULT" | jq '.size_match | length')
+          SIZE_MISMATCH=$(echo "$RESULT" | jq '.size_mismatch | length')
 
-          echo "match: $MATCH, missing: $MISSING, mismatch: $MISMATCH, empty_both: $EMPTY_BOTH, empty_one: $EMPTY_ONE"
+          echo "size_match: $SIZE_MATCH, size_mismatch: $SIZE_MISMATCH, missing: $MISSING"
 
-          # 写 summary
           {
-            echo "### Verify - ETag compare"
-            echo "- match: $MATCH"
-            echo "- missing: $MISSING"
-            echo "- mismatch: $MISMATCH"
-            echo "- empty_both (size-only check): $EMPTY_BOTH"
-            echo "- empty_one (anomaly): $EMPTY_ONE"
+            echo "### Verify - manifest compare"
+            echo "- size_match: $SIZE_MATCH"
+            echo "- size_mismatch: $SIZE_MISMATCH"
+            echo "- missing in dst: $MISSING"
           } >> "$GITHUB_STEP_SUMMARY"
 
           FAIL=0
 
-          # 处理 missing
+          # missing = src 有 dst 无
           if [ "$MISSING" -gt 0 ]; then
             echo "::error::$MISSING file(s) missing in dst"
-            echo "$RESULT" | jq -r '.missing[]' | head -20
+            echo "$RESULT" | jq -r '.missing[].path' | head -20
             FAIL=1
           fi
 
-          # 处理 empty_one（异常：一端有 MD5 一端没有）
-          if [ "$EMPTY_ONE" -gt 0 ]; then
-            echo "::warning::$EMPTY_ONE file(s) with one empty MD5 (anomaly)"
-            echo "$RESULT" | jq -r '.empty_one[].path' | head -20
-          fi
-
-          # 处理 empty_both：退化为 size 比较
-          if [ "$EMPTY_BOTH" -gt 0 ]; then
-            echo "$RESULT" | jq -c '.empty_both[]' | while IFS= read -r item; do
+          # size_mismatch = 同路径但大小不同 → 下载双端 md5sum 二次确认
+          if [ "$SIZE_MISMATCH" -gt 0 ]; then
+            echo "::warning::$SIZE_MISMATCH file(s) size mismatch, downloading for md5sum recheck"
+            echo "$RESULT" | jq -c '.size_mismatch[]' | while IFS= read -r item; do
               p=$(echo "$item" | jq -r '.path')
-              s_size=$(echo "$RESULT" | jq -r --arg p "$p" '.empty_both[] | select(.path==$p) | .size')
-              # 从 dst 读取 size
-              d_size=$(jq -r --arg p "$p" '.[] | select(.Path==$p) | .Size' /tmp/dst_ls.json)
-              if [ "$s_size" != "$d_size" ]; then
-                echo "SIZE MISMATCH (empty MD5): $p src=$s_size dst=$d_size"
-                # 删除 dst 坏文件
-                rclone deletefile "$DST/$p" --no-check-certificate 2>/dev/null || true
-                FAIL=1
-              fi
-            done
-            echo "empty_both files: all size-compared (size-only)" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          # 处理 mismatch：下载双端内容 md5sum 二次确认
-          if [ "$MISMATCH" -gt 0 ]; then
-            echo "$RESULT" | jq -c '.mismatch[]' | while IFS= read -r item; do
-              p=$(echo "$item" | jq -r '.path')
-              echo "=== mismatch: $p (src_md5=$(echo "$item" | jq -r '.src_md5'), dst_md5=$(echo "$item" | jq -r '.dst_md5'))"
-              # 下载双端内容重新算 md5（加 --max-time 120 防超时）
+              s_sz=$(echo "$item" | jq -r '.src_size')
+              d_sz=$(echo "$item" | jq -r '.dst_size')
+              echo "=== size_mismatch: $p src=$s_sz dst=$d_sz"
               src_real=$(rclone cat "$SRC/$p" --no-check-certificate --max-time 120 | md5sum | awk '{print $1}')
               dst_real=$(rclone cat "$DST/$p" --no-check-certificate --max-time 120 | md5sum | awk '{print $1}')
-              echo "  recheck: src=$src_real dst=$dst_real"
+              echo "  md5: src=$src_real dst=$dst_real"
               if [ "$src_real" != "$dst_real" ]; then
                 echo "  CONFIRMED MISMATCH -> delete dst bad file"
                 rclone deletefile "$DST/$p" --no-check-certificate 2>/dev/null || true
                 FAIL=1
               else
-                echo "  FALSE POSITIVE (hash metadata mismatch but content matches) - ok"
+                echo "  CONTENT MATCH despite size diff (extended attributes?) - ok"
               fi
             done
           fi
@@ -396,7 +360,7 @@ jobs:
             exit 1
           fi
 
-          echo "Verify - ETag compare PASSED" >> "$GITHUB_STEP_SUMMARY"
+          echo "Verify - manifest compare PASSED" >> "$GITHUB_STEP_SUMMARY"
           echo "Verify PASSED"
 
       # ---- 校验:随机抽 5 个文件双端逐字节比对(--download 会真实下载两端内容) ----

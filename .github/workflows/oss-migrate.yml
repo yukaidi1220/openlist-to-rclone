@@ -271,20 +271,20 @@ jobs:
         run: |
           set -o pipefail
 
-          # 顺序拉取双端 lsjson（不带 --hash）,逐条提取 Path+Size 输出 TSV
-          # 避免后台并行 + 大 JSON slurp 导致 OOM
-          rclone lsjson "$SRC" -R --files-only --no-check-certificate \
-            | jq -r 'select(.Path != null) | "\(.Path)\t\(.Size)"' \
-            | sort > /tmp/src_ps.tsv
+          # 用 rclone ls（流式输出 size path）代替 lsjson,避免 65K 对象 JSON 序列化开销
+          # ls 输出格式: "        12345 path/to/file"
+          # 提取 path+size 两列,按 path 排序后 join 比较
+          # rclone ls 输出固定宽度 "%12d %s": path 从第14字符开始(含空格也安全)
+          rclone ls "$SRC" --files-only --no-check-certificate \
+            | awk '{printf "%s\t%s\n", substr($0, 14), $1}' \
+            | sort -t$'\t' -k1,1 > /tmp/src_ps.tsv
           echo "src listed: $(wc -l < /tmp/src_ps.tsv) files"
 
-          rclone lsjson "$DST" -R --files-only --no-check-certificate \
-            | jq -r 'select(.Path != null) | "\(.Path)\t\(.Size)"' \
-            | sort > /tmp/dst_ps.tsv
+          rclone ls "$DST" --files-only --no-check-certificate \
+            | awk '{printf "%s\t%s\n", substr($0, 14), $1}' \
+            | sort -t$'\t' -k1,1 > /tmp/dst_ps.tsv
           echo "dst listed: $(wc -l < /tmp/dst_ps.tsv) files"
 
-          # 提取 src 独有 / dst 独有 / 共有但 size 不同 的路径
-          # 用 join 做集合运算,避免 jq 大数组
           cut -f1 /tmp/src_ps.tsv | sort > /tmp/src_paths.txt
           cut -f1 /tmp/dst_ps.tsv | sort > /tmp/dst_paths.txt
 
@@ -292,13 +292,12 @@ jobs:
           EXTRA=$(comm -13 /tmp/src_paths.txt /tmp/dst_paths.txt | wc -l)
           echo "missing in dst: $MISSING, extra in dst: $EXTRA"
 
-          # 找 size 不同的文件
-          join /tmp/src_ps.tsv /tmp/dst_ps.tsv | awk '$2 != $3 {print}' > /tmp/size_diff.txt
+          # join 比较 size: join 需要两文件都按 join key 排序(已排序)
+          join -t$'\t' /tmp/src_ps.tsv /tmp/dst_ps.tsv | awk '$2 != $3 {print}' > /tmp/size_diff.txt
           SIZE_MISMATCH=$(wc -l < /tmp/size_diff.txt)
           echo "size mismatch: $SIZE_MISMATCH"
 
-          # 共有且 size 相同
-          COMMON_SAME=$(join /tmp/src_ps.tsv /tmp/dst_ps.tsv | awk '$2 == $3' | wc -l)
+          COMMON_SAME=$(join -t$'\t' /tmp/src_ps.tsv /tmp/dst_ps.tsv | awk '$2 == $3' | wc -l)
           echo "size match: $COMMON_SAME"
 
           {
@@ -323,10 +322,9 @@ jobs:
             echo "::warning::$EXTRA extra file(s) in dst (not in src)"
           fi
 
-          # size_mismatch: 下载双端 md5sum 二次确认
           if [ "$SIZE_MISMATCH" -gt 0 ]; then
             echo "::warning::$SIZE_MISMATCH file(s) size mismatch, downloading for md5sum recheck"
-            while IFS=' ' read -r p s_sz d_sz; do
+            while IFS=$'\t' read -r p s_sz d_sz; do
               echo "=== size_mismatch: $p src=$s_sz dst=$d_sz"
               src_real=$(rclone cat "$SRC/$p" --no-check-certificate --max-time 120 | md5sum | awk '{print $1}')
               dst_real=$(rclone cat "$DST/$p" --no-check-certificate --max-time 120 | md5sum | awk '{print $1}')
@@ -336,7 +334,7 @@ jobs:
                 rclone deletefile "$DST/$p" --no-check-certificate 2>/dev/null || true
                 FAIL=1
               else
-                echo "  CONTENT MATCH despite size diff (extended attrs?) - ok"
+                echo "  CONTENT MATCH despite size diff - ok"
               fi
             done < /tmp/size_diff.txt
           fi

@@ -324,20 +324,10 @@ jobs:
           fi
 
           if [ "$SIZE_MISMATCH" -gt 0 ]; then
-            echo "::warning::$SIZE_MISMATCH file(s) size mismatch, downloading for md5sum recheck"
-            while IFS=$'\t' read -r p s_sz d_sz; do
-              echo "=== size_mismatch: $p src=$s_sz dst=$d_sz"
-              src_real=$(rclone cat "$SRC/$p" --no-check-certificate --max-time 120 | md5sum | awk '{print $1}')
-              dst_real=$(rclone cat "$DST/$p" --no-check-certificate --max-time 120 | md5sum | awk '{print $1}')
-              echo "  md5: src=$src_real dst=$dst_real"
-              if [ "$src_real" != "$dst_real" ]; then
-                echo "  CONFIRMED MISMATCH -> delete dst bad file"
-                rclone deletefile "$DST/$p" --no-check-certificate 2>/dev/null || true
-                FAIL=1
-              else
-                echo "  CONTENT MATCH despite size diff - ok"
-              fi
-            done < /tmp/size_diff.txt
+            echo "::error::$SIZE_MISMATCH file(s) size mismatch between src and dst"
+            echo "Size mismatch list (first 50):"
+            head -50 /tmp/size_diff.txt
+            FAIL=1
           fi
 
           if [ "$FAIL" != "0" ]; then

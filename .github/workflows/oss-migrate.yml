@@ -347,8 +347,11 @@ jobs:
       # MD5 可得性(2026-08-28 实测):
       #   SRC 桶为分片上传,ETag="md5-N",SRC 侧 MD5 不可得(故 full check 无意义已禁用)。
       #   DST 桶由本流程单流上传,ETag = 文件真实 MD5(直接可信)。
-      #   因此:只下载源桶文件算真实 MD5,与目标桶 lsjson 的 Hashes.MD5(即 ETag)比对,
-      #   无需再下载目标桶,省一半流量。这是当前唯一可行的内容级验证。
+      #   因此:下载源桶文件算真实 MD5,与目标桶该文件的 ETag(=MD5)比对,无需下载目标桶。
+      # 注意:绝不能用 "lsjson 全桶 -R" —— lsjson 默认输出 ModTime,对每个对象触发
+      # head(走 CDN),692 个大文件会卡死(2026-08-28 实测)。改用:
+      #   - 全桶列举用 rclone ls(递归,只取 size+path,0 head)确认存在
+      #   - 单个抽样文件才用 lsjson <path> --hash(只 head 该文件 1 次)取 ETag
       - name: Verify - random sample (src download vs dst ETag)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
@@ -368,25 +371,16 @@ jobs:
             exit 0
           fi
 
-          echo "[2/4] 诊断:分别测试 dst lsjson 的 flag 组合..."
-          echo "  (a) lsjson 无 flag : $(rclone lsjson "$DST" --no-check-certificate 2>/tmp/a.log | jq 'length' 2>/dev/null || echo ERR)"
-          echo "  (b) lsjson --files-only : $(rclone lsjson "$DST" --files-only --no-check-certificate 2>/tmp/b.log | jq 'length' 2>/dev/null || echo ERR)"
-          echo "  (c) lsjson --files-only --hash : $(rclone lsjson "$DST" --files-only --hash --no-check-certificate 2>/tmp/c.log | jq 'length' 2>/dev/null || echo ERR)"
-          echo "  (d) lsjson --hash(不 files-only) : $(rclone lsjson "$DST" --hash --no-check-certificate 2>/tmp/d.log | jq 'length' 2>/dev/null || echo ERR)"
-          echo "  (e) lsjson -R (递归) : $(rclone lsjson "$DST" -R --no-check-certificate 2>/tmp/e.log | jq 'length' 2>/dev/null || echo ERR)"
-          echo "  stderr a(前2行):"; head -2 /tmp/a.log 2>/dev/null | sed 's/^/    /'
-          echo "  stderr b(前2行):"; head -2 /tmp/b.log 2>/dev/null | sed 's/^/    /'
-          echo "  stderr c(前2行):"; head -2 /tmp/c.log 2>/dev/null | sed 's/^/    /'
-          echo "  stderr e(前2行):"; head -2 /tmp/e.log 2>/dev/null | sed 's/^/    /'
-
-          # 正式用 (c) 生成索引,若为空则退化到 (b) 仅 size 索引
-          rclone lsjson "$DST" --files-only --hash --no-check-certificate > /tmp/dst_index.json 2>/dev/null
-          DST_IDX=$(jq 'length' /tmp/dst_index.json 2>/dev/null || echo 0)
-          if [ "$DST_IDX" = "0" ]; then
-            echo "  [退化] --hash 索引为空,改用仅 --files-only 的 size 索引"
-            rclone lsjson "$DST" --files-only --no-check-certificate > /tmp/dst_index.json 2>/dev/null
+          echo "[2/4] 列举目标桶文件清单(ls, 0 head, 仅确认存在)..."
+          # 目标桶用 rclone ls(递归, 0 head),不用 lsjson(会 ModTime head 卡死)。
+          # 用于确认抽样的文件在目标桶存在。
+          rclone ls "$DST" --fast-list --no-check-certificate 2>/tmp/dst_ls_err.log > /tmp/dst_files.txt
+          DST_TOTAL=$(wc -l < /tmp/dst_files.txt)
+          echo "  目标桶文件数: $DST_TOTAL"
+          if [ -s /tmp/dst_ls_err.log ]; then
+            echo "  [警告] dst ls 有告警(截取前3行):"
+            head -3 /tmp/dst_ls_err.log | sed 's/^/    /'
           fi
-          echo "  dst 索引: $(jq 'length' /tmp/dst_index.json 2>/dev/null || echo 0) 个条目"
 
           echo "[3/4] 随机抽取 5 个文件并比对..."
           # 抽 5 行 "  size path"
@@ -403,10 +397,17 @@ jobs:
             echo "  ---- 样本 $idx/5: $fpath ($fsize bytes) ----"
             echo "== sample $idx: $fpath ($fsize bytes)" | tee -a sample.log
 
-            # 从目标桶索引取 ETag(真实 MD5)。jq 用 --arg 传路径避免特殊字符问题。
-            dst_md5=$(jq -r --arg p "$fpath" '.[] | select(.Path == $p) | .Hashes.MD5 // ""' /tmp/dst_index.json)
+            # 确认目标桶存在该文件(用 ls 清单,按路径查找)
+            if ! grep -Fqx "$fpath" <(sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//' /tmp/dst_files.txt); then
+              echo "   [错误] 目标桶中不存在该文件" | tee -a sample.log
+              fail=1
+              continue
+            fi
+
+            # 取目标桶该文件 ETag(=真实MD5)。单文件 lsjson,只 head 1 次。
+            dst_md5=$(rclone lsjson "$DST/$fpath" --hash --no-check-certificate 2>/dev/null | jq -r '.[0].Hashes.MD5 // ""')
             if [ -z "$dst_md5" ]; then
-              echo "   [错误] 目标桶索引中找不到该文件 或 无 MD5(未单流上传?)" | tee -a sample.log
+              echo "   [错误] 目标桶取不到 ETag(MD5)" | tee -a sample.log
               fail=1
               continue
             fi

@@ -405,22 +405,17 @@ jobs:
             fi
 
             # 取目标桶该文件 ETag(=真实MD5)。单文件 lsjson,只 head 1 次。
+            # 注意:lsjson 输出的 hash key 是小写 "md5"(hash.Type.String()),不是大写 "MD5"。
             dst_json=$(rclone lsjson "$DST/$fpath" --hash --no-check-certificate 2>/tmp/dst_lsjson_single.log)
-            dst_rc=$?
-            echo "   [debug] 单文件 lsjson 退出码: $dst_rc"
-            if [ -s /tmp/dst_lsjson_single.log ]; then
-              echo "   [debug] stderr(前3行):"
-              head -3 /tmp/dst_lsjson_single.log | sed 's/^/      /'
-            fi
-            if [ -n "$dst_json" ]; then
-              echo "   [debug] 完整返回(格式化):"
-              echo "$dst_json" | jq . 2>/dev/null | sed 's/^/      /'
-            else
-              echo "   [debug] 返回: (空)"
-            fi
-            dst_md5=$(echo "$dst_json" | jq -r '.[0].Hashes.MD5 // ""' 2>/dev/null)
+            dst_md5=$(echo "$dst_json" | jq -r '.[0].Hashes.md5 // ""' 2>/dev/null)
             if [ -z "$dst_md5" ]; then
-              echo "   [错误] 目标桶取不到 ETag(MD5)" | tee -a sample.log
+              # OSS 单次 PutObject 上限 5GB,>5GB 必然 multipart 上传,ETag 非真实 MD5,
+              # 单文件 lsjson --hash 也取不到 MD5 —— 这是物理限制,跳过不算失败。
+              if [ "$fsize" -gt 5368709120 ]; then
+                echo "   [跳过] 文件 >5GB(OSS multipart 必然),取不到 ETag(MD5),跳过" | tee -a sample.log
+                continue
+              fi
+              echo "   [错误] 目标桶取不到 ETag(MD5);返回内容: $(echo "$dst_json" | head -c 300)" | tee -a sample.log
               fail=1
               continue
             fi
@@ -451,7 +446,7 @@ jobs:
             echo "::error::random sample FAILED (详见 sample.log)"
             exit 1
           fi
-          echo "random sample PASSED ($idx files: src MD5 == dst ETag)" | tee -a sample.log
+          echo "random sample PASSED ($idx files verified, src MD5 == dst ETag)" | tee -a sample.log
           echo "random sample PASSED ($idx files)" >> "$GITHUB_STEP_SUMMARY"
 
       # ---- 清理目标桶孤儿分片(copy 被强杀后的残留) ----

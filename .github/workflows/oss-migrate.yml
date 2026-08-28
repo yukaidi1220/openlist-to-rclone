@@ -405,7 +405,19 @@ jobs:
             fi
 
             # 取目标桶该文件 ETag(=真实MD5)。单文件 lsjson,只 head 1 次。
-            dst_md5=$(rclone lsjson "$DST/$fpath" --hash --no-check-certificate 2>/dev/null | jq -r '.[0].Hashes.MD5 // ""')
+            dst_json=$(rclone lsjson "$DST/$fpath" --hash --no-check-certificate 2>/tmp/dst_lsjson_single.log)
+            dst_rc=$?
+            echo "   [debug] 单文件 lsjson 退出码: $dst_rc"
+            if [ -s /tmp/dst_lsjson_single.log ]; then
+              echo "   [debug] stderr(前3行):"
+              head -3 /tmp/dst_lsjson_single.log | sed 's/^/      /'
+            fi
+            if [ -n "$dst_json" ]; then
+              echo "   [debug] 返回: $(echo "$dst_json" | head -c 200)"
+            else
+              echo "   [debug] 返回: (空)"
+            fi
+            dst_md5=$(echo "$dst_json" | jq -r '.[0].Hashes.MD5 // ""' 2>/dev/null)
             if [ -z "$dst_md5" ]; then
               echo "   [错误] 目标桶取不到 ETag(MD5)" | tee -a sample.log
               fail=1

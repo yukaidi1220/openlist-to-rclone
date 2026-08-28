@@ -375,6 +375,12 @@ jobs:
             echo "  [警告] dst lsjson 有告警(截取前3行):"
             head -3 /tmp/dst_lsjson_err.log | sed 's/^/    /'
           fi
+          DST_IDX_TOTAL=$(jq 'length' /tmp/dst_index.json 2>/dev/null || echo "ERR")
+          echo "  dst 索引文件数: $DST_IDX_TOTAL"
+          echo "  dst 索引前3个条目(路径 + 是否有 MD5):"
+          jq -r '.[0:3][] | .Path + "  md5=" + (.Hashes.MD5 // "<none>")' /tmp/dst_index.json 2>/dev/null | sed 's/^/    /'
+          echo "  源桶前3个文件(对照):"
+          head -3 /tmp/src_files.txt | sed 's/^/    /'
 
           echo "[3/4] 随机抽取 5 个文件并比对..."
           # 抽 5 行 "  size path"

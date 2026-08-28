@@ -368,19 +368,25 @@ jobs:
             exit 0
           fi
 
-          echo "[2/4] 列举目标桶 ETag 索引(lsjson --hash)..."
-          # 诊断:不重定向 stderr,直接看到 lsjson 是否报错。--fast-list 可能导致空输出,先不用。
-          rclone lsjson "$DST" --files-only --hash --no-check-certificate > /tmp/dst_index.json 2>/tmp/dst_lsjson_err.log
-          echo "  lsjson 退出码: $?"
-          echo "  dst 索引文件数: $(jq 'length' /tmp/dst_index.json 2>/dev/null || echo 'ERR')"
-          if [ -s /tmp/dst_lsjson_err.log ]; then
-            echo "  [stderr 输出]"
-            head -5 /tmp/dst_lsjson_err.log | sed 's/^/    /'
+          echo "[2/4] 诊断:分别测试 dst lsjson 的 flag 组合..."
+          echo "  (a) lsjson 无 flag : $(rclone lsjson "$DST" --no-check-certificate 2>/tmp/a.log | jq 'length' 2>/dev/null || echo ERR)"
+          echo "  (b) lsjson --files-only : $(rclone lsjson "$DST" --files-only --no-check-certificate 2>/tmp/b.log | jq 'length' 2>/dev/null || echo ERR)"
+          echo "  (c) lsjson --files-only --hash : $(rclone lsjson "$DST" --files-only --hash --no-check-certificate 2>/tmp/c.log | jq 'length' 2>/dev/null || echo ERR)"
+          echo "  (d) lsjson --hash(不 files-only) : $(rclone lsjson "$DST" --hash --no-check-certificate 2>/tmp/d.log | jq 'length' 2>/dev/null || echo ERR)"
+          echo "  (e) lsjson -R (递归) : $(rclone lsjson "$DST" -R --no-check-certificate 2>/tmp/e.log | jq 'length' 2>/dev/null || echo ERR)"
+          echo "  stderr a(前2行):"; head -2 /tmp/a.log 2>/dev/null | sed 's/^/    /'
+          echo "  stderr b(前2行):"; head -2 /tmp/b.log 2>/dev/null | sed 's/^/    /'
+          echo "  stderr c(前2行):"; head -2 /tmp/c.log 2>/dev/null | sed 's/^/    /'
+          echo "  stderr e(前2行):"; head -2 /tmp/e.log 2>/dev/null | sed 's/^/    /'
+
+          # 正式用 (c) 生成索引,若为空则退化到 (b) 仅 size 索引
+          rclone lsjson "$DST" --files-only --hash --no-check-certificate > /tmp/dst_index.json 2>/dev/null
+          DST_IDX=$(jq 'length' /tmp/dst_index.json 2>/dev/null || echo 0)
+          if [ "$DST_IDX" = "0" ]; then
+            echo "  [退化] --hash 索引为空,改用仅 --files-only 的 size 索引"
+            rclone lsjson "$DST" --files-only --no-check-certificate > /tmp/dst_index.json 2>/dev/null
           fi
-          echo "  dst 索引前2个条目(路径 + MD5):"
-          jq -r '.[0:2][] | .Path + "  md5=" + (.Hashes.MD5 // "<none>")' /tmp/dst_index.json 2>/dev/null | sed 's/^/    /'
-          echo "  源桶前2个文件(对照):"
-          head -2 /tmp/src_files.txt | sed 's/^/    /'
+          echo "  dst 索引: $(jq 'length' /tmp/dst_index.json 2>/dev/null || echo 0) 个条目"
 
           echo "[3/4] 随机抽取 5 个文件并比对..."
           # 抽 5 行 "  size path"

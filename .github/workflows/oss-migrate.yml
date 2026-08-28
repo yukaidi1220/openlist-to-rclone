@@ -281,38 +281,82 @@ jobs:
             echo "full one-way check PASSED (no diff line)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # ---- 校验:随机抽 5 个文件双端逐字节比对(--download 会真实下载两端内容) ----
+      # ---- 校验:随机抽 5 文件双端逐字节比对(详细日志版,无大小限制) ----
       - name: Verify - random sample byte-compare
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
-          rclone lsjson "$SRC" -R --files-only > files.json
-          total=$(jq 'length' files.json)
-          echo "total files: $total"
-          mapfile -t picks < <(jq -r '.[].Path' files.json | shuf -n 5)
           : > sample.log
+          echo "[1/4] 列举源桶文件清单(流式,不逐个 HEAD)..."
+          # 用 rclone ls 流式输出(size path),避免 lsjson 对每个对象做 head 探测
+          # (65K 对象会慢到几小时且无输出)。--fast-list 用 ListObjectsV2 分页。
+          # 用 sed 剥离行首 size 列(与 preflight probe 同一套正则),不做偏移假设。
+          rclone ls "$SRC" --files-only --fast-list \
+            --no-check-certificate 2>/tmp/ls_err.log \
+            > /tmp/src_files.txt
+          TOTAL=$(wc -l < /tmp/src_files.txt)
+          echo "  文件总数: $TOTAL"
+          if [ -s /tmp/ls_err.log ]; then
+            echo "  [警告] ls 有告警输出(截取前3行):"
+            head -3 /tmp/ls_err.log | sed 's/^/    /'
+          fi
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "::warning::源桶没有文件,抽样比对跳过"
+            echo "random sample byte-compare SKIPPED (empty source)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "[2/4] 随机抽取 5 个文件..."
+          # src_files.txt 每行 = "  size path",抽取5行(含路径中的空格也安全,因为按行抽)
+          shuf -n 5 /tmp/src_files.txt > /tmp/picks.txt
+          cat -n /tmp/picks.txt | sed -E 's/^[[:space:]]*([0-9]+)[[:space:]]+/    样本 \1: /'
+
+          echo "[3/4] 逐个双端下载比对 MD5(单文件 900s 硬超时,避免卡死)..."
           fail=0
-          for p in "${picks[@]}"; do
-            size=$(jq -r --arg p "$p" '.[] | select(.Path==$p) | .Size' files.json)
-            echo "== sample: $p ($size bytes)" | tee -a sample.log
-            # 单文件比对:分别下载两端内容,逐字节比较哈希
-            src_md5=$(rclone cat "$SRC/$p" | md5sum | awk '{print $1}')
-            dst_md5=$(rclone cat "$DST/$p" | md5sum | awk '{print $1}')
-            echo "   src md5: $src_md5" | tee -a sample.log
-            echo "   dst md5: $dst_md5" | tee -a sample.log
-            if [ "$src_md5" != "$dst_md5" ]; then
-              echo "   MISMATCH -> 删除目标桶坏文件以便重传" | tee -a sample.log
-              rclone deletefile "$DST/$p"
+          idx=0
+          while IFS= read -r line; do
+            idx=$((idx+1))
+            [ -z "$line" ] && continue
+            # 从 "  size path" 提取 size 和 path(用 sed 剥离行首数字列)
+            fsize=$(printf '%s' "$line" | awk '{print $1}')
+            fpath=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')
+            echo "  ---- 样本 $idx/5: $fpath ($fsize bytes) ----"
+            echo "== sample $idx: $fpath ($fsize bytes)" | tee -a sample.log
+            if ! timeout 900 rclone cat "$SRC/$fpath" --no-check-certificate 2>/tmp/src_cat.log | md5sum | awk '{print $1}' > /tmp/src_md5.txt; then
+              echo "   [错误] src 下载失败: $(head -1 /tmp/src_cat.log)"
+              echo "   ERROR src download failed" >> sample.log
               fail=1
-            else
-              echo "   MATCH" | tee -a sample.log
+              continue
             fi
-          done
+            src_md5=$(cat /tmp/src_md5.txt)
+            echo "   src md5: $src_md5 (下载完成)"
+            if ! timeout 900 rclone cat "$DST/$fpath" --no-check-certificate 2>/tmp/dst_cat.log | md5sum | awk '{print $1}' > /tmp/dst_md5.txt; then
+              echo "   [错误] dst 下载失败: $(head -1 /tmp/dst_cat.log)"
+              echo "   ERROR dst download failed" >> sample.log
+              fail=1
+              continue
+            fi
+            dst_md5=$(cat /tmp/dst_md5.txt)
+            echo "   dst md5: $dst_md5 (下载完成)"
+            if [ "$src_md5" = "$dst_md5" ]; then
+              echo "   MATCH (内容一致)"
+              echo "   MATCH" >> sample.log
+            else
+              echo "   MISMATCH -> 删除目标桶坏文件以便重传"
+              echo "   MISMATCH" >> sample.log
+              rclone deletefile "$DST/$fpath" --no-check-certificate
+              fail=1
+            fi
+          done < /tmp/picks.txt
+
+          echo "[4/4] 汇总..."
           if [ "$fail" != "0" ]; then
-            echo "::warning::抽样发现内容不一致的目标文件已被删除,重跑 copy 模式即可自动重传(源桶未做任何改动)"
+            echo "::warning::抽样发现不一致或下载失败,详情见 sample.log;重跑 copy 模式即可自动重传"
             echo "REPAIRED=1" >> "$GITHUB_ENV"
+            echo "::error::random sample byte-compare FAILED (详见 sample.log)"
             exit 1
           fi
-          echo "random sample byte-compare PASSED (5 files)" >> "$GITHUB_STEP_SUMMARY"
+          echo "random sample byte-compare PASSED ($idx files)" | tee -a sample.log
+          echo "random sample byte-compare PASSED ($idx files)" >> "$GITHUB_STEP_SUMMARY"
 
       # ---- 清理目标桶孤儿分片(copy 被强杀后的残留) ----
       - name: Cleanup aborted multipart uploads

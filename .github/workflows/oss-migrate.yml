@@ -368,19 +368,19 @@ jobs:
             exit 0
           fi
 
-          echo "[2/4] 列举目标桶 ETag 索引(lsjson --hash, 0 head 因 ETag=真实MD5)..."
-          rclone lsjson "$DST" --files-only --hash --fast-list \
-            --no-check-certificate 2>/tmp/dst_lsjson_err.log > /tmp/dst_index.json
+          echo "[2/4] 列举目标桶 ETag 索引(lsjson --hash)..."
+          # 诊断:不重定向 stderr,直接看到 lsjson 是否报错。--fast-list 可能导致空输出,先不用。
+          rclone lsjson "$DST" --files-only --hash --no-check-certificate > /tmp/dst_index.json 2>/tmp/dst_lsjson_err.log
+          echo "  lsjson 退出码: $?"
+          echo "  dst 索引文件数: $(jq 'length' /tmp/dst_index.json 2>/dev/null || echo 'ERR')"
           if [ -s /tmp/dst_lsjson_err.log ]; then
-            echo "  [警告] dst lsjson 有告警(截取前3行):"
-            head -3 /tmp/dst_lsjson_err.log | sed 's/^/    /'
+            echo "  [stderr 输出]"
+            head -5 /tmp/dst_lsjson_err.log | sed 's/^/    /'
           fi
-          DST_IDX_TOTAL=$(jq 'length' /tmp/dst_index.json 2>/dev/null || echo "ERR")
-          echo "  dst 索引文件数: $DST_IDX_TOTAL"
-          echo "  dst 索引前3个条目(路径 + 是否有 MD5):"
-          jq -r '.[0:3][] | .Path + "  md5=" + (.Hashes.MD5 // "<none>")' /tmp/dst_index.json 2>/dev/null | sed 's/^/    /'
-          echo "  源桶前3个文件(对照):"
-          head -3 /tmp/src_files.txt | sed 's/^/    /'
+          echo "  dst 索引前2个条目(路径 + MD5):"
+          jq -r '.[0:2][] | .Path + "  md5=" + (.Hashes.MD5 // "<none>")' /tmp/dst_index.json 2>/dev/null | sed 's/^/    /'
+          echo "  源桶前2个文件(对照):"
+          head -2 /tmp/src_files.txt | sed 's/^/    /'
 
           echo "[3/4] 随机抽取 5 个文件并比对..."
           # 抽 5 行 "  size path"

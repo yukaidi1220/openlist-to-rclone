@@ -278,7 +278,70 @@ jobs:
         if: ${{ false }}
         run: |
           : > check.log
-          echo "[已禁用] full one-way check 因 SRC MD5 不可得而无效,见上方注释"
+          echo "[1/3] 列举源桶(ls, 0 head)..."
+          # 源桶只列 size+path(分片 ETag 无意义)。rclone ls 只列文件,无 --files-only flag。
+          rclone ls "$SRC" --fast-list --no-check-certificate 2>/tmp/src_ls_err.log > /tmp/src_list.txt
+          SRC_TOTAL=$(wc -l < /tmp/src_list.txt)
+          echo "  源桶文件数: $SRC_TOTAL"
+          if [ -s /tmp/src_ls_err.log ]; then
+            echo "  [警告] src ls 有告警:"; head -3 /tmp/src_ls_err.log | sed 's/^/    /'
+          fi
+
+          echo "[2/3] 列举目标桶(lsjson --hash, 0 head 因 ETag=真实MD5)..."
+          # 目标桶 lsjson --hash:ETag 即真实 MD5,列举时 setMD5FromEtag 直接赋值,不触发 head。
+          rclone lsjson "$DST" --files-only --hash --fast-list \
+            --no-check-certificate 2>/tmp/dst_lsjson_err.log > /tmp/dst_list.json
+          DST_TOTAL=$(jq 'length' /tmp/dst_list.json)
+          echo "  目标桶文件数: $DST_TOTAL"
+          if [ -s /tmp/dst_lsjson_err.log ]; then
+            echo "  [警告] dst lsjson 有告警:"; head -3 /tmp/dst_lsjson_err.log | sed 's/^/    /'
+          fi
+
+          echo "[3/3] 比对 size + 路径完整性..."
+          # 统一为 "path<TAB>size" 排序后 join/comm 比对
+          # src: rclone ls 输出 "  size path" → awk 取 size 和完整 path
+          awk '{ size=$1; sub(/^[ \t]*[0-9]+[ \t]+/, ""); print $0 "\t" size }' /tmp/src_list.txt \
+            | sort > /tmp/src_ps.tsv
+          # dst: lsjson JSON → "path<TAB>size"
+          jq -r '.[] | [.Path, (.Size|tostring)] | @tsv' /tmp/dst_list.json | sort > /tmp/dst_ps.tsv
+
+          MISSING=$(comm -23 /tmp/src_ps.tsv /tmp/dst_ps.tsv | wc -l)
+          EXTRA=$(comm -13 /tmp/src_ps.tsv /tmp/dst_ps.tsv | wc -l)
+          SIZE_DIFF=$(join -t$'\t' /tmp/src_ps.tsv /tmp/dst_ps.tsv 2>/dev/null | awk -F'\t' '$2 != $3 {print}' | wc -l)
+          SIZE_MATCH=$(join -t$'\t' /tmp/src_ps.tsv /tmp/dst_ps.tsv 2>/dev/null | awk -F'\t' '$2 == $3' | wc -l)
+
+          echo "  missing in dst: $MISSING, extra in dst: $EXTRA, size match: $SIZE_MATCH, size mismatch: $SIZE_DIFF"
+
+          {
+            echo "### Verify - full manifest check"
+            echo "- src files: $SRC_TOTAL"
+            echo "- dst files: $DST_TOTAL"
+            echo "- missing in dst: $MISSING"
+            echo "- extra in dst: $EXTRA"
+            echo "- size match: $SIZE_MATCH"
+            echo "- size mismatch: $SIZE_DIFF"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          FAIL=0
+          if [ "$MISSING" -gt 0 ]; then
+            echo "::error::$MISSING file(s) in src missing in dst"
+            comm -23 /tmp/src_ps.tsv /tmp/dst_ps.tsv | head -20 | tee -a check.log
+            FAIL=1
+          fi
+          if [ "$EXTRA" -gt 0 ]; then
+            echo "::warning::$EXTRA extra file(s) in dst (not in src)"
+          fi
+          if [ "$SIZE_DIFF" -gt 0 ]; then
+            echo "::error::$SIZE_DIFF file(s) size mismatch"
+            join -t$'\t' /tmp/src_ps.tsv /tmp/dst_ps.tsv 2>/dev/null | awk -F'\t' '$2 != $3 {print}' | head -20 | tee -a check.log
+            FAIL=1
+          fi
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Verify - full manifest check FAILED"
+            exit 1
+          fi
+          echo "Verify - full manifest check PASSED ($SIZE_MATCH size match, $MISSING missing, $EXTRA extra)" | tee -a check.log
+          echo "Verify - full manifest check PASSED" >> "$GITHUB_STEP_SUMMARY"
 
       # ---- 校验:随机抽 5 文件,下载源桶算 MD5 与目标桶 ETag(真实 MD5)比对 ----
       # MD5 可得性(2026-08-28 实测):

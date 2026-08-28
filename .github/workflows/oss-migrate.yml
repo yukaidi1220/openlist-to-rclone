@@ -413,7 +413,8 @@ jobs:
               head -3 /tmp/dst_lsjson_single.log | sed 's/^/      /'
             fi
             if [ -n "$dst_json" ]; then
-              echo "   [debug] 返回: $(echo "$dst_json" | head -c 200)"
+              echo "   [debug] 完整返回(格式化):"
+              echo "$dst_json" | jq . 2>/dev/null | sed 's/^/      /'
             else
               echo "   [debug] 返回: (空)"
             fi

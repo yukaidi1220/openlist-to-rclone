@@ -409,12 +409,10 @@ jobs:
             dst_json=$(rclone lsjson "$DST/$fpath" --hash --no-check-certificate 2>/tmp/dst_lsjson_single.log)
             dst_md5=$(echo "$dst_json" | jq -r '.[0].Hashes.md5 // ""' 2>/dev/null)
             if [ -z "$dst_md5" ]; then
-              # 实测诊断:打印大文件 lsjson 完整返回(含 ETag),确认 OSS 是否真取不到 MD5。
-              echo "   [诊断] 取不到 MD5。完整 lsjson 返回:"
-              echo "$dst_json" | jq . 2>/dev/null | sed 's/^/      /'
-              echo "   [诊断] stderr:"
-              head -3 /tmp/dst_lsjson_single.log 2>/dev/null | sed 's/^/      /'
-              echo "   [诊断] size=$fsize bytes ($(echo "scale=2; $fsize/1073741824" | bc) GiB)"
+              # 取不到 MD5。诊断:打印 lsjson --metadata 看是否有 md5chksum 元数据。
+              echo "   [诊断] size=$fsize bytes ($(echo "scale=1; $fsize/1048576" | bc) MiB)"
+              echo "   [诊断] lsjson --metadata 返回:"
+              rclone lsjson "$DST/$fpath" --metadata --no-check-certificate 2>/dev/null | jq . 2>/dev/null | sed 's/^/      /'
               echo "   [跳过] 该文件取不到 MD5,跳过(不视为失败)" | tee -a sample.log
               continue
             fi

@@ -384,18 +384,35 @@ jobs:
             head -3 /tmp/dst_ls_err.log | sed 's/^/    /'
           fi
 
-          echo "[3/4] 随机抽取 5 个文件并比对..."
-          # 抽 5 行 "  size path"
-          shuf -n 5 /tmp/src_files.txt > /tmp/picks.txt
-          cat -n /tmp/picks.txt | sed -E 's/^[[:space:]]*([0-9]+)[[:space:]]+/    样本 \1: /'
+          echo "[3/4] 分层随机抽取 5 个文件并比对..."
+          # 分层抽样:分别从 >=200MB(multipart,走退化下载)与 <200MB(ETag 快路径)抽取,
+          # 保证两种 MD5 获取路径都被覆盖(纯随机可能全抽到小文件=没测)。
+          # src_files.txt 每行 "  size path"。按 size 分组为 "size\tpath" 格式。
+          awk '{ sz=$1; line=$0; sub(/^[ \t]*[0-9]+[ \t]+/, "", line); if (sz >= 209715200) print sz "\t" line; }' /tmp/src_files.txt > /tmp/src_big.txt
+          awk '{ sz=$1; line=$0; sub(/^[ \t]*[0-9]+[ \t]+/, "", line); if (sz < 209715200) print sz "\t" line; }' /tmp/src_files.txt > /tmp/src_small.txt
+          BIG_N=$(wc -l < /tmp/src_big.txt)
+          SMALL_N=$(wc -l < /tmp/src_small.txt)
+          echo "  >=200MB 大文件: $BIG_N 个, <200MB 小文件: $SMALL_N 个"
+
+          # 抽 2 个大文件 + 3 个小文件(数量不够则补另一边)
+          : > /tmp/picks.txt
+          if [ "$BIG_N" -gt 0 ]; then shuf -n 2 /tmp/src_big.txt >> /tmp/picks.txt; fi
+          if [ "$SMALL_N" -gt 0 ]; then shuf -n 3 /tmp/src_small.txt >> /tmp/picks.txt; fi
+          # 补足 5 个(某类不足时;统一 tab 格式避免混合)
+          NEED=$((5 - $(wc -l < /tmp/picks.txt)))
+          if [ "$NEED" -gt 0 ]; then
+            awk '{ sz=$1; line=$0; sub(/^[ \t]*[0-9]+[ \t]+/, "", line); print sz "\t" line; }' /tmp/src_files.txt \
+              | shuf -n $NEED >> /tmp/picks.txt
+          fi
+          shuf /tmp/picks.txt > /tmp/picks2.txt   # 打乱顺序
+          echo "  抽取到 $(( $(wc -l < /tmp/picks2.txt) )) 个样本:"
+          cat -n /tmp/picks2.txt | sed -E 's/^[[:space:]]*([0-9]+)[[:space:]]+/    样本 \1: /'
 
           fail=0
           idx=0
-          while IFS= read -r line; do
+          while IFS=$'\t' read -r fsize fpath; do
             idx=$((idx+1))
-            [ -z "$line" ] && continue
-            fsize=$(printf '%s' "$line" | awk '{print $1}')
-            fpath=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')
+            [ -z "$fpath" ] && continue
             echo "  ---- 样本 $idx/5: $fpath ($fsize bytes) ----"
             echo "== sample $idx: $fpath ($fsize bytes)" | tee -a sample.log
 
@@ -439,7 +456,7 @@ jobs:
               rclone deletefile "$DST/$fpath" --no-check-certificate
               fail=1
             fi
-          done < /tmp/picks.txt
+          done < /tmp/picks2.txt
 
           echo "[4/4] 汇总..."
           if [ "$fail" != "0" ]; then

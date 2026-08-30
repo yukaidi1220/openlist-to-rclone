@@ -72,7 +72,7 @@ jobs:
         env:
           PATH_PREFIX: ${{ inputs.path }}
         run: |
-          SRC_BUCKET=$(awk -F' *= *' '/^\[src\]/{f=1} /^\[/{f=0} f==1&&$1=="bucket"{print $2}' "$RCLONE_CONFIG")
+          SRC_BUCKET=$(grep '^bucket' "$RCLONE_CONFIG" | tr -s ' ' | cut -d' ' -f3 | head -1)
           [ -n "$SRC_BUCKET" ] || { echo "::error::conf 缺少 src.bucket"; exit 1; }
           DST_BASE=$(cat /tmp/dstbase)
           PARAM_PREFIX="$PATH_PREFIX"

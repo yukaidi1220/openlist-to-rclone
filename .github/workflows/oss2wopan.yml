@@ -143,10 +143,9 @@ jobs:
           sudo ip route add 168.63.129.16/32 via "$GW" dev "$DEV" 2>/dev/null || true
           sudo ip -4 route replace 0.0.0.0/0 dev wgcf
           sudo ip -6 route replace ::/0 dev wgcf
-          echo ">>> gai.conf:默认 v4 优先,2408::/16(联通)走 v6(v6 链路保留)"
+          echo ">>> gai.conf:v4 优先(上传流量走 WARP v4);v6 隧道保留但不引导(gai.conf 不偏向 v6)"
           printf '%s\n' \
             'precedence  ::1/128       50' \
-            'precedence  2408::/16     110' \
             'precedence  ::ffff:0:0/96 100' \
             'precedence  ::/0          40' \
             'precedence  2002::/16     30' \

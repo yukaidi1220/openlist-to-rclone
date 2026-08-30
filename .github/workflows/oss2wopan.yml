@@ -1,0 +1,234 @@
+# OSS → 联通网盘(wopan) 迁移执行器(公开仓运行,凭据经私有仓 conf 注入)
+#
+# 目标路径:s3-bak/<源桶名>/<原 key>,桶内结构原封保留。
+# 源端:列表/元数据走签名 API,内容经 CDN 预签名下载(download_host)。
+# 目标端:wopan token 直传。
+#
+# wopan 特有限制(详见 rclone wopan 文档):
+#   - 上传后 mtime 不可改 → copy 必须带 --size-only,否则每轮都全量重传
+#   - 不支持 0 字节文件(遇到会报错跳过,不影响其他文件)
+#   - 文件名 ≤100 字符,部分特殊符号/4 字节字符不可用
+#   - ≥8MiB 文件 MD5 有分钟级沉降窗口(抽样的 cat|md5sum 是真实内容,不受影响)
+#
+# 断点语义:copy 粒度为整文件,重跑自动跳过已存在(--size-only)的文件。
+
+name: OSS2wopan migrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式"
+        type: choice
+        required: true
+        default: "dry-run"
+        options:
+          - dry-run
+          - copy
+          - verify
+      path:
+        description: "迁移路径前缀(留空=整桶,相对桶根)"
+        required: false
+        default: ""
+
+concurrency:
+  group: oss2wopan
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      RCLONE_CONFIG: /tmp/oss2wopan.conf
+    steps:
+      - name: Fetch oss2wopan.conf from private repo
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          umask 077
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf" \
+              -o "$RCLONE_CONFIG" \
+              && curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.dstbase" \
+              -o /tmp/dstbase; then
+              echo "配置获取成功"
+              break
+            fi
+            echo "获取失败,重试 $i/3..."
+            sleep $((i * 5))
+          done
+          [ -f "$RCLONE_CONFIG" ] || { echo "::error::无法获取 oss2wopan.conf"; exit 1; }
+          [ -f /tmp/dstbase ] || { echo "::error::无法获取 oss2wopan.dstbase"; exit 1; }
+
+      - name: Parse config & set paths
+        run: |
+          SRC_BUCKET=$(awk -F' *= *' '/^\[src\]/{f=1;next} /^\[/{f=0} f&&$1=="bucket"{print $2}' "$RCLONE_CONFIG")
+          [ -n "$SRC_BUCKET" ] || { echo "::error::conf 缺少 src.bucket"; exit 1; }
+          DST_BASE=$(cat /tmp/dstbase)
+          if [ -n "${{ inputs.path }}" ]; then
+            echo "SRC=src:$SRC_BUCKET/${{ inputs.path }}" >> "$GITHUB_ENV"
+            echo "DST=wopan:$DST_BASE/${{ inputs.path }}" >> "$GITHUB_ENV"
+          else
+            echo "SRC=src:$SRC_BUCKET" >> "$GITHUB_ENV"
+            echo "DST=wopan:$DST_BASE" >> "$GITHUB_ENV"
+          fi
+          echo "DST_BASE=$DST_BASE" >> "$GITHUB_ENV"
+
+      - name: "Install rclone (custom build: s3 download_host + wopan)"
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 120 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/rclone-cdn/rclone-cdn-linux-amd64" \
+              -o /tmp/rclone; then
+              break
+            fi
+            echo "拉取失败,重试 $i/3..."
+            sleep $((i * 5))
+          done
+          [ -f /tmp/rclone ] || { echo "::error::无法拉取定制版 rclone"; exit 1; }
+          chmod +x /tmp/rclone
+          sudo mv /tmp/rclone /usr/local/bin/rclone
+          rclone version | head -2
+
+      # ---- 预检 ----
+      - name: Preflight - source bucket scoped
+        if: inputs.mode != 'cleanup'
+        run: |
+          rclone size "$SRC" --json --no-check-certificate > /tmp/size.json
+          jq -r '"objects=\(.count // .files) bytes=\(.bytes)"' /tmp/size.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Preflight - wopan connectivity
+        if: inputs.mode != 'cleanup'
+        run: |
+          rclone lsd wopan: > /dev/null 2>&1 || rclone lsf wopan: --max-depth 1 > /dev/null
+          echo "wopan OK"
+
+      - name: Preflight - CDN presigned GET probe
+        if: ${{ inputs.mode != 'cleanup' }}
+        run: |
+          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1 --max-size 8Mi \
+                    | jq -r 'sort_by(.Size) | .[0].Path // empty')
+          if [ -z "$probe" ]; then
+            echo "::warning::范围内没有小文件,跳过 CDN 探测"
+            exit 0
+          fi
+          expect=$(rclone lsjson "$SRC/$probe" | jq -r '.[0].Size')
+          echo "probing: $probe ($expect bytes)"
+          got=$(rclone cat "$SRC/$probe" | wc -c)
+          echo "got: $got bytes"
+          [ "$got" -eq "$expect" ] || { echo "::error::CDN 下载字节数不符"; exit 1; }
+          echo "CDN presigned GET OK"
+
+      # ---- 复制 ----
+      - name: Copy (dry-run)
+        if: inputs.mode == 'dry-run'
+        run: |
+          rclone copy "$SRC" "$DST" --dry-run \
+            --size-only --no-check-certificate \
+            --transfers 4 --checkers 8 \
+            --stats-one-line --stats 60s -v 2>&1 | tee copy.log
+
+      - name: Copy
+        if: inputs.mode == 'copy'
+        run: |
+          set -o pipefail
+          # --size-only: wopan mtime 不可改,必须按大小判增
+          # --no-check-certificate: 源 endpoint CNAME 到 aliyuncs,证书不匹配
+          rclone copy "$SRC" "$DST" \
+            --size-only --no-check-certificate \
+            --transfers 4 --checkers 8 \
+            --retries 5 --low-level-retries 20 \
+            --stats-one-line --stats 30s -v 2>&1 | tee copy.log
+
+      # ---- 校验 ----
+      - name: Verify - full one-way check (size, wopan hash 沉降不适用)
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
+        run: |
+          set -o pipefail
+          rclone check "$SRC" "$DST" --one-way --size-only -v 2>&1 | tee check.log
+          echo "full one-way size check PASSED" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify - random sample content md5 (双端真实下载)
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
+        run: |
+          rclone lsjson "$SRC" -R --files-only > files.json
+          total=$(jq 'length' files.json)
+          echo "total files: $total"
+          mapfile -t picks < <(jq -r '.[].Path' files.json | shuf -n 5)
+          : > sample.log
+          fail=0
+          for p in "${picks[@]}"; do
+            size=$(jq -r --arg p "$p" '.[] | select(.Path==$p) | .Size' files.json)
+            echo "== sample: $p ($size bytes)" | tee -a sample.log
+            src_md5=$(rclone cat "$SRC/$p" --no-check-certificate | md5sum | awk '{print $1}')
+            dst_md5=$(rclone cat "$DST/$p" | md5sum | awk '{print $1}')
+            echo "   src md5: $src_md5" | tee -a sample.log
+            echo "   dst md5: $dst_md5" | tee -a sample.log
+            if [ "$src_md5" != "$dst_md5" ]; then
+              echo "   MISMATCH -> 删除目标坏文件以便重传" | tee -a sample.log
+              rclone deletefile "$DST/$p"
+              fail=1
+            else
+              echo "   MATCH" | tee -a sample.log
+            fi
+          done
+          if [ "$fail" != "0" ]; then
+            echo "::warning::抽样发现不一致的目标文件已删除,重跑 copy 即可修复"
+            exit 1
+          fi
+          echo "random sample content-md5 PASSED (5 files)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss2wopan-logs-${{ github.run_number }}
+          path: |
+            copy.log
+            check.log
+            sample.log
+          if-no-files-found: ignore
+
+      - name: Writeback refreshed wopan token (best-effort)
+        if: always()
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          # wopan refresh_token 是轮换型:执行器刷新后旧值作废,必须把
+          # 刷新后的 conf 写回私有仓,否则下次 launcher 用死 token。
+          if [ ! -f "$RCLONE_CONFIG" ]; then echo "conf 已清理,跳过"; exit 0; fi
+          NEW_TOKEN=$(awk -F' *= *' '/^\[wopan\]/{f=1;next} /^\[/{f=0} f&&$1=="refresh_token"{print $2}' "$RCLONE_CONFIG")
+          [ -n "$NEW_TOKEN" ] || { echo "::warning::未解析到 refresh_token"; exit 0; }
+          OLD_SHA=$(curl -fsS -H "Authorization: token $RCLONE_PAT" \
+            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf" \
+            | jq -r '.sha // empty')
+          B64=$(base64 -w0 "$RCLONE_CONFIG")
+          BODY=$(jq -n --arg msg "chore: wopan token rotate (auto)" --arg b "$B64" --arg s "$OLD_SHA" \
+            '{message:$msg,content:$b,branch:"main",sha:$s}')
+          if curl -fsS -X PUT -H "Authorization: token $RCLONE_PAT" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            -d "$BODY" \
+            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf" > /dev/null; then
+            echo "token 已回写私有仓"
+          else
+            echo "::warning::token 回写失败(RCLONE_PAT 可能无写权限)——下次运行前请重新在 launcher 填入新 refresh_token!"
+          fi
+
+      - name: Remove fetched config
+        if: always()
+        run: |
+          if [ -f "$RCLONE_CONFIG" ]; then shred -u "$RCLONE_CONFIG" || rm -f "$RCLONE_CONFIG"; fi

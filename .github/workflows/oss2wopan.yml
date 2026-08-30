@@ -156,7 +156,7 @@ jobs:
           # --no-check-certificate: 源 endpoint CNAME 到 aliyuncs,证书不匹配
           rclone copy "$SRC" "$DST" \
             --size-only --no-check-certificate \
-            --transfers 4 --checkers 8 \
+            --transfers 20 --checkers 40 \
             --retries 5 --low-level-retries 20 \
             --stats-one-line --stats 30s -v 2>&1 | tee copy.log
 
@@ -169,7 +169,7 @@ jobs:
           # 仅限 SRC/DST 前缀内,配合 --size-only(wopan mtime 不可改)
           rclone sync "$SRC" "$DST" \
             --size-only --no-check-certificate \
-            --transfers 4 --checkers 8 \
+            --transfers 20 --checkers 40 \
             --retries 5 --low-level-retries 20 \
             --stats-one-line --stats 30s -v 2>&1 | tee copy.log
 

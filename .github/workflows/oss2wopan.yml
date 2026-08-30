@@ -69,13 +69,16 @@ jobs:
           [ -f /tmp/dstbase ] || { echo "::error::无法获取 oss2wopan.dstbase"; exit 1; }
 
       - name: Parse config & set paths
+        env:
+          PATH_PREFIX: ${{ inputs.path }}
         run: |
           SRC_BUCKET=$(awk -F' *= *' '/^\[src\]/{f=1;next} /^\[/{f=0} f&&$1=="bucket"{print $2}' "$RCLONE_CONFIG")
           [ -n "$SRC_BUCKET" ] || { echo "::error::conf 缺少 src.bucket"; exit 1; }
           DST_BASE=$(cat /tmp/dstbase)
-          if [ -n "${{ inputs.path }}" ]; then
-            echo "SRC=src:$SRC_BUCKET/${{ inputs.path }}" >> "$GITHUB_ENV"
-            echo "DST=wopan:$DST_BASE/${{ inputs.path }}" >> "$GITHUB_ENV"
+          # 路径可能含中文/特殊字符,必须经 shell 变量写入,不能用 ${{ }} 直接进 file command
+          if [ -n "$PATH_PREFIX" ]; then
+            echo "SRC=src:$SRC_BUCKET/$PATH_PREFIX" >> "$GITHUB_ENV"
+            echo "DST=wopan:$DST_BASE/$PATH_PREFIX" >> "$GITHUB_ENV"
           else
             echo "SRC=src:$SRC_BUCKET" >> "$GITHUB_ENV"
             echo "DST=wopan:$DST_BASE" >> "$GITHUB_ENV"

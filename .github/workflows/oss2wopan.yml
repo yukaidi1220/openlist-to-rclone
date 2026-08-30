@@ -238,16 +238,17 @@ jobs:
         if: ${{ inputs.mode != 'cleanup' }}
         run: |
           . /tmp/paths.src
+          set -o pipefail
           # 注意:此构建裸数字 size 非 1 字节语义,必须写 1b,否则小文件全被过滤
-          # --no-mime-type --no-modtime:ListV2 元数据够用,避免每对象 2 次经 CDN 的 Head(曾因瞬态 404 全线误报)
+          # --no-mimetype --no-modtime(注意拼写无连字符):ListV2 元数据够用,避免每对象 2 次经 CDN 的 Head
           probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi \
-                    --no-mime-type --no-modtime \
+                    --no-mimetype --no-modtime \
                     | jq -r 'sort_by(.Size) | .[0].Path // empty')
           if [ -z "$probe" ]; then
             echo "::warning::范围内没有小文件,跳过 CDN 探测"
             exit 0
           fi
-          expect=$(rclone lsjson "$SRC/$probe" --no-mime-type --no-modtime | jq -r '.[0].Size')
+          expect=$(rclone lsjson "$SRC/$probe" --no-mimetype --no-modtime | jq -r '.[0].Size')
           echo "probing: $probe ($expect bytes)"
           got=$(rclone cat "$SRC/$probe" 2>/tmp/cat.err | wc -c)
           if [ -s /tmp/cat.err ]; then echo "--- cat stderr ---"; cat /tmp/cat.err; fi
@@ -284,8 +285,10 @@ jobs:
           set -o pipefail
           # --size-only: wopan mtime 不可改,必须按大小判增
           # --no-check-certificate: 源 endpoint CNAME 到 aliyuncs,证书不匹配
+          # --ipv4: 本轮测 WARP v4 出口。rclone 静态 Go 构建不读 gai.conf,内置 RFC6724 表偏好 v6,
+          #         双栈域名会走 v6 隧道;必须显式锁 v4。测 WARP v6 时去掉此参数即可。
           rclone copy "$SRC" "$DST" \
-            --size-only --no-check-certificate \
+            --size-only --no-check-certificate --ipv4 \
             --transfers 20 --checkers 10 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -v 2>&1 | tee copy.log
@@ -298,7 +301,7 @@ jobs:
           # sync = 源→目标单向镜像:目标前缀下不在源桶的文件会被删除(wopan 默认进回收站)。
           # 仅限 SRC/DST 前缀内,配合 --size-only(wopan mtime 不可改)
           rclone sync "$SRC" "$DST" \
-            --size-only --no-check-certificate \
+            --size-only --no-check-certificate --ipv4 \
             --transfers 20 --checkers 10 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -v 2>&1 | tee copy.log
@@ -320,7 +323,7 @@ jobs:
           # 并发容错:源桶可能被其他客户端并发修改(对象瞬时消失/内容变动)。
           # 任一端读取失败(cat 非零)或 stderr 出现 error/notice 时,跳过该样本并警告,
           # 绝不删除目标文件;只有双端都完整读出且 md5 不一致才判为真实损坏。
-          rclone lsjson "$SRC" -R --files-only --no-mime-type --no-modtime > files.json
+          rclone lsjson "$SRC" -R --files-only --no-mimetype --no-modtime > files.json
           total=$(jq 'length' files.json)
           echo "total files: $total"
           mapfile -t picks < <(jq -r '.[].Path' files.json | shuf -n 5)

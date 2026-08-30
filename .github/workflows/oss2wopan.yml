@@ -25,6 +25,7 @@ on:
         options:
           - dry-run
           - copy
+          - sync
           - verify
       path:
         description: "迁移路径前缀(留空=整桶,相对桶根)"

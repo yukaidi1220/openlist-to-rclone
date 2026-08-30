@@ -156,9 +156,9 @@ jobs:
           # --no-check-certificate: 源 endpoint CNAME 到 aliyuncs,证书不匹配
           rclone copy "$SRC" "$DST" \
             --size-only --no-check-certificate \
-            --transfers 20 --checkers 40 \
+            --transfers 20 --checkers 10 \
             --retries 5 --low-level-retries 20 \
-            --stats-one-line --stats 30s -v 2>&1 | tee copy.log
+            --stats 30s -v 2>&1 | tee copy.log
 
       - name: Sync (镜像目标,会删除目标端多余文件)
         if: inputs.mode == 'sync'
@@ -169,9 +169,9 @@ jobs:
           # 仅限 SRC/DST 前缀内,配合 --size-only(wopan mtime 不可改)
           rclone sync "$SRC" "$DST" \
             --size-only --no-check-certificate \
-            --transfers 20 --checkers 40 \
+            --transfers 20 --checkers 10 \
             --retries 5 --low-level-retries 20 \
-            --stats-one-line --stats 30s -v 2>&1 | tee copy.log
+            --stats 30s -v 2>&1 | tee copy.log
 
       # ---- 校验 ----
       - name: Verify - full one-way check (size, wopan hash 沉降不适用)

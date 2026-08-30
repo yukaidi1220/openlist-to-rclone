@@ -294,8 +294,9 @@ jobs:
           echo "CDN presigned GET OK"
 
       # ---- 上传协议族验证(tcpdump 铁证):双小文件上传全程抓包,统计 v6/v4 ----
+      # 仅 WARP 模式需要(bare 下没有路由问题,直接跳过)
       - name: V6 proof test - tcpdump during small upload
-        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' }}
+        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync') && inputs.warp_mode != 'bare' }}
         run: |
           . /tmp/paths.src
           set -o pipefail

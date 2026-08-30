@@ -31,6 +31,16 @@ on:
         description: "迁移路径前缀(留空=整桶,相对桶根)"
         required: false
         default: ""
+      warp_mode:
+        description: "WARP 出口模式(仅 copy/sync 生效)。bare=不装 WARP(生产默认);v6-only=仅 v6 进隧道;v4-only=仅 v4 进隧道;dual=双栈都进隧道"
+        type: choice
+        required: false
+        default: "bare"
+        options:
+          - bare
+          - v6-only
+          - v4-only
+          - dual
 
 concurrency:
   group: oss2wopan
@@ -91,26 +101,41 @@ jobs:
           echo "== SRC token check =="
           grep -c '^SRC=src' /tmp/paths.src
 
-      # ---- WARP(最先执行:最快暴露 WARP 问题)----
-      # 当前模式:WARP v4-only 隧道(用户指定测试:走 Cloudflare IPv4 出口上传)。
-      # 已知风险:run 33325656692 实测 WARP v4 出口(104.28.x)到 wopan 控制面超时(疑似被屏蔽);
-      # 本轮把控制面校验降级为警告,由 proof test 抓包给出上传端点的真实结论。
-      # v6 完全不拉起:rclone 无 v6 可走,全部流量走 WARP v4 出口。
-      # 生死细节(勿删):v4 劫持后 wireguard endpoint 必须钉原网关,否则路由循环全断。
-      # 钉扎清单(v4 劫持时启用):
-      #   私有/保留:10/8 172.16/12 192.168/16 100.64/10 127/8
-      #   微软/Azure:20/8 13/8 52/8 168.0.0.0/8(用户指定 168 段视为微软放行直连)
-      #   GitHub:140/8 185.199/16
-      #   + wireguard endpoint /32 直连、Azure 平台服务 168.63.129.16
-      - name: Setup Cloudflare WARP (v4-only tunnel, for wopan upload)
-        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' }}
+      # ---- WARP(四条线,由 warp_mode 输入切换;bare 不执行本步骤)----
+      #   线4 bare    : 不装 WARP,全部流量走 runner 原生网络(生产迁移默认)
+      #   线1 v6-only : 仅 v6 进隧道,v4 保持原生直连
+      #   线3 v4-only : 仅 v4 进隧道,v6 不拉起
+      #   线2 dual    : v4+v6 都进隧道
+      # 实测备忘(2026-08-30):
+      #   - WARP v4 出口(104.28.x)到 wopan 控制面与上传端点均不通(run 33326950520 抓包证实)
+      #   - WARP v6 出口可达(上传走 v6 实锤),但速度不理想
+      #   → 生产迁移用 bare;其余三种模式仅作诊断用途
+      # 生死细节:v4 进隧道的模式(v4-only/dual)必须把 wireguard endpoint /32、
+      #   Azure 平台服务 168.63.129.16、私有/微软/GitHub 网段钉回原网关,
+      #   否则隧道封包进自己(路由循环)或 runner 失联。
+      - name: Setup Cloudflare WARP
+        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync') && inputs.warp_mode != 'bare' }}
         env:
           RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
           set -e
+          MODE="${{ inputs.warp_mode }}"
+          case "$MODE" in
+            v6-only|v4-only|dual) ;;
+            "") echo "warp_mode 未指定,按 bare 跳过(兼容旧 launcher)"; exit 0 ;;
+            *) echo "::error::未知 warp_mode: $MODE"; exit 1 ;;
+          esac
+          V4_WANT=0; V6_WANT=0
+          case "$MODE" in
+            v6-only) V6_WANT=1 ;;
+            v4-only) V4_WANT=1 ;;
+            dual)    V4_WANT=1; V6_WANT=1 ;;
+          esac
+          echo ">>> WARP 模式: $MODE (V4_WANT=$V4_WANT V6_WANT=$V6_WANT)"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq wireguard-tools resolvconf
+          # tcpdump:proof test 抓包用(不预装);不用 wg-quick,无需 resolvconf
+          sudo apt-get install -y -qq wireguard-tools tcpdump
           curl -fsSL --retry 3 --retry-delay 5 \
             -o /tmp/wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
           chmod +x /tmp/wgcf && sudo mv /tmp/wgcf /usr/local/bin/wgcf
@@ -120,55 +145,100 @@ jobs:
             "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
             -o wgcf-account.toml || { echo "::error::拉取 wgcf-account.toml 失败"; exit 1; }
           wgcf generate
-          echo "===== wgcf-profile.conf ====="
-          cat wgcf-profile.conf
+          # PrivateKey 打码后输出(公开仓 run 日志,私钥不能见)
+          echo "===== wgcf-profile.conf(PrivateKey 已打码)====="
+          sed 's/^PrivateKey.*/PrivateKey = ***REDACTED***/' wgcf-profile.conf
           PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          # profile 的 Address 是单行逗号分隔(如 "172.16.0.2/32, 2606:.../128"),必须按逗号拆
           ADDR_V4=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep -v ':' | head -1)
+          ADDR_V6=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep ':' | head -1)
           PEER_KEY=$(grep 'PublicKey' wgcf-profile.conf | awk '{print $NF}')
           ENDPOINT=$(grep 'Endpoint' wgcf-profile.conf | awk '{print $NF}')
-          if [ -z "$ADDR_V4" ]; then echo "::error::WARP 未分配 IPv4 地址"; exit 1; fi
-          echo "ADDR_V4=$ADDR_V4"
           DEV=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
           GW=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -1)
-          echo "DEV=$DEV GW=$GW"
-          # ---- 钉扎(v4 劫持生死细节)----
-          echo ">>> 钉扎:私有/微软/GitHub 网段走原始网关 $GW ($DEV)"
-          for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 \
-                     20.0.0.0/8 13.0.0.0/8 52.0.0.0/8 168.0.0.0/8 \
-                     140.0.0.0/8 185.199.0.0/16; do
-            sudo ip route add "$NET" via "$GW" dev "$DEV" 2>/dev/null || \
-              sudo ip route add "$NET" via "$GW" 2>/dev/null || true
-          done
+          echo "ADDR_V4=$ADDR_V4 ADDR_V6=$ADDR_V6 DEV=$DEV GW=$GW"
+          # 需要的地址必须齐全
+          [ "$V4_WANT" = "1" ] && [ -z "$ADDR_V4" ] && { echo "::error::WARP 未分配 IPv4 地址"; exit 1; }
+          [ "$V6_WANT" = "1" ] && [ -z "$ADDR_V6" ] && { echo "::error::WARP 未分配 IPv6 地址"; exit 1; }
+          # ---- 钉扎(在任何路由劫持之前执行)----
+          # endpoint /32 与 Azure 平台服务 168.63.129.16 无条件钉回原网关:
+          # v4 被劫持的模式(v4-only/dual)是生死线;v6-only 时 v4 未劫持,加了也无害
           ENDPOINT_HOST=${ENDPOINT%%:*}
+          EP_PORT=${ENDPOINT##*:}
           EP_IP=$(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null | head -1)
-          if [ -n "$EP_IP" ]; then
-            echo ">>> WARP 端点直连 $ENDPOINT_HOST -> $EP_IP via $GW"
-            sudo ip route add "$EP_IP/32" via "$GW" dev "$DEV" 2>/dev/null || true
-          else
-            echo "::error::无法解析 WARP 端点,按要求终止"; exit 1
-          fi
+          [ -n "$EP_IP" ] || { echo "::error::无法解析 WARP 端点,按要求终止"; exit 1; }
+          echo ">>> 钉扎:endpoint $EP_IP/32、Azure 平台服务 168.63.129.16/32 via $GW ($DEV)"
+          sudo ip route add "$EP_IP/32" via "$GW" dev "$DEV" 2>/dev/null || true
           sudo ip route add 168.63.129.16/32 via "$GW" dev "$DEV" 2>/dev/null || true
-          # 仅 v4 进隧道;v6 不拉起
+          if [ "$V4_WANT" = "1" ]; then
+            # 私有/保留 + 微软/Azure(20/8 13/8 52/8 168/8) + GitHub(140/8 185.199/16)
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 \
+                       20.0.0.0/8 13.0.0.0/8 52.0.0.0/8 168.0.0.0/8 \
+                       140.0.0.0/8 185.199.0.0/16; do
+              sudo ip route add "$NET" via "$GW" dev "$DEV" 2>/dev/null || \
+                sudo ip route add "$NET" via "$GW" 2>/dev/null || true
+            done
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            # v6:仅私有 ULA 走原始网卡(过宽的大区段不钉,避免 on-link 路由把有 AAAA 的目标弄不可达)
+            sudo ip -6 route add fc00::/7 dev "$DEV" 2>/dev/null || true
+          fi
+          # ---- 拉起接口与路由(按模式)----
           sudo ip link add wgcf type wireguard
           echo "$PRIVATE_KEY" | sudo wg set wgcf private-key /dev/stdin
-          sudo wg set wgcf peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0"
+          # wg endpoint 用钉扎过的 IP,杜绝 wg 内部二次解析与 dig 结果不一致导致钉扎失效
+          WG_ENDPOINT="${EP_IP}:${EP_PORT}"
+          if [ "$V4_WANT" = "1" ] && [ "$V6_WANT" = "1" ]; then
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "0.0.0.0/0, ::/0"
+          elif [ "$V4_WANT" = "1" ]; then
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "0.0.0.0/0"
+          else
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "::/0"
+          fi
           sudo ip link set mtu 1280 up dev wgcf
-          sudo ip addr add "$ADDR_V4" dev wgcf
-          sudo ip -4 route replace 0.0.0.0/0 dev wgcf
+          [ "$V4_WANT" = "1" ] && sudo ip addr add "$ADDR_V4" dev wgcf
+          [ "$V6_WANT" = "1" ] && sudo ip addr add "$ADDR_V6" dev wgcf
+          [ "$V4_WANT" = "1" ] && sudo ip -4 route replace 0.0.0.0/0 dev wgcf
+          [ "$V6_WANT" = "1" ] && sudo ip -6 route replace ::/0 dev wgcf
           # MSS 钳制:WARP MTU=1280,防 PMTUD 黑洞
-          sudo iptables -t mangle -A OUTPUT -o wgcf -p tcp \
-            --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+          if [ "$V4_WANT" = "1" ]; then
+            sudo iptables -t mangle -A OUTPUT -o wgcf -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            sudo ip6tables -t mangle -A OUTPUT -o wgcf -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+          fi
+          # ---- 出口探测与校验 ----
           echo "===== IP 出口探测 ====="
-          echo "--- dash.cloudflare trace (v4,应为 WARP 出口) ---"
-          curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v4 不通)"
-          echo ">>> [硬校验] v4 出口必须是 WARP(dash trace warp=on)"
-          w4=$(curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep '^warp=' || true)
-          echo "v4 trace: $w4"
-          [ "$w4" = "warp=on" ] || { echo "::error::WARP v4 未接管,按要求终止"; exit 1; }
-          echo ">>> [软校验] wopan 控制面经 WARP v4(已知可能被屏蔽,失败仅警告,由 proof test 定论)"
-          code=$(curl -4 -sS --max-time 15 -o /dev/null -w "%{http_code}" https://panservice.mail.wo.cn) \
-            || echo "::warning::wopan 控制面经 WARP v4 不通(继续,让 proof test 验证上传端点)"
-          echo "wopan v4 HTTP ${code:-N/A}"
+          if [ "$V4_WANT" = "1" ]; then
+            echo "--- dash.cloudflare trace (v4) ---"
+            curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v4 不通)"
+            w4=$(curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^warp=(on|plus)' || true)
+            case "$w4" in "warp=on"|"warp=plus") ;; *) echo "::error::WARP v4 未接管,终止"; exit 1 ;; esac
+          else
+            echo "--- dash.cloudflare trace (v4,应保持 runner 原生出口) ---"
+            curl -4 -sS --max-time 10 "https://www.cloudflare-cn.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v4 不通)"
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            echo "--- dash.cloudflare trace (v6) ---"
+            curl -6 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v6 不通)"
+            w6=$(curl -6 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^warp=(on|plus)' || true)
+            case "$w6" in "warp=on"|"warp=plus") ;; *) echo "::error::WARP v6 未接管,终止"; exit 1 ;; esac
+          fi
+          # wopan 控制面:v6 出口可达(硬校验);v4 出口已知被屏蔽(软校验)
+          if [ "$V6_WANT" = "1" ]; then
+            echo ">>> [硬校验] wopan 控制面经 WARP v6(panservice.mail.wo.cn)"
+            code=$(curl -6 -sS --max-time 15 -o /dev/null -w "%{http_code}" https://panservice.mail.wo.cn) \
+              || { echo "::error::wopan 控制面经 WARP v6 不通,终止"; exit 1; }
+            echo "wopan v6 HTTP $code"
+          fi
+          if [ "$V4_WANT" = "1" ]; then
+            echo ">>> [软校验] wopan 控制面经 WARP v4(已知可能被屏蔽,由 proof test 定论)"
+            code=$(curl -4 -sS --max-time 15 -o /dev/null -w "%{http_code}" https://panservice.mail.wo.cn) \
+              || echo "::warning::wopan 控制面经 WARP v4 不通(继续)"
+            echo "wopan v4 HTTP ${code:-N/A}"
+          fi
 
       - name: "Install rclone (custom build: s3 download_host + wopan)"
         run: |
@@ -209,13 +279,14 @@ jobs:
           fi
           expect=$(rclone lsjson "$SRC/$probe" --no-mimetype --no-modtime | jq -r '.[0].Size')
           echo "probing: $probe ($expect bytes)"
-          got=$(rclone cat "$SRC/$probe" 2>/tmp/cat.err | wc -c)
+          # || got=-1:让 cat 命令失败(403/404/网络错)也落入重试分支,而不是被 bash -e 直接终止
+          got=$(rclone cat "$SRC/$probe" 2>/tmp/cat.err | wc -c) || got=-1
           if [ -s /tmp/cat.err ]; then echo "--- cat stderr ---"; cat /tmp/cat.err; fi
           echo "got: $got bytes"
           if [ "$got" -ne "$expect" ]; then
             echo "首次不符,视为 IP 脏瞬态失败,等待 20s(404 边缘缓存 TTL)后重试一次"
             sleep 20
-            got=$(rclone cat "$SRC/$probe" 2>/tmp/cat.err | wc -c)
+            got=$(rclone cat "$SRC/$probe" 2>/tmp/cat.err | wc -c) || got=-1
             if [ -s /tmp/cat.err ]; then echo "--- cat stderr (retry) ---"; cat /tmp/cat.err; fi
             echo "got(retry): $got bytes"
           fi
@@ -306,6 +377,7 @@ jobs:
         if: inputs.mode == 'dry-run'
         run: |
           . /tmp/paths.src
+          set -o pipefail
           # dry-run 展示:sync 模式显示 Would delete 清单,copy 模式显示 Would copy;流式 stats 便于观察
           rclone copy "$SRC" "$DST" --dry-run \
             --size-only --no-check-certificate \
@@ -323,10 +395,10 @@ jobs:
           set -o pipefail
           # --size-only: wopan mtime 不可改,必须按大小判增
           # --no-check-certificate: 源 endpoint CNAME 到 aliyuncs,证书不匹配
-          # 走向说明:WARP 步骤 v4-only(不拉起 v6),rclone 无 v6 可走,全部流量走 WARP v4
+          # 走向说明:出口由 warp_mode 输入决定(bare=原生直连;其余模式见 WARP 步骤)
           rclone copy "$SRC" "$DST" \
             --size-only --no-check-certificate \
-            --transfers 20 --checkers 10 \
+            --transfers 8 --checkers 8 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -v 2>&1 | tee copy.log
 
@@ -339,7 +411,7 @@ jobs:
           # 仅限 SRC/DST 前缀内,配合 --size-only(wopan mtime 不可改)
           rclone sync "$SRC" "$DST" \
             --size-only --no-check-certificate \
-            --transfers 20 --checkers 10 \
+            --transfers 8 --checkers 8 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -v 2>&1 | tee copy.log
 

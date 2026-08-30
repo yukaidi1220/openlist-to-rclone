@@ -72,27 +72,29 @@ jobs:
         env:
           PATH_PREFIX: ${{ inputs.path }}
         run: |
-          SRC_BUCKET=$(awk -F' *= *' '/^\[src\]/{f=1;next} /^\[/{f=0} f&&$1=="bucket"{print $2}' "$RCLONE_CONFIG")
+          SRC_BUCKET=$(awk -F' *= *' '/^\[src\]/{f=1} /^\[/{f=0} f==1&&$1=="bucket"{print $2}' "$RCLONE_CONFIG")
           [ -n "$SRC_BUCKET" ] || { echo "::error::conf 缺少 src.bucket"; exit 1; }
           DST_BASE=$(cat /tmp/dstbase)
-          # 路径可能含中文,不写入 GITHUB_ENV(其对非 ASCII 值有格式校验),
-          # 而是写进文件,后续步骤统一 source
-          if [ -n "$PATH_PREFIX" ]; then
-            SRC_VALUE="src:$SRC_BUCKET/$PATH_PREFIX"
-            DST_VALUE="wopan:$DST_BASE/$PATH_PREFIX"
+          PARAM_PREFIX="$PATH_PREFIX"
+          if [ -n "$PARAM_PREFIX" ]; then
+            SRC="src:$SRC_BUCKET/$PARAM_PREFIX"
+            DST="wopan:$DST_BASE/$PARAM_PREFIX"
           else
-            SRC_VALUE="src:$SRC_BUCKET"
-            DST_VALUE="wopan:$DST_BASE"
+            SRC="src:$SRC_BUCKET"
+            DST="wopan:$DST_BASE"
           fi
-          # base64 传递:彻底避免中文/特殊字符经 GITHUB_ENV 或 shell 的解析问题
-          printf 'SRC=%s\nDST=%s\n' "$SRC_VALUE" "$DST_VALUE" | base64 -w0 > /tmp/paths.env.b64
-          echo "b64: $(cat /tmp/paths.env.b64)"
+          # 单行 echo,不涉及 printf 多行:直接用 bash 的 declare -p 输出可 source 行
+          { echo "set -a"; echo "SRC=$SRC"; echo "DST=$DST"; echo "set +a"; } > /tmp/paths.src
+          echo "== paths.src =="
+          cat /tmp/paths.src
+          echo "== SRC token check =="
+          grep -c '^SRC=src' /tmp/paths.src
 
       # ---- 预检 ----
       - name: Preflight - source bucket scoped
         if: inputs.mode != 'cleanup'
         run: |
-          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
+          . /tmp/paths.src
           rclone size "$SRC" --json --no-check-certificate > /tmp/size.json
           jq -r '"objects=\(.count // .files) bytes=\(.bytes)"' /tmp/size.json | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -105,7 +107,7 @@ jobs:
       - name: Preflight - CDN presigned GET probe
         if: ${{ inputs.mode != 'cleanup' }}
         run: |
-          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
+          . /tmp/paths.src
           probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1 --max-size 8Mi \
                     | jq -r 'sort_by(.Size) | .[0].Path // empty')
           if [ -z "$probe" ]; then
@@ -123,7 +125,7 @@ jobs:
       - name: Copy (dry-run)
         if: inputs.mode == 'dry-run'
         run: |
-          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
+          . /tmp/paths.src
           rclone copy "$SRC" "$DST" --dry-run \
             --size-only --no-check-certificate \
             --transfers 4 --checkers 8 \
@@ -132,7 +134,7 @@ jobs:
       - name: Copy
         if: inputs.mode == 'copy'
         run: |
-          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
+          . /tmp/paths.src
           set -o pipefail
           # --size-only: wopan mtime 不可改,必须按大小判增
           # --no-check-certificate: 源 endpoint CNAME 到 aliyuncs,证书不匹配
@@ -146,7 +148,7 @@ jobs:
       - name: Verify - full one-way check (size, wopan hash 沉降不适用)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
         run: |
-          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
+          . /tmp/paths.src
           set -o pipefail
           rclone check "$SRC" "$DST" --one-way --size-only -v 2>&1 | tee check.log
           echo "full one-way size check PASSED" >> "$GITHUB_STEP_SUMMARY"
@@ -154,7 +156,7 @@ jobs:
       - name: Verify - random sample content md5 (双端真实下载)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
         run: |
-          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
+          . /tmp/paths.src
           rclone lsjson "$SRC" -R --files-only > files.json
           total=$(jq 'length' files.json)
           echo "total files: $total"

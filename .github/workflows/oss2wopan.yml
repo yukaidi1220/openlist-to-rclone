@@ -397,9 +397,17 @@ jobs:
           if [ ! -f "$RCLONE_CONFIG" ]; then echo "conf 已清理,跳过"; exit 0; fi
           NEW_TOKEN=$(awk -F' *= *' '/^\[wopan\]/{f=1;next} /^\[/{f=0} f&&$1=="refresh_token"{print $2}' "$RCLONE_CONFIG")
           [ -n "$NEW_TOKEN" ] || { echo "::warning::未解析到 refresh_token"; exit 0; }
-          OLD_SHA=$(curl -fsS -H "Authorization: token $RCLONE_PAT" \
-            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf" \
-            | jq -r '.sha // empty')
+          RESP=$(curl -fsS -H "Authorization: token $RCLONE_PAT" \
+            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf") || RESP=""
+          OLD_SHA=$(echo "$RESP" | jq -r '.sha // empty')
+          # 无变化不回写,避免空 commit
+          if [ -n "$OLD_SHA" ]; then
+            echo "$RESP" | jq -r '.content' | base64 -d > /tmp/conf.remote 2>/dev/null || true
+            if [ -s /tmp/conf.remote ] && diff -q <(sed 's/\r$//' /tmp/conf.remote) <(sed 's/\r$//' "$RCLONE_CONFIG") >/dev/null 2>&1; then
+              echo "conf 与私有仓完全一致,跳过回写(不产生空 commit)"
+              exit 0
+            fi
+          fi
           B64=$(base64 -w0 "$RCLONE_CONFIG")
           BODY=$(jq -n --arg msg "chore: wopan token rotate (auto)" --arg b "$B64" --arg s "$OLD_SHA" \
             '{message:$msg,content:$b,branch:"main",sha:$s}')

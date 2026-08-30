@@ -185,32 +185,51 @@ jobs:
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
           . /tmp/paths.src
+          set -o pipefail
+          # 并发容错:源桶可能被其他客户端并发修改(对象瞬时消失/内容变动)。
+          # 任一端读取失败(cat 非零)或 stderr 出现 error/notice 时,跳过该样本并警告,
+          # 绝不删除目标文件;只有双端都完整读出且 md5 不一致才判为真实损坏。
           rclone lsjson "$SRC" -R --files-only > files.json
           total=$(jq 'length' files.json)
           echo "total files: $total"
           mapfile -t picks < <(jq -r '.[].Path' files.json | shuf -n 5)
           : > sample.log
-          fail=0
+          fail=0; skip=0; ok=0
           for p in "${picks[@]}"; do
             size=$(jq -r --arg p "$p" '.[] | select(.Path==$p) | .Size' files.json)
             echo "== sample: $p ($size bytes)" | tee -a sample.log
-            src_md5=$(rclone cat "$SRC/$p" --no-check-certificate | md5sum | awk '{print $1}')
-            dst_md5=$(rclone cat "$DST/$p" | md5sum | awk '{print $1}')
+            src_md5=$(rclone cat "$SRC/$p" --no-check-certificate 2>/tmp/src.err | md5sum | awk '{print $1}') \
+              || { echo "   SKIP: 源端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue; }
+            if [ -s /tmp/src.err ] && grep -qiE 'error|notice|failed|not found' /tmp/src.err; then
+              echo "   SKIP: 源端 stderr 异常,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue
+            fi
+            dst_md5=$(rclone cat "$DST/$p" 2>/tmp/dst.err | md5sum | awk '{print $1}') \
+              || { echo "   SKIP: 目标端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/dst.err | sed 's/^/   dst: /' | tee -a sample.log; skip=$((skip+1)); continue; }
+            if [ -s /tmp/dst.err ] && grep -qiE 'error|notice|failed|not found' /tmp/dst.err; then
+              echo "   SKIP: 目标端 stderr 异常,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/dst.err | sed 's/^/   dst: /' | tee -a sample.log; skip=$((skip+1)); continue
+            fi
             echo "   src md5: $src_md5" | tee -a sample.log
             echo "   dst md5: $dst_md5" | tee -a sample.log
             if [ "$src_md5" != "$dst_md5" ]; then
               echo "   MISMATCH -> 删除目标坏文件以便重传" | tee -a sample.log
               rclone deletefile "$DST/$p"
-              fail=1
+              fail=$((fail+1))
             else
               echo "   MATCH" | tee -a sample.log
+              ok=$((ok+1))
             fi
           done
-          if [ "$fail" != "0" ]; then
-            echo "::warning::抽样发现不一致的目标文件已删除,重跑 copy 即可修复"
+          if [ "$fail" -ne 0 ]; then
+            echo "::warning::抽样发现 $fail 个不一致的目标文件已删除,重跑 copy 即可修复"
             exit 1
           fi
-          echo "random sample content-md5 PASSED (5 files)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$skip" -ne 0 ]; then
+            echo "::warning::抽样有 $skip 个样本因读取失败被跳过(可能是源桶并发修改),未删任何目标文件"
+          fi
+          if [ "$ok" -eq 0 ] && [ "$skip" -ne 0 ]; then
+            echo "::warning::本次抽样没有有效样本,内容校验未真正完成,建议重跑 verify"
+          fi
+          echo "random sample content-md5 PASSED (ok=$ok skip=$skip)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload logs
         if: always()

@@ -91,13 +91,15 @@ jobs:
           echo "== SRC token check =="
           grep -c '^SRC=src' /tmp/paths.src
 
-      # ---- WARP IPv6(最先执行:最快暴露 WARP 问题)----
-      # 隔离原则:
-      # 1. 接口不加 v4 地址,v4 流量(源桶链路)与无 WARP 时完全一致
-      # 2. gai.conf 完整 RFC6724 表:默认 v4 优先,仅联通 2408::/16(wo.cn 系)优先 v6
-      # 3. v6 出口或 wopan v6 探测不通 → 立即终止(不做降级)
-      # 4. 凭据复用私有仓 wgcf/wgcf-account.toml,绝不新注册
-      - name: Setup Cloudflare WARP (IPv6 only, for wopan upload)
+      # ---- WARP(最先执行:最快暴露 WARP 问题)----
+      # 当前模式:WARP v4+v6 双隧道(wopan 上传走 WARP;源桶 CDN 经 CF Worker,出口无关)
+      # 路由细节(生死攸关,勿删):
+      #   1. wireguard endpoint 主机路由钉在原网关——否则隧道封包进自己,路由循环全断
+      #   2. Azure DNS(168.63.129.16)钉在原网关——runner 的 DNS 上游,从 WARP 出口不可达
+      #   3. 接口不加地址段外的 v4 路由,除默认路由外全部原样
+      # 硬校验:any 不通立即终止。
+      # TODO(开关预留):后续加 workflow input 选择 warp-v4 / warp-v6 / direct
+      - name: Setup Cloudflare WARP (for wopan upload)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' }}
         env:
           RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
@@ -119,18 +121,29 @@ jobs:
           cat wgcf-profile.conf
           PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
           # profile 的 Address 是单行逗号分隔(如 "172.16.0.2/32, 2606:.../128"),必须按逗号拆
+          ADDR_V4=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep -v ':' | head -1)
           ADDR_V6=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep ':' | head -1)
           PEER_KEY=$(grep 'PublicKey' wgcf-profile.conf | awk '{print $NF}')
           ENDPOINT=$(grep 'Endpoint' wgcf-profile.conf | awk '{print $NF}')
-          if [ -z "$ADDR_V6" ]; then echo "::error::WARP 未分配 IPv6 地址"; exit 1; fi
-          echo "ADDR_V6=$ADDR_V6"
+          if [ -z "$ADDR_V4" ] || [ -z "$ADDR_V6" ]; then echo "::error::WARP 未分配完整地址(v4=$ADDR_V4 v6=$ADDR_V6)"; exit 1; fi
+          echo "ADDR_V4=$ADDR_V4 ADDR_V6=$ADDR_V6"
+          # 原网关/网卡与关键主机路由(v4 劫持前先钉死)
+          DEV=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+          GW=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -1)
+          EP_HOST=${ENDPOINT%%:*}
+          EP_IP=$(getent hosts "$EP_HOST" | awk '{print $1}' | head -1)
+          echo "DEV=$DEV GW=$GW EP_HOST=$EP_HOST EP_IP=$EP_IP"
           sudo ip link add wgcf type wireguard
           echo "$PRIVATE_KEY" | sudo wg set wgcf private-key /dev/stdin
-          sudo wg set wgcf peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+          sudo wg set wgcf peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0, ::/0"
           sudo ip link set mtu 1280 up dev wgcf
+          sudo ip addr add "$ADDR_V4" dev wgcf
           sudo ip addr add "$ADDR_V6" dev wgcf
+          sudo ip route add "$EP_IP/32" via "$GW" dev "$DEV"
+          sudo ip route add 168.63.129.16/32 via "$GW" dev "$DEV" 2>/dev/null || true
+          sudo ip -4 route replace 0.0.0.0/0 dev wgcf
           sudo ip -6 route replace ::/0 dev wgcf
-          echo ">>> gai.conf:v4 默认优先,2408::/16(联通)走 v6"
+          echo ">>> gai.conf:默认 v4 优先,2408::/16(联通)走 v6(v6 链路保留)"
           printf '%s\n' \
             'precedence  ::1/128       50' \
             'precedence  2408::/16     110' \
@@ -151,10 +164,14 @@ jobs:
             echo "--- $u via v6 ---"
             curl -6 -sS --max-time 10 "$u" | grep -E '^(ip|warp|colo|loc|flare)=' || echo "(v6 不通)"
           done
-          echo ">>> [硬校验] ipv6.itdog.cn via v6"
-          code6=$(curl -6 -sS --max-time 10 -o /dev/null -w "%{http_code}" "https://ipv6.itdog.cn/") \
+          echo ">>> [硬校验] v4 出口必须是 WARP(dash trace warp=on)"
+          w4=$(curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep '^warp=' || true)
+          echo "v4 trace: $w4"
+          [ "$w4" = "warp=on" ] || { echo "::error::WARP v4 未接管,按要求终止"; exit 1; }
+          echo ">>> [硬校验] ipv6.itdog.cn via v6(完整返回内容)"
+          curl -6 -sS --max-time 10 "https://ipv6.itdog.cn/" \
             || { echo "::error::WARP IPv6 不通(itdog 无响应),按要求终止"; exit 1; }
-          echo "ipv6.itdog.cn HTTP $code6"
+          echo ""
           echo ">>> [硬校验] wopan 控制面 v6(panservice.mail.wo.cn)"
           code=$(curl -6 -sS --max-time 10 -o /dev/null -w "%{http_code}" https://panservice.mail.wo.cn) \
             || { echo "::error::wopan 控制面 v6 不通,按要求终止"; exit 1; }
@@ -216,15 +233,15 @@ jobs:
         if: inputs.mode == 'dry-run'
         run: |
           . /tmp/paths.src
-          # dry-run 展示:sync 模式显示 Would delete 清单,copy 模式显示 Would copy
+          # dry-run 展示:sync 模式显示 Would delete 清单,copy 模式显示 Would copy;流式 stats 便于观察
           rclone copy "$SRC" "$DST" --dry-run \
             --size-only --no-check-certificate \
             --transfers 4 --checkers 8 \
-            --stats-one-line --stats 60s -v 2>&1 | tee copy.log
+            --stats 60s -v 2>&1 | tee copy.log
           rclone sync "$SRC" "$DST" --dry-run \
             --size-only --no-check-certificate \
             --transfers 4 --checkers 8 \
-            --stats-one-line --stats 60s -v 2>&1 | tee -a copy.log
+            --stats 60s -v 2>&1 | tee -a copy.log
 
       - name: Copy
         if: inputs.mode == 'copy'

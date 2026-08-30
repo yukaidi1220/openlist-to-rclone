@@ -492,33 +492,43 @@ jobs:
           RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
-          # wopan refresh_token 是轮换型:执行器刷新后旧值作废,必须把
-          # 刷新后的 conf 写回私有仓,否则下次 launcher 用死 token。
+          # wopan refresh_token 是轮换型:执行器刷新后旧值作废,必须回写。
+          # 只在「远端最新 conf」上替换 token 行,绝不整份覆盖——
+          # 防止运行期间有人改了域名等其他字段被本步骤回滚(曾发生竞态)。
           if [ ! -f "$RCLONE_CONFIG" ]; then echo "conf 已清理,跳过"; exit 0; fi
-          NEW_TOKEN=$(awk -F' *= *' '/^\[wopan\]/{f=1;next} /^\[/{f=0} f&&$1=="refresh_token"{print $2}' "$RCLONE_CONFIG")
-          [ -n "$NEW_TOKEN" ] || { echo "::warning::未解析到 refresh_token"; exit 0; }
-          RESP=$(curl -fsS -H "Authorization: token $RCLONE_PAT" \
-            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf") || RESP=""
-          OLD_SHA=$(echo "$RESP" | jq -r '.sha // empty')
-          # 无变化不回写,避免空 commit
-          if [ -n "$OLD_SHA" ]; then
+          NEW_REFRESH=$(awk -F' *= *' '/^\[wopan\]/{f=1;next} /^\[/{f=0} f&&$1=="refresh_token"{print $2}' "$RCLONE_CONFIG")
+          NEW_ACCESS=$(awk  -F' *= *' '/^\[wopan\]/{f=1;next} /^\[/{f=0} f&&$1=="access_token"{print $2}'  "$RCLONE_CONFIG")
+          [ -n "$NEW_REFRESH" ] || { echo "::warning::未解析到 refresh_token"; exit 0; }
+          for attempt in 1 2 3; do
+            RESP=$(curl -fsS -H "Authorization: token $RCLONE_PAT" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf") || RESP=""
+            OLD_SHA=$(echo "$RESP" | jq -r '.sha // empty')
+            if [ -z "$OLD_SHA" ]; then echo "::warning::获取远端 conf 失败(第 $attempt 次)"; sleep 5; continue; fi
             echo "$RESP" | jq -r '.content' | base64 -d > /tmp/conf.remote 2>/dev/null || true
-            if [ -s /tmp/conf.remote ] && diff -q <(sed 's/\r$//' /tmp/conf.remote) <(sed 's/\r$//' "$RCLONE_CONFIG") >/dev/null 2>&1; then
-              echo "conf 与私有仓完全一致,跳过回写(不产生空 commit)"
+            if [ ! -s /tmp/conf.remote ]; then echo "::warning::远端 conf 解码失败(第 $attempt 次)"; sleep 5; continue; fi
+            MERGED=$(awk -F' *= *' -v rf="$NEW_REFRESH" -v ac="$NEW_ACCESS" '
+              /^\[wopan\]/{f=1;print;next} /^\[/{f=0;print;next}
+              f&&$1=="refresh_token"{sub(/=.*/, "="rf);print;next}
+              f&&$1=="access_token"&&ac!=""{sub(/=.*/, "="ac);print;next}
+              {print}' /tmp/conf.remote)
+            if diff -q <(sed 's/\r$//' /tmp/conf.remote) <(printf "%s\n" "$MERGED") >/dev/null 2>&1; then
+              echo "远端 token 已是最新,跳过回写(不产生空 commit)"
               exit 0
             fi
-          fi
-          B64=$(base64 -w0 "$RCLONE_CONFIG")
-          BODY=$(jq -n --arg msg "chore: wopan token rotate (auto)" --arg b "$B64" --arg s "$OLD_SHA" \
-            '{message:$msg,content:$b,branch:"main",sha:$s}')
-          if curl -fsS -X PUT -H "Authorization: token $RCLONE_PAT" \
-            -H "Accept: application/vnd.github.v3.raw" \
-            -d "$BODY" \
-            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf" > /dev/null; then
-            echo "token 已回写私有仓"
-          else
-            echo "::warning::token 回写失败(RCLONE_PAT 可能无写权限)——下次运行前请重新在 launcher 填入新 refresh_token!"
-          fi
+            B64=$(printf "%s\n" "$MERGED" | base64 -w0)
+            BODY=$(jq -n --arg msg "chore: wopan token rotate (auto)" --arg b "$B64" --arg s "$OLD_SHA" \
+              '{message:$msg,content:$b,branch:"main",sha:$s}')
+            if curl -fsS -X PUT -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              -d "$BODY" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf" > /dev/null; then
+              echo "token 已回写私有仓(仅 token 字段,其余配置以远端为准)"
+              exit 0
+            fi
+            echo "::warning::回写冲突(第 $attempt 次,远端有新提交),重新获取后重试"
+            sleep 5
+          done
+          echo "::warning::token 回写失败(RCLONE_PAT 可能无写权限)——下次运行前请重新在 launcher 填入新 refresh_token!"
 
       - name: Remove fetched config
         if: always()

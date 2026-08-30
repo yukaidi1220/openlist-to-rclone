@@ -99,6 +99,11 @@ jobs:
       # rclone(Go)对有 AAAA 的域名天然偏好 v6 → wopan 流量走 WARP v6;无 AAAA 的走 v4 直连。
       # tcpdump proof test 步骤负责用铁证验证上传实际走哪个族。
       # 生死细节(勿删):wireguard endpoint(v4)在未劫持的 v4 默认路由上,天然直连,无循环风险。
+      # 钉扎清单(仅切回 v4 劫持/双栈模式时启用;当前 v6-only 未劫持 v4,无需钉扎):
+      #   私有/保留:10/8 172.16/12 192.168/16 100.64/10 127/8
+      #   微软/Azure:20/8 13/8 52/8 168.0.0.0/8(用户指定 168 段视为微软放行直连)
+      #   GitHub:140/8 185.199/16
+      #   + wireguard endpoint /32 直连、Azure 平台服务 168.63.129.16
       - name: Setup Cloudflare WARP (v6-only tunnel, for wopan upload)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' }}
         env:
@@ -217,14 +222,20 @@ jobs:
         run: |
           . /tmp/paths.src
           set -o pipefail
-          # 挑 2 个最小的小文件(≤8MiB)
-          mapfile -t FILES < <(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi \
+          # 挑 2 个 256KiB~16MiB 的文件(太小看不出流量特征);区间没有再退回最小文件
+          mapfile -t FILES < <(rclone lsjson "$SRC" -R --files-only --min-size 256Ki --max-size 16Mi \
             --no-mimetype --no-modtime | jq -r 'sort_by(.Size) | .[0:2][] | .Path')
+          if [ ${#FILES[@]} -lt 2 ]; then
+            mapfile -t FILES < <(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi \
+              --no-mimetype --no-modtime | jq -r 'sort_by(.Size) | .[0:2][] | .Path')
+          fi
           echo "样本文件: ${FILES[*]}"
           [ ${#FILES[@]} -gt 0 ] || { echo "::error::找不到小文件样本"; exit 1; }
-          # 开始抓包(any 接口,全流量,快照 96B 只看包头)
+          # 消除 libibverbs 枚举接口的无害警告噪音
+          sudo mkdir -p /etc/libibverbs.d
+          # 开始抓包(any 接口,全流量,-s 0 全包长,保留 TLS Client Hello 与负载)
           sudo rm -f /tmp/v6test.pcap /tmp/pcap.txt
-          sudo timeout 180 tcpdump -i any -s 96 -w /tmp/v6test.pcap 'ip6 or ip' & TCPDUMP_PID=$!
+          sudo timeout 300 tcpdump -i any -s 0 -w /tmp/v6test.pcap 'ip6 or ip' & TCPDUMP_PID=$!
           sleep 2
           for f in "${FILES[@]}"; do
             echo ">>> 上传: $f"

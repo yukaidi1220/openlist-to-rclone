@@ -107,7 +107,7 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
           set -e
-          WARP_V6=false   # 开关:true = 双栈(v6 同走 WARP);当前 false = 仅 v4
+          WARP_V6=true    # 开关:true = 双栈(v4+v6 同走 WARP,最接近本地全局 TUN);false = 仅 v4
           sudo apt-get update -qq
           sudo apt-get install -y -qq wireguard-tools resolvconf
           curl -fsSL --retry 3 --retry-delay 5 \
@@ -154,6 +154,10 @@ jobs:
           fi
           # Azure 平台服务(DNS/NTP/WireServer 合一)走原网关
           sudo ip route add 168.63.129.16/32 via "$GW" dev "$DEV" 2>/dev/null || true
+          # v6 侧:私有 ULA + GitHub 段走原始网卡(仅双栈模式有意义)
+          for NET6 in fc00::/7 2a01::/16 2620::/16; do
+            sudo ip -6 route add "$NET6" dev "$DEV" 2>/dev/null || true
+          done
           # allowed-ips:v4-only 模式不含 ::/0,v6 对 rclone 完全不可达
           if [ "$WARP_V6" = "true" ]; then
             sudo wg set wgcf peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0, ::/0"
@@ -239,6 +243,56 @@ jobs:
           fi
           [ "$got" -eq "$expect" ] || { echo "::error::CDN 下载字节数不符"; exit 1; }
           echo "CDN presigned GET OK"
+
+      # ---- 上传协议族验证(tcpdump 铁证):双小文件上传全程抓包,统计 v6/v4 ----
+      - name: V6 proof test - tcpdump during small upload
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' }}
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          # 挑 2 个最小的小文件(≤8MiB)
+          mapfile -t FILES < <(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi \
+            --no-mimetype --no-modtime | jq -r 'sort_by(.Size) | .[0:2][] | .Path')
+          echo "样本文件: ${FILES[*]}"
+          [ ${#FILES[@]} -gt 0 ] || { echo "::error::找不到小文件样本"; exit 1; }
+          # 开始抓包(any 接口,全流量,快照 96B 只看包头)
+          sudo rm -f /tmp/v6test.pcap /tmp/pcap.txt
+          sudo timeout 180 tcpdump -i any -s 96 -w /tmp/v6test.pcap 'ip6 or ip' & TCPDUMP_PID=$!
+          sleep 2
+          for f in "${FILES[@]}"; do
+            echo ">>> 上传: $f"
+            rclone copyto "$SRC/$f" "$DST/_v6test/$(basename "$f")" \
+              --size-only --no-check-certificate --transfers 1 --checkers 4 -v
+          done
+          sleep 3
+          sudo kill -INT "$TCPDUMP_PID" 2>/dev/null || true
+          sleep 2
+          # 统计
+          sudo tcpdump -nn -r /tmp/v6test.pcap 2>/dev/null > /tmp/pcap.txt || true
+          wc -l /tmp/pcap.txt
+          echo "===== 协议族包数 ====="
+          v6c=$(grep -c ' IP6 ' /tmp/pcap.txt || true)
+          v4c=$(grep ' IP ' /tmp/pcap.txt | grep -vc ' IP6 ' || true)
+          echo "IPv6 包数: $v6c"
+          echo "IPv4 包数: $v4c"
+          echo "===== IPv6 top 对端 ====="
+          grep ' IP6 ' /tmp/pcap.txt | awk '{print $3, " -> ", $5}' | sort | uniq -c | sort -rn | head -15 || true
+          echo "===== IPv4 top 对端 ====="
+          grep ' IP ' /tmp/pcap.txt | grep -v ' IP6 ' | awk '{print $3, " -> ", $5}' | sort | uniq -c | sort -rn | head -15 || true
+          # 自动判定:上传流量大头在哪个协议族
+          if [ "$v6c" -gt "$v4c" ] && [ "$v6c" -gt 100 ]; then
+            echo ">>> 结论:上传流量以 IPv6 为主(走了 WARP v6)"
+          elif [ "$v4c" -gt "$v6c" ] && [ "$v4c" -gt 100 ]; then
+            echo ">>> 结论:上传流量以 IPv4 为主(没走 v6!上传端点可能无 AAAA 或回退 v4)"
+          else
+            echo ">>> 结论:流量太少无法判定,请看 top 对端明细"
+          fi
+          # 清理测试文件(wopan 侧不残留)
+          for f in "${FILES[@]}"; do
+            rclone deletefile "$DST/_v6test/$(basename "$f")" --no-check-certificate || true
+          done
+          rclone rmdir "$DST/_v6test" --no-check-certificate 2>/dev/null || true
+          echo "清理完成"
 
       # ---- 复制 ----
       - name: Copy (dry-run)

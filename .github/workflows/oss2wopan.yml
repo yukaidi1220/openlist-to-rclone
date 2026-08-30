@@ -90,6 +90,15 @@ jobs:
           echo "== SRC token check =="
           grep -c '^SRC=src' /tmp/paths.src
 
+      - name: "Install rclone (custom build: s3 download_host + wopan)"
+        run: |
+          URL="https://github.com/yukaidi1220/rclone/releases/latest/download/rclone-cdn-linux-amd64"
+          curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 5 \
+            -o /tmp/rclone "$URL" || { echo "::error::无法下载 rclone release"; exit 1; }
+          chmod +x /tmp/rclone
+          sudo mv /tmp/rclone /usr/local/bin/rclone
+          rclone version | head -2
+
       # ---- 预检 ----
       - name: Preflight - source bucket scoped
         if: inputs.mode != 'cleanup'

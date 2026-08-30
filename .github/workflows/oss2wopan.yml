@@ -118,7 +118,8 @@ jobs:
         if: ${{ inputs.mode != 'cleanup' }}
         run: |
           . /tmp/paths.src
-          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1 --max-size 8Mi \
+          # 注意:此构建裸数字 size 非 1 字节语义,必须写 1b,否则小文件全被过滤
+          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi \
                     | jq -r 'sort_by(.Size) | .[0].Path // empty')
           if [ -z "$probe" ]; then
             echo "::warning::范围内没有小文件,跳过 CDN 探测"

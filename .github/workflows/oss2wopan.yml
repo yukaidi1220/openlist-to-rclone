@@ -100,6 +100,53 @@ jobs:
           sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version | head -2
 
+      # ---- WARP IPv6(上传加速实验)----
+      # 仅接管 IPv6(allowed-ips ::/0):支持 v6 的对端(wo.cn 系有 AAAA)走 WARP 出口,
+      # 纯 v4 流量(源桶 CDN)不受影响。凭据复用私有仓 wgcf/wgcf-account.toml,不新注册。
+      - name: Setup Cloudflare WARP (reuse wgcf account, IPv6 only)
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools resolvconf
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o /tmp/wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
+          chmod +x /tmp/wgcf && sudo mv /tmp/wgcf /usr/local/bin/wgcf
+          # 复用已有账号,绝不注册新账号(避免多账号漂移与 CF 风控)
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -H "Authorization: token $RCLONE_PAT" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
+            -o wgcf-account.toml || { echo "::error::拉取 wgcf-account.toml 失败"; exit 1; }
+          wgcf generate
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          ADDRESSES=$(grep 'Address' wgcf-profile.conf | awk -F'= ' '{print $2}')
+          ADDR_V4=$(echo "$ADDRESSES" | awk -F', ' '{print $1}' | sed 's/,$//')
+          ADDR_V6=$(echo "$ADDRESSES" | awk -F', ' '{print $2}')
+          PEER_KEY=$(grep 'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep 'Endpoint' wgcf-profile.conf | awk '{print $NF}')
+          sudo ip link add wgcf type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set wgcf private-key /dev/stdin
+          sudo wg set wgcf peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "::/0"
+          sudo ip link set mtu 1280 up dev wgcf
+          sudo ip addr add "$ADDR_V4" dev wgcf
+          if [ -n "$ADDR_V6" ]; then
+            sudo ip addr add "$ADDR_V6" dev wgcf
+            sudo ip -6 route replace ::/0 dev wgcf
+          else
+            echo "::error::WARP 未分配 IPv6 地址"; exit 1
+          fi
+          echo ">>> gai.conf IPv6 优先"
+          sudo sed -i '/^precedence/d' /etc/gai.conf 2>/dev/null || true
+          echo "precedence ::/0  100" | sudo tee -a /etc/gai.conf > /dev/null
+          echo ">>> IPv6 出口验证"
+          curl -6 -sS --max-time 10 https://ip.sb || { echo "::error::WARP IPv6 不通"; exit 1; }
+          echo ">>> wopan 控制面 v6 连通(panservice.mail.wo.cn)"
+          curl -6 -sS --max-time 10 -o /dev/null -w "%{http_code}\n" https://panservice.mail.wo.cn || echo "::warning::wopan 控制面 v6 不通,上传仍可能走 v4"
+          curl -sS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E 'warp|ip|colo' || true
+
       # ---- 预检 ----
       - name: Preflight - source bucket scoped
         if: inputs.mode != 'cleanup'

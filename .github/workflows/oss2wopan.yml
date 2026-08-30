@@ -78,17 +78,21 @@ jobs:
           # 路径可能含中文,不写入 GITHUB_ENV(其对非 ASCII 值有格式校验),
           # 而是写进文件,后续步骤统一 source
           if [ -n "$PATH_PREFIX" ]; then
-            printf 'SRC=src:%s/%s\nDST=wopan:%s/%s\n' "$SRC_BUCKET" "$PATH_PREFIX" "$DST_BASE" "$PATH_PREFIX" > /tmp/paths.env
+            SRC_VALUE="src:$SRC_BUCKET/$PATH_PREFIX"
+            DST_VALUE="wopan:$DST_BASE/$PATH_PREFIX"
           else
-            printf 'SRC=src:%s\nDST=wopan:%s\n' "$SRC_BUCKET" "$DST_BASE" > /tmp/paths.env
+            SRC_VALUE="src:$SRC_BUCKET"
+            DST_VALUE="wopan:$DST_BASE"
           fi
-          echo "paths written: $(cat /tmp/paths.env)"
+          # base64 传递:彻底避免中文/特殊字符经 GITHUB_ENV 或 shell 的解析问题
+          printf 'SRC=%s\nDST=%s\n' "$SRC_VALUE" "$DST_VALUE" | base64 -w0 > /tmp/paths.env.b64
+          echo "b64: $(cat /tmp/paths.env.b64)"
 
       # ---- 预检 ----
       - name: Preflight - source bucket scoped
         if: inputs.mode != 'cleanup'
         run: |
-          set -a; . /tmp/paths.env; set +a
+          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
           rclone size "$SRC" --json --no-check-certificate > /tmp/size.json
           jq -r '"objects=\(.count // .files) bytes=\(.bytes)"' /tmp/size.json | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -101,7 +105,7 @@ jobs:
       - name: Preflight - CDN presigned GET probe
         if: ${{ inputs.mode != 'cleanup' }}
         run: |
-          set -a; . /tmp/paths.env; set +a
+          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
           probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1 --max-size 8Mi \
                     | jq -r 'sort_by(.Size) | .[0].Path // empty')
           if [ -z "$probe" ]; then
@@ -119,7 +123,7 @@ jobs:
       - name: Copy (dry-run)
         if: inputs.mode == 'dry-run'
         run: |
-          set -a; . /tmp/paths.env; set +a
+          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
           rclone copy "$SRC" "$DST" --dry-run \
             --size-only --no-check-certificate \
             --transfers 4 --checkers 8 \
@@ -128,7 +132,7 @@ jobs:
       - name: Copy
         if: inputs.mode == 'copy'
         run: |
-          set -a; . /tmp/paths.env; set +a
+          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
           set -o pipefail
           # --size-only: wopan mtime 不可改,必须按大小判增
           # --no-check-certificate: 源 endpoint CNAME 到 aliyuncs,证书不匹配
@@ -142,7 +146,7 @@ jobs:
       - name: Verify - full one-way check (size, wopan hash 沉降不适用)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
         run: |
-          set -a; . /tmp/paths.env; set +a
+          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
           set -o pipefail
           rclone check "$SRC" "$DST" --one-way --size-only -v 2>&1 | tee check.log
           echo "full one-way size check PASSED" >> "$GITHUB_STEP_SUMMARY"
@@ -150,7 +154,7 @@ jobs:
       - name: Verify - random sample content md5 (双端真实下载)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
         run: |
-          set -a; . /tmp/paths.env; set +a
+          base64 -d /tmp/paths.env.b64 > /tmp/paths.env && set -a && . /tmp/paths.env && set +a
           rclone lsjson "$SRC" -R --files-only > files.json
           total=$(jq 'length' files.json)
           echo "total files: $total"

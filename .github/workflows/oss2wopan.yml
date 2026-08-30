@@ -316,10 +316,13 @@ jobs:
           sudo timeout 300 tcpdump -i any -s 0 -w /tmp/v6test.pcap 'ip6 or ip' & TCPDUMP_PID=$!
           sleep 2
           FAIL=0
+          # 每轮用唯一时间戳子目录:即使上一轮清理失败导致残留,
+          # size-only 也不会把本轮上传跳过(保证抓包里必有真实上传流量)
+          TESTDIR="$DST/_v6test/$(date +%Y%m%d%H%M%S)"
           for f in "${FILES[@]}"; do
             echo ">>> 上传: $f"
             # WARP v4 出口可能被 wopan 屏蔽:重试收短,失败不中断,抓包照常分析
-            if ! rclone copyto "$SRC/$f" "$DST/_v6test/$(basename "$f")" \
+            if ! rclone copyto "$SRC/$f" "$TESTDIR/$(basename "$f")" \
               --size-only --no-check-certificate --transfers 1 --checkers 4 \
               --retries 1 --low-level-retries 5 --contimeout 15s -v; then
               FAIL=1
@@ -353,11 +356,8 @@ jobs:
           else
             echo ">>> 结论:流量太少无法判定,请看 top 对端明细"
           fi
-          # 清理测试文件(wopan 侧不残留)
-          for f in "${FILES[@]}"; do
-            rclone deletefile "$DST/_v6test/$(basename "$f")" --no-check-certificate || true
-          done
-          rclone rmdir "$DST/_v6test" --no-check-certificate 2>/dev/null || true
+          # 清理测试文件(wopan 侧不残留;purge 连子目录整棵删,清掉历史残留)
+          rclone purge "$DST/_v6test" --no-check-certificate 2>/dev/null || true
           echo "清理完成"
           if [ "$FAIL" = "1" ]; then
             echo "::error::存在上传失败(WARP v4 出口到 wopan 上传端点大概率不通),详见上方 pcap 统计"

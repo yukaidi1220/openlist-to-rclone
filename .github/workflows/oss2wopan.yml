@@ -135,10 +135,15 @@ jobs:
         if: inputs.mode == 'dry-run'
         run: |
           . /tmp/paths.src
+          # dry-run 展示:sync 模式显示 Would delete 清单,copy 模式显示 Would copy
           rclone copy "$SRC" "$DST" --dry-run \
             --size-only --no-check-certificate \
             --transfers 4 --checkers 8 \
             --stats-one-line --stats 60s -v 2>&1 | tee copy.log
+          rclone sync "$SRC" "$DST" --dry-run \
+            --size-only --no-check-certificate \
+            --transfers 4 --checkers 8 \
+            --stats-one-line --stats 60s -v 2>&1 | tee -a copy.log
 
       - name: Copy
         if: inputs.mode == 'copy'
@@ -153,9 +158,22 @@ jobs:
             --retries 5 --low-level-retries 20 \
             --stats-one-line --stats 30s -v 2>&1 | tee copy.log
 
+      - name: Sync (镜像目标,会删除目标端多余文件)
+        if: inputs.mode == 'sync'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          # sync = 源→目标单向镜像:目标前缀下不在源桶的文件会被删除(wopan 默认进回收站)。
+          # 仅限 SRC/DST 前缀内,配合 --size-only(wopan mtime 不可改)
+          rclone sync "$SRC" "$DST" \
+            --size-only --no-check-certificate \
+            --transfers 4 --checkers 8 \
+            --retries 5 --low-level-retries 20 \
+            --stats-one-line --stats 30s -v 2>&1 | tee copy.log
+
       # ---- 校验 ----
       - name: Verify - full one-way check (size, wopan hash 沉降不适用)
-        if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
           . /tmp/paths.src
           set -o pipefail
@@ -163,7 +181,7 @@ jobs:
           echo "full one-way size check PASSED" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify - random sample content md5 (双端真实下载)
-        if: ${{ inputs.mode == 'copy' || inputs.mode == 'verify' }}
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
           . /tmp/paths.src
           rclone lsjson "$SRC" -R --files-only > files.json

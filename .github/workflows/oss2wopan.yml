@@ -106,6 +106,8 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
           set -e
+          # 模式开关(预留 workflow input):warp-v4(当前) / warp-v6 / direct
+          WARP_V4=true
           sudo apt-get update -qq
           sudo apt-get install -y -qq wireguard-tools resolvconf
           curl -fsSL --retry 3 --retry-delay 5 \
@@ -130,19 +132,52 @@ jobs:
           # 原网关/网卡与关键主机路由(v4 劫持前先钉死)
           DEV=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
           GW=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -1)
-          EP_HOST=${ENDPOINT%%:*}
-          EP_IP=$(getent hosts "$EP_HOST" | awk '{print $1}' | head -1)
-          echo "DEV=$DEV GW=$GW EP_HOST=$EP_HOST EP_IP=$EP_IP"
+          echo "DEV=$DEV GW=$GW"
           sudo ip link add wgcf type wireguard
           echo "$PRIVATE_KEY" | sudo wg set wgcf private-key /dev/stdin
+          # ---- 抄自 rclone-batch-sync.yml 的成熟钉扎清单 ----
+          if [ "$WARP_V4" = "true" ]; then
+            # 私有/保留/Azure/GitHub 基础设施网段走原始网关,不走 WARP
+            echo ">>> 私有/保留/基础设施网段走原始网关 $GW ($DEV)"
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 \
+                       20.0.0.0/8 140.0.0.0/8 13.0.0.0/8 52.0.0.0/8 185.199.0.0/16; do
+              sudo ip route add "$NET" via "$GW" dev "$DEV" 2>/dev/null || \
+                sudo ip route add "$NET" via "$GW" 2>/dev/null || true
+            done
+            # IPv6:私有 ULA + GitHub 段走原始网卡,绕过 WARP
+            for NET6 in fc00::/7 2a01::/16 2620::/16; do
+              sudo ip -6 route add "$NET6" dev "$DEV" 2>/dev/null || true
+            done
+            # WARP 端点直连(dig 带超时,防 DNS 卡死)
+            ENDPOINT_HOST=${ENDPOINT%%:*}
+            EP_IP=$(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null | head -1)
+            if [ -n "$EP_IP" ]; then
+              echo ">>> WARP 端点直连 $ENDPOINT_HOST -> $EP_IP via $GW"
+              sudo ip route add "$EP_IP/32" via "$GW" dev "$DEV" 2>/dev/null || true
+            else
+              echo "::error::无法解析 WARP 端点,按要求终止"; exit 1
+            fi
+            # Azure 平台服务(DNS/NTP/WireServer 合一)走原网关
+            sudo ip route add 168.63.129.16/32 via "$GW" dev "$DEV" 2>/dev/null || true
+          fi
           sudo wg set wgcf peer "$PEER_KEY" endpoint "$ENDPOINT" allowed-ips "0.0.0.0/0, ::/0"
           sudo ip link set mtu 1280 up dev wgcf
           sudo ip addr add "$ADDR_V4" dev wgcf
           sudo ip addr add "$ADDR_V6" dev wgcf
-          sudo ip route add "$EP_IP/32" via "$GW" dev "$DEV"
-          sudo ip route add 168.63.129.16/32 via "$GW" dev "$DEV" 2>/dev/null || true
           sudo ip -4 route replace 0.0.0.0/0 dev wgcf
           sudo ip -6 route replace ::/0 dev wgcf
+          # MSS 钳制:WARP MTU=1280,避免 PMTUD 失败导致大包黑洞(Connection reset / 速度劣化)
+          sudo iptables -t mangle -A OUTPUT -o wgcf -p tcp \
+            --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+          # DNS 切换为 Cloudflare IPv6(走 WARP v6 隧道;原 Azure DNS 已不可达依赖)
+          if curl -6 -sS --max-time 5 -o /dev/null "https://2606:4700:4700::1111" 2>/dev/null \
+             || ping6 -c1 -W3 2606:4700:4700::1111 > /dev/null 2>&1; then
+            printf '%s\n' "nameserver 2606:4700:4700::1111" "nameserver 2606:4700:4700::1001" \
+              | sudo tee /etc/resolv.conf > /dev/null
+            echo ">>> DNS 已切换为 Cloudflare IPv6(经 WARP v6 隧道)"
+          else
+            echo "::warning::Cloudflare IPv6 DNS 不可达,保留原有 DNS 配置"
+          fi
           echo ">>> gai.conf:v4 优先(上传流量走 WARP v4);v6 隧道保留但不引导(gai.conf 不偏向 v6)"
           printf '%s\n' \
             'precedence  ::1/128       50' \

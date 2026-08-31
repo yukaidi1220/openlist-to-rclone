@@ -399,7 +399,7 @@ jobs:
           # 走向说明:出口由 warp_mode 输入决定(bare=原生直连;其余模式见 WARP 步骤)
           rclone copy "$SRC" "$DST" \
             --size-only --no-check-certificate \
-            --transfers 20 --checkers 2 \
+            --transfers 8 --checkers 2 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -v 2>&1 | tee copy.log
 
@@ -412,7 +412,7 @@ jobs:
           # 仅限 SRC/DST 前缀内,配合 --size-only(wopan mtime 不可改)
           rclone sync "$SRC" "$DST" \
             --size-only --no-check-certificate \
-            --transfers 20 --checkers 2 \
+            --transfers 8 --checkers 2 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -v 2>&1 | tee copy.log
 

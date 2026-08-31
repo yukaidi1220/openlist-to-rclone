@@ -60,6 +60,9 @@ jobs:
       WOPAN_UPLOAD_CUTOFF: 64Mi
       WOPAN_CHUNK_SIZE: 8Mi
       WOPAN_UPLOAD_CONCURRENCY: '4'
+      # 多线程复制触发阈值:≥此大小的文件走 源端 Range 并行下载 + OpenChunkWriter 并发上传
+      # (源码核实:分片边界= wopan chunk_size,streams 取大逻辑自动用 backend concurrency,无需传 --multi-thread-streams)
+      WOPAN_MT_CUTOFF: 256Mi
     steps:
       - name: Fetch oss2wopan.conf from private repo
         env:
@@ -411,6 +414,7 @@ jobs:
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
+            --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -v 2>&1 | tee copy.log
 
@@ -427,6 +431,7 @@ jobs:
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
+            --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -v 2>&1 | tee copy.log
 

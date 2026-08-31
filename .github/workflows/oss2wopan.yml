@@ -541,13 +541,12 @@ jobs:
         env:
           RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
           REPO_OWNER: ${{ github.repository_owner }}
-          CONF_PATH: ${{ inputs.config_file }}
         run: |
           # wopan refresh_token 是轮换型:执行器刷新后旧值作废,必须回写。
-          # 回写目标 = 本次使用的配置文件(config_file 输入;时间戳文件只增不改,
-          # 下轮 launcher 从目录内最新一份继承 token,链条不断)。
+          # 回写目标 = 根目录 oss2wopan.conf(launcher 每轮固定从它继承,链条不断;
+          # 根目录成为唯一权威配置;master 组全局串行,无并发回写竞态)。
           # 仍只在「远端最新内容」上替换 token 行,绝不整份覆盖。
-          CONF_PATH="${CONF_PATH:-oss2wopan.conf}"
+          CONF_PATH="oss2wopan.conf"
           if [ "${{ inputs.no_refresh }}" = "true" ]; then
             echo "no_refresh 模式:本 run 未持有 refresh_token 也未刷新,跳过回写"
             exit 0

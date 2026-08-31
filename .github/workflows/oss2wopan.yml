@@ -55,11 +55,12 @@ jobs:
       RCLONE_CONFIG: /tmp/oss2wopan.conf
       # wopan 并发分片上传参数(指引:wopan-review/20-单流下载并发上传实施指引.md §5)
       # 仅对新版 rclone(含 uploadPartsConcurrent 的 release)有效;旧 binary 会报 unknown flag
-      # 内存预算 ≈ chunk_size × upload_concurrency × transfers(8Mi×4×8 = 256MiB,runner 无压力)
-      # 调参顺序:单流极限 → 4 → ×2(8→16),停在速度拐点(服务端可能对同会话并发限流)
+      # 内存预算 ≈ chunk_size × upload_concurrency × transfers(24Mi×8×8 = 1.5GiB,runner 7G 无压力)
+      # ≥WOPAN_MT_CUTOFF 的文件走 MT 路径,下载侧 streams 同样取 upload_concurrency(8),内存同公式
+      # 调参顺序:单流极限 → 4 → 8 → 16,停在速度拐点(服务端可能对同会话并发限流)
       WOPAN_UPLOAD_CUTOFF: 64Mi
       WOPAN_CHUNK_SIZE: 24Mi
-      WOPAN_UPLOAD_CONCURRENCY: '4'
+      WOPAN_UPLOAD_CONCURRENCY: '8'
       # 多线程复制触发阈值:≥此大小的文件走 源端 Range 并行下载 + OpenChunkWriter 并发上传
       # (源码核实:分片边界= wopan chunk_size,streams 取大逻辑自动用 backend concurrency,无需传 --multi-thread-streams)
       WOPAN_MT_CUTOFF: 256Mi

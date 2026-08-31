@@ -448,7 +448,7 @@ jobs:
           # 阶段一:只处理 ≤1G 小文件,--transfers 15 高并发(小文件多,提升吞吐)。
           # --max-size 1G = 只传严格小于 1G 的文件;≥1G 的留给阶段二。
           rclone copy "$SRC" "$DST" \
-            --size-only --ignore-checksum --no-check-certificate \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --max-size 1G --transfers 15 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
@@ -456,6 +456,9 @@ jobs:
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee copy.log
+          rc=${PIPESTATUS[0]}
+          # 敏感词拒收等 wopan 端不可规避错误,重试后仍会使 rclone 非 0 退出;放行并留日志供核对,不中断 CI
+          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段一存在文件级错误,已放行;详见 copy.log)"; fi
       - name: Copy - 阶段二 全量(不限制大小,size-only 跳过已传)
         if: inputs.mode == 'copy'
         run: |
@@ -463,7 +466,7 @@ jobs:
           set -o pipefail
           # 阶段二:不限制大小,全量扫描;已由阶段一传过的文件 --size-only 自动跳过。
           rclone copy "$SRC" "$DST" \
-            --size-only --ignore-checksum --no-check-certificate \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 4 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
@@ -471,6 +474,9 @@ jobs:
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log
+          rc=${PIPESTATUS[0]}
+          # 同阶段一:文件级错误放行,不中断 CI
+          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段二存在文件级错误,已放行;详见 copy.log)"; fi
 
       - name: Sync - 阶段一 小文件(≤1G)高并发
         if: inputs.mode == 'sync'
@@ -480,7 +486,7 @@ jobs:
           # sync = 源→目标单向镜像:目标前缀下不在源桶的文件会被删除(wopan 默认进回收站)。
           # 阶段一:只处理 ≤1G 小文件,--transfers 15 高并发(小文件多,提升吞吐)。
           rclone sync "$SRC" "$DST" \
-            --size-only --ignore-checksum --no-check-certificate \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --max-size 1G --transfers 15 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
@@ -488,6 +494,9 @@ jobs:
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee copy.log
+          rc=${PIPESTATUS[0]}
+          # 敏感词拒收等 wopan 端不可规避错误,重试后仍会使 rclone 非 0 退出;放行并留日志供核对,不中断 CI
+          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段一存在文件级错误,已放行;详见 copy.log)"; fi
       - name: Sync - 阶段二 全量(不限制大小,size-only 跳过已传)
         if: inputs.mode == 'sync'
         run: |
@@ -495,7 +504,7 @@ jobs:
           set -o pipefail
           # 阶段二:不限制大小,全量扫描;已由阶段一传过的文件 --size-only 自动跳过。
           rclone sync "$SRC" "$DST" \
-            --size-only --ignore-checksum --no-check-certificate \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 4 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
@@ -503,6 +512,9 @@ jobs:
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log
+          rc=${PIPESTATUS[0]}
+          # 同阶段一:文件级错误放行,不中断 CI
+          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段二存在文件级错误,已放行;详见 copy.log)"; fi
 
       # ---- 校验 ----
       - name: Verify - full one-way check (size, wopan hash 沉降不适用)
@@ -510,8 +522,11 @@ jobs:
         run: |
           . /tmp/paths.src
           set -o pipefail
-          rclone check "$SRC" "$DST" --one-way --size-only -v 2>&1 | tee check.log
-          echo "full one-way size check PASSED" >> "$GITHUB_STEP_SUMMARY"
+          rclone check "$SRC" "$DST" --one-way --size-only --ignore-errors -v 2>&1 | tee check.log
+          rc=${PIPESTATUS[0]}
+          # 敏感词目录目标缺失等会令 check 非 0;放行并警告(随机样本 md5 校验兜底完整性)
+          if [ "$rc" -ne 0 ]; then echo "::warning::rclone check exit=$rc(存在目标缺失/错误,已放行;详见 check.log)"; fi
+          echo "full one-way size check done (rc=$rc)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify - random sample content md5 (双端真实下载)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}

@@ -73,7 +73,7 @@ jobs:
       RCLONE_CONFIG: /tmp/oss2wopan.conf
       # wopan 并发分片上传参数(指引:wopan-review/20-单流下载并发上传实施指引.md §5)
       # 仅对新版 rclone(含 uploadPartsConcurrent 的 release)有效;旧 binary 会报 unknown flag
-      # 内存预算 ≈ chunk_size × upload_concurrency × transfers(32Mi×48×2 = 3GiB,runner 16GiB 可承受,OOM 需盯)
+      # 内存预算 ≈ chunk_size × upload_concurrency × transfers(32Mi×48×8 = 12GiB,runner 16GiB 偏紧,OOM 需盯)
       # ≥WOPAN_MT_CUTOFF 的文件走 MT 路径,下载侧 streams 同样取 upload_concurrency(48),内存同公式
       # 调参顺序:单流极限 → 4 → 8 → 16 → 48,停在速度拐点(服务端可能对同会话并发限流)
       WOPAN_UPLOAD_CUTOFF: 64Mi
@@ -441,7 +441,7 @@ jobs:
           # 走向说明:出口由 warp_mode 输入决定(bare=原生直连;其余模式见 WARP 步骤)
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate \
-            --transfers 2 --checkers 2 \
+            --transfers 8 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
@@ -458,7 +458,7 @@ jobs:
           # 仅限 SRC/DST 前缀内,配合 --size-only(wopan mtime 不可改);--ignore-checksum 同 copy
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate \
-            --transfers 2 --checkers 2 \
+            --transfers 8 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \

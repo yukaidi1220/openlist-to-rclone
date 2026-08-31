@@ -33,6 +33,10 @@ on:
         description: "迁移路径前缀(留空=整桶,相对桶根)"
         required: false
         default: ""
+      src_bucket:
+        description: "源桶名(launcher 自动填入,用于 no_refresh 小任务按桶分组并行;手动直触留空则退化为统一组串行)"
+        required: false
+        default: ""
       config_file:
         description: "私有仓配置文件路径(相对仓库根。launcher 生成的时间戳配置在 oss2wopan-configs/ 下;留默认用根目录 oss2wopan.conf)"
         required: false
@@ -55,9 +59,9 @@ on:
 
 concurrency:
   # 动态分组:
-  #   no_refresh=true  → oss2wopan-free-<path>:同路径互斥,不同路径可并行(不碰 refresh_token,与主 run 并存安全)
+  #   no_refresh=true  → oss2wopan-free-<src_bucket>-<path>:同桶同路径互斥,同桶不同路径/不同桶可并行(不碰 refresh_token,与主 run 并存安全)
   #   no_refresh=false → oss2wopan-master:主 run 全局串行,独占 wopan refresh_token 刷新权(轮换型 token 并发刷新互踢)
-  group: ${{ inputs.no_refresh && format('oss2wopan-free-{0}', inputs.path) || 'oss2wopan-master' }}
+  group: ${{ inputs.no_refresh && format('oss2wopan-free-{0}-{1}', inputs.src_bucket, inputs.path) || 'oss2wopan-master' }}
   cancel-in-progress: false
 
 jobs:

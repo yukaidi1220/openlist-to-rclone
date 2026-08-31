@@ -82,12 +82,13 @@ jobs:
       RCLONE_CONFIG: /tmp/oss2wopan.conf
       # wopan 并发分片上传参数(指引:wopan-review/20-单流下载并发上传实施指引.md §5)
       # 仅对新版 rclone(含 uploadPartsConcurrent 的 release)有效;旧 binary 会报 unknown flag
-      # 内存预算 ≈ chunk_size × upload_concurrency × transfers(最坏=阶段一 32Mi×30×15 ≈ 14GiB,runner 16GiB 可承受;阶段二 32Mi×30×4 ≈ 3.8GiB)
-      # ≥WOPAN_MT_CUTOFF 的文件走 MT 路径,下载侧 streams 同样取 upload_concurrency(30),内存同公式
-      # 调参顺序:单流极限 → 4 → 8 → 16 → 48 → 96 → 30,停在速度拐点(服务端可能对同会话并发限流)
+      # 内存预算:阶段一 ≤1G 小文件 32Mi×30×15 ≈ 14GiB;阶段二全量 32Mi×96×4 ≈ 12GiB(runner 16GiB 均偏紧,OOM 需盯)
+      # ≥WOPAN_MT_CUTOFF 的文件走 MT 路径,下载侧 streams 同样取对应 upload_concurrency,内存同公式
+      # 调参顺序:单流极限 → 4 → 8 → 16 → 48 → 96,停在速度拐点(服务端可能对同会话并发限流)
       WOPAN_UPLOAD_CUTOFF: 64Mi
       WOPAN_CHUNK_SIZE: 32Mi
-      WOPAN_UPLOAD_CONCURRENCY: '30'
+      WOPAN_UPLOAD_CONCURRENCY: '96'          # 阶段二(全量)单文件分片并发
+      WOPAN_UPLOAD_CONCURRENCY_STAGE1: '30'   # 阶段一(≤1G 小文件)单文件分片并发
       # 多线程复制触发阈值:≥此大小的文件走 源端 Range 并行下载 + OpenChunkWriter 并发上传
       # (源码核实:分片边界= wopan chunk_size,streams 取大逻辑自动用 backend concurrency,无需传 --multi-thread-streams)
       WOPAN_MT_CUTOFF: 256Mi
@@ -451,7 +452,7 @@ jobs:
             --max-size 1G --transfers 15 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
-            --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
+            --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY_STAGE1" \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee copy.log
@@ -483,7 +484,7 @@ jobs:
             --max-size 1G --transfers 15 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
-            --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
+            --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY_STAGE1" \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee copy.log

@@ -37,6 +37,11 @@ on:
         description: "私有仓配置文件路径(相对仓库根。launcher 生成的时间戳配置在 oss2wopan-configs/ 下;留默认用根目录 oss2wopan.conf)"
         required: false
         default: "oss2wopan.conf"
+      no_refresh:
+        description: "并行小任务勾选:conf 中剥离 refresh_token,本 run 永不刷新(401 安全失败,不踢其他 run),也跳过 token 回写"
+        type: boolean
+        required: false
+        default: false
       warp_mode:
         description: "WARP 出口模式(仅 copy/sync 生效)。bare=不装 WARP(生产默认);v6-only=仅 v6 进隧道;v4-only=仅 v4 进隧道;dual=双栈都进隧道"
         type: choice
@@ -49,7 +54,10 @@ on:
           - dual
 
 concurrency:
-  group: oss2wopan
+  # 动态分组:
+  #   no_refresh=true  → oss2wopan-free-<path>:同路径互斥,不同路径可并行(不碰 refresh_token,与主 run 并存安全)
+  #   no_refresh=false → oss2wopan-master:主 run 全局串行,独占 wopan refresh_token 刷新权(轮换型 token 并发刷新互踢)
+  group: ${{ inputs.no_refresh && format('oss2wopan-free-{0}', inputs.path) || 'oss2wopan-master' }}
   cancel-in-progress: false
 
 jobs:
@@ -101,6 +109,12 @@ jobs:
           done
           [ -f "$RCLONE_CONFIG" ] || { echo "::error::无法获取 $CONF_PATH"; exit 1; }
           [ -f /tmp/dstbase ] || { echo "::error::无法获取 $DSTBASE_PATH"; exit 1; }
+          # no_refresh 模式:剥离 refresh_token(backend 无 refresh_token 即永不刷新,
+          # 401 时安全失败而非互踢);回写步骤同样跳过
+          if [ "${{ inputs.no_refresh }}" = "true" ]; then
+            sed -i '/^refresh_token/d' "$RCLONE_CONFIG"
+            echo "no_refresh 模式:已剥离 refresh_token"
+          fi
 
       - name: Parse config & set paths
         env:
@@ -529,6 +543,10 @@ jobs:
           # 下轮 launcher 从目录内最新一份继承 token,链条不断)。
           # 仍只在「远端最新内容」上替换 token 行,绝不整份覆盖。
           CONF_PATH="${CONF_PATH:-oss2wopan.conf}"
+          if [ "${{ inputs.no_refresh }}" = "true" ]; then
+            echo "no_refresh 模式:本 run 未持有 refresh_token 也未刷新,跳过回写"
+            exit 0
+          fi
           if [ ! -f "$RCLONE_CONFIG" ]; then echo "conf 已清理,跳过"; exit 0; fi
           NEW_REFRESH=$(awk -F' *= *' '/^\[wopan\]/{f=1;next} /^\[/{f=0} f&&$1=="refresh_token"{print $2}' "$RCLONE_CONFIG")
           NEW_ACCESS=$(awk  -F' *= *' '/^\[wopan\]/{f=1;next} /^\[/{f=0} f&&$1=="access_token"{print $2}'  "$RCLONE_CONFIG")

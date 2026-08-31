@@ -417,7 +417,7 @@ jobs:
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
-            --stats 30s -v 2>&1 | tee copy.log
+            --stats 30s -vv 2>&1 | tee copy.log
 
       - name: Sync (镜像目标,会删除目标端多余文件)
         if: inputs.mode == 'sync'
@@ -434,7 +434,7 @@ jobs:
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
-            --stats 30s -v 2>&1 | tee copy.log
+            --stats 30s -vv 2>&1 | tee copy.log
 
       # ---- 校验 ----
       - name: Verify - full one-way check (size, wopan hash 沉降不适用)

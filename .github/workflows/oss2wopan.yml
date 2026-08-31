@@ -418,11 +418,11 @@ jobs:
           set -o pipefail
           # dry-run 展示:sync 模式显示 Would delete 清单,copy 模式显示 Would copy;流式 stats 便于观察
           rclone copy "$SRC" "$DST" --dry-run \
-            --size-only --no-check-certificate \
+            --size-only --ignore-checksum --no-check-certificate \
             --transfers 4 --checkers 8 \
             --stats 60s -v 2>&1 | tee copy.log
           rclone sync "$SRC" "$DST" --dry-run \
-            --size-only --no-check-certificate \
+            --size-only --ignore-checksum --no-check-certificate \
             --transfers 4 --checkers 8 \
             --stats 60s -v 2>&1 | tee -a copy.log
 

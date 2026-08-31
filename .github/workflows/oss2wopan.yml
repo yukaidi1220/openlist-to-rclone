@@ -3,6 +3,8 @@
 # 目标路径:s3-bak/<源桶名>/<原 key>,桶内结构原封保留。
 # 源端:列表/元数据走签名 API,内容经 CDN 预签名下载(download_host)。
 # 目标端:wopan token 直传。
+# 配置:路径由 config_file 输入指定(launcher 每轮生成时间戳配置于私有仓
+#       oss2wopan-configs/ 并随 dispatch 传入;手动触发不填则用根目录 oss2wopan.conf)。
 #
 # wopan 特有限制(详见 rclone wopan 文档):
 #   - 上传后 mtime 不可改 → copy 必须带 --size-only,否则每轮都全量重传
@@ -31,6 +33,10 @@ on:
         description: "迁移路径前缀(留空=整桶,相对桶根)"
         required: false
         default: ""
+      config_file:
+        description: "私有仓配置文件路径(相对仓库根。launcher 生成的时间戳配置在 oss2wopan-configs/ 下;留默认用根目录 oss2wopan.conf)"
+        required: false
+        default: "oss2wopan.conf"
       warp_mode:
         description: "WARP 出口模式(仅 copy/sync 生效)。bare=不装 WARP(生产默认);v6-only=仅 v6 进隧道;v4-only=仅 v4 进隧道;dual=双栈都进隧道"
         type: choice
@@ -65,22 +71,27 @@ jobs:
       # (源码核实:分片边界= wopan chunk_size,streams 取大逻辑自动用 backend concurrency,无需传 --multi-thread-streams)
       WOPAN_MT_CUTOFF: 256Mi
     steps:
-      - name: Fetch oss2wopan.conf from private repo
+      - name: Fetch config from private repo
         env:
           RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
           REPO_OWNER: ${{ github.repository_owner }}
+          CONF_PATH: ${{ inputs.config_file }}
         run: |
           umask 077
+          CONF_PATH="${CONF_PATH:-oss2wopan.conf}"
+          # dstbase 与 conf 同目录同名(仅后缀不同)
+          DSTBASE_PATH="${CONF_PATH%.conf}.dstbase"
+          echo "config: $CONF_PATH / dstbase: $DSTBASE_PATH"
           for i in {1..3}; do
             if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
               -H "Authorization: token $RCLONE_PAT" \
               -H "Accept: application/vnd.github.v3.raw" \
-              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/$CONF_PATH" \
               -o "$RCLONE_CONFIG" \
               && curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
               -H "Authorization: token $RCLONE_PAT" \
               -H "Accept: application/vnd.github.v3.raw" \
-              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.dstbase" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/$DSTBASE_PATH" \
               -o /tmp/dstbase; then
               echo "配置获取成功"
               break
@@ -88,8 +99,8 @@ jobs:
             echo "获取失败,重试 $i/3..."
             sleep $((i * 5))
           done
-          [ -f "$RCLONE_CONFIG" ] || { echo "::error::无法获取 oss2wopan.conf"; exit 1; }
-          [ -f /tmp/dstbase ] || { echo "::error::无法获取 oss2wopan.dstbase"; exit 1; }
+          [ -f "$RCLONE_CONFIG" ] || { echo "::error::无法获取 $CONF_PATH"; exit 1; }
+          [ -f /tmp/dstbase ] || { echo "::error::无法获取 $DSTBASE_PATH"; exit 1; }
 
       - name: Parse config & set paths
         env:
@@ -511,17 +522,20 @@ jobs:
         env:
           RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
           REPO_OWNER: ${{ github.repository_owner }}
+          CONF_PATH: ${{ inputs.config_file }}
         run: |
           # wopan refresh_token 是轮换型:执行器刷新后旧值作废,必须回写。
-          # 只在「远端最新 conf」上替换 token 行,绝不整份覆盖——
-          # 防止运行期间有人改了域名等其他字段被本步骤回滚(曾发生竞态)。
+          # 回写目标 = 本次使用的配置文件(config_file 输入;时间戳文件只增不改,
+          # 下轮 launcher 从目录内最新一份继承 token,链条不断)。
+          # 仍只在「远端最新内容」上替换 token 行,绝不整份覆盖。
+          CONF_PATH="${CONF_PATH:-oss2wopan.conf}"
           if [ ! -f "$RCLONE_CONFIG" ]; then echo "conf 已清理,跳过"; exit 0; fi
           NEW_REFRESH=$(awk -F' *= *' '/^\[wopan\]/{f=1;next} /^\[/{f=0} f&&$1=="refresh_token"{print $2}' "$RCLONE_CONFIG")
           NEW_ACCESS=$(awk  -F' *= *' '/^\[wopan\]/{f=1;next} /^\[/{f=0} f&&$1=="access_token"{print $2}'  "$RCLONE_CONFIG")
           [ -n "$NEW_REFRESH" ] || { echo "::warning::未解析到 refresh_token"; exit 0; }
           for attempt in 1 2 3; do
             RESP=$(curl -fsS -H "Authorization: token $RCLONE_PAT" \
-              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf") || RESP=""
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/$CONF_PATH") || RESP=""
             OLD_SHA=$(echo "$RESP" | jq -r '.sha // empty')
             if [ -z "$OLD_SHA" ]; then echo "::warning::获取远端 conf 失败(第 $attempt 次)"; sleep 5; continue; fi
             echo "$RESP" | jq -r '.content' | base64 -d > /tmp/conf.remote 2>/dev/null || true
@@ -541,8 +555,8 @@ jobs:
             if curl -fsS -X PUT -H "Authorization: token $RCLONE_PAT" \
               -H "Accept: application/vnd.github.v3.raw" \
               -d "$BODY" \
-              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/oss2wopan.conf" > /dev/null; then
-              echo "token 已回写私有仓(仅 token 字段,其余配置以远端为准)"
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/$CONF_PATH" > /dev/null; then
+              echo "token 已回写私有仓 $CONF_PATH(仅 token 字段,其余配置以远端为准)"
               exit 0
             fi
             echo "::warning::回写冲突(第 $attempt 次,远端有新提交),重新获取后重试"

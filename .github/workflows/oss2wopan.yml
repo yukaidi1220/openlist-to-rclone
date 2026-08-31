@@ -58,7 +58,7 @@ jobs:
       # 内存预算 ≈ chunk_size × upload_concurrency × transfers(8Mi×4×8 = 256MiB,runner 无压力)
       # 调参顺序:单流极限 → 4 → ×2(8→16),停在速度拐点(服务端可能对同会话并发限流)
       WOPAN_UPLOAD_CUTOFF: 64Mi
-      WOPAN_CHUNK_SIZE: 8Mi
+      WOPAN_CHUNK_SIZE: 24Mi
       WOPAN_UPLOAD_CONCURRENCY: '4'
       # 多线程复制触发阈值:≥此大小的文件走 源端 Range 并行下载 + OpenChunkWriter 并发上传
       # (源码核实:分片边界= wopan chunk_size,streams 取大逻辑自动用 backend concurrency,无需传 --multi-thread-streams)

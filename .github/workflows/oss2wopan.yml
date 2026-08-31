@@ -14,7 +14,8 @@
 #
 # 断点语义:copy 粒度为整文件,重跑自动跳过已存在(--size-only)的文件。
 
-name: OSS2wopan migrate (${{ inputs.src_bucket }} | ${{ inputs.cdn_base }} | ${{ inputs.upload_zone }})
+name: OSS2wopan migrate
+run-name: OSS2wopan migrate (${{ inputs.src_bucket }} | ${{ inputs.cdn_base }} | ${{ inputs.upload_zone }})
 
 on:
   workflow_dispatch:

@@ -432,10 +432,11 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           # --size-only: wopan mtime 不可改,必须按大小判增
+          # --ignore-checksum: 跳过上传后的 MD5 校验失败重传(wopan 服务端哈希沉降不可靠,由 verify 阶段兜底)
           # --no-check-certificate: 源 endpoint CNAME 到 aliyuncs,证书不匹配
           # 走向说明:出口由 warp_mode 输入决定(bare=原生直连;其余模式见 WARP 步骤)
           rclone copy "$SRC" "$DST" \
-            --size-only --no-check-certificate \
+            --size-only --ignore-checksum --no-check-certificate \
             --transfers 2 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
@@ -450,9 +451,9 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           # sync = 源→目标单向镜像:目标前缀下不在源桶的文件会被删除(wopan 默认进回收站)。
-          # 仅限 SRC/DST 前缀内,配合 --size-only(wopan mtime 不可改)
+          # 仅限 SRC/DST 前缀内,配合 --size-only(wopan mtime 不可改);--ignore-checksum 同 copy
           rclone sync "$SRC" "$DST" \
-            --size-only --no-check-certificate \
+            --size-only --ignore-checksum --no-check-certificate \
             --transfers 2 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \

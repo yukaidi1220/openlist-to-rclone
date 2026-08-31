@@ -439,15 +439,28 @@ jobs:
             --transfers 4 --checkers 8 \
             --stats 60s -v 2>&1 | tee -a copy.log
 
-      - name: Copy
+      - name: Copy - 阶段一 小文件(≤1G)高并发
         if: inputs.mode == 'copy'
         run: |
           . /tmp/paths.src
           set -o pipefail
-          # --size-only: wopan mtime 不可改,必须按大小判增
-          # --ignore-checksum: 跳过上传后的 MD5 校验失败重传(wopan 服务端哈希沉降不可靠,由 verify 阶段兜底)
-          # --no-check-certificate: 源 endpoint CNAME 到 aliyuncs,证书不匹配
-          # 走向说明:出口由 warp_mode 输入决定(bare=原生直连;其余模式见 WARP 步骤)
+          # 阶段一:只处理 ≤1G 小文件,--transfers 15 高并发(小文件多,提升吞吐)。
+          # --max-size 1G = 只传严格小于 1G 的文件;≥1G 的留给阶段二。
+          rclone copy "$SRC" "$DST" \
+            --size-only --ignore-checksum --no-check-certificate \
+            --max-size 1G --transfers 15 --checkers 2 \
+            --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
+            --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
+            --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
+            --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
+            --retries 5 --low-level-retries 20 \
+            --stats 30s -vv 2>&1 | tee copy.log
+      - name: Copy - 阶段二 全量(不限制大小,size-only 跳过已传)
+        if: inputs.mode == 'copy'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          # 阶段二:不限制大小,全量扫描;已由阶段一传过的文件 --size-only 自动跳过。
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate \
             --transfers 4 --checkers 2 \
@@ -456,15 +469,30 @@ jobs:
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
-            --stats 30s -vv 2>&1 | tee copy.log
+            --stats 30s -vv 2>&1 | tee -a copy.log
 
-      - name: Sync (镜像目标,会删除目标端多余文件)
+      - name: Sync - 阶段一 小文件(≤1G)高并发
         if: inputs.mode == 'sync'
         run: |
           . /tmp/paths.src
           set -o pipefail
           # sync = 源→目标单向镜像:目标前缀下不在源桶的文件会被删除(wopan 默认进回收站)。
-          # 仅限 SRC/DST 前缀内,配合 --size-only(wopan mtime 不可改);--ignore-checksum 同 copy
+          # 阶段一:只处理 ≤1G 小文件,--transfers 15 高并发(小文件多,提升吞吐)。
+          rclone sync "$SRC" "$DST" \
+            --size-only --ignore-checksum --no-check-certificate \
+            --max-size 1G --transfers 15 --checkers 2 \
+            --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
+            --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
+            --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
+            --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
+            --retries 5 --low-level-retries 20 \
+            --stats 30s -vv 2>&1 | tee copy.log
+      - name: Sync - 阶段二 全量(不限制大小,size-only 跳过已传)
+        if: inputs.mode == 'sync'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          # 阶段二:不限制大小,全量扫描;已由阶段一传过的文件 --size-only 自动跳过。
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate \
             --transfers 4 --checkers 2 \
@@ -473,7 +501,7 @@ jobs:
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
-            --stats 30s -vv 2>&1 | tee copy.log
+            --stats 30s -vv 2>&1 | tee -a copy.log
 
       # ---- 校验 ----
       - name: Verify - full one-way check (size, wopan hash 沉降不适用)

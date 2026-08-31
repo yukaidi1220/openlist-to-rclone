@@ -51,6 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     env:
+      TZ: Asia/Shanghai
       RCLONE_CONFIG: /tmp/oss2wopan.conf
     steps:
       - name: Fetch oss2wopan.conf from private repo

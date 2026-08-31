@@ -14,7 +14,7 @@
 #
 # 断点语义:copy 粒度为整文件,重跑自动跳过已存在(--size-only)的文件。
 
-name: OSS2wopan migrate
+name: OSS2wopan migrate (${{ inputs.src_bucket }} | ${{ inputs.cdn_base }} | ${{ inputs.upload_zone }})
 
 on:
   workflow_dispatch:
@@ -56,6 +56,14 @@ on:
           - v6-only
           - v4-only
           - dual
+      cdn_base:
+        description: "源桶 CDN 下载域名(launcher 自动填入,仅用于 run 标题辨识;实际下载域在 conf 的 download_host)"
+        required: false
+        default: ""
+      upload_zone:
+        description: "wopan 上传域(launcher 自动填入,仅用于 run 标题辨识;实际上传域在 conf 的 upload_zone)"
+        required: false
+        default: ""
 
 concurrency:
   # 动态分组:

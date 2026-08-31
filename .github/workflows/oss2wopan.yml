@@ -53,6 +53,13 @@ jobs:
     env:
       TZ: Asia/Shanghai
       RCLONE_CONFIG: /tmp/oss2wopan.conf
+      # wopan 并发分片上传参数(指引:wopan-review/20-单流下载并发上传实施指引.md §5)
+      # 仅对新版 rclone(含 uploadPartsConcurrent 的 release)有效;旧 binary 会报 unknown flag
+      # 内存预算 ≈ chunk_size × upload_concurrency × transfers(8Mi×4×8 = 256MiB,runner 无压力)
+      # 调参顺序:单流极限 → 4 → ×2(8→16),停在速度拐点(服务端可能对同会话并发限流)
+      WOPAN_UPLOAD_CUTOFF: 64Mi
+      WOPAN_CHUNK_SIZE: 8Mi
+      WOPAN_UPLOAD_CONCURRENCY: '4'
     steps:
       - name: Fetch oss2wopan.conf from private repo
         env:
@@ -401,6 +408,9 @@ jobs:
           rclone copy "$SRC" "$DST" \
             --size-only --no-check-certificate \
             --transfers 8 --checkers 3 \
+            --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
+            --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
+            --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -v 2>&1 | tee copy.log
 
@@ -414,6 +424,9 @@ jobs:
           rclone sync "$SRC" "$DST" \
             --size-only --no-check-certificate \
             --transfers 8 --checkers 3 \
+            --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
+            --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
+            --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -v 2>&1 | tee copy.log
 

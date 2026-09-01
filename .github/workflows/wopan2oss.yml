@@ -11,8 +11,8 @@
 #   - mtime 不可靠(上传时不可改)→ 必须用 --size-only 比对,否则全量重传
 #   - ≥8MiB 文件 MD5 有分钟级沉降窗口 → --ignore-checksum 关传输 hash 校验,
 #     完整性由结尾抽样双端下载 md5 兜底
-#   - 下载走 wopan 下发直链,单流;禁用多线程复制(--multi-thread-streams 1)
-#     避免 Range 分段在 wopan 直链上行为未验证
+#   - 下载走 wopan 下发直链:8 文件并发 × ≥100Mi 大文件 8 线程 Range 分段
+#     (wopan 直链 Range 未充分验证,内容正确性由结尾抽样双端下载 md5 兜底)
 #
 # 配置:路径由 config_file 输入指定(launcher 每轮生成时间戳配置于私有仓
 #       wopan2oss-configs/ 并随 dispatch 传入,同名 .srcbase 存源端基路径;
@@ -200,15 +200,17 @@ jobs:
           set -o pipefail
           set +e
           # --no-check-certificate: wopan 直链与 yukaidi.com(CNAME 到 aliyuncs)证书均不匹配
-          # --multi-thread-streams 1: 禁用多线程直写,wopan 直链 Range 行为未验证;
-          #   大文件走 单流下载 + s3 multipart(chunk 64M × 并发 2)
-          # --s3-no-head: 上传后免一次 HeadObject 验证,完整性由抽样 md5 兜底
+          # --transfers 8: 8 个文件并发
+          # --multi-thread-streams 8: ≥multi-thread-cutoff(默认 100Mi)的文件 8 线程
+          #   Range 分段下载(内容正确性由结尾抽样 md5 兜底)
+          # --s3-chunk-size 64M --s3-upload-concurrency 8: 每文件 8 个并发分片 PUT,
+          #   上传后保留 HeadObject 验证
+          # 内存预算:64M × 8(上传并发) × 8(文件) ≈ 4GiB,runner 16GiB 足够
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --fast-list \
             --transfers 8 --checkers 8 \
-            --multi-thread-streams 1 \
-            --s3-chunk-size 64M --s3-upload-concurrency 2 \
-            --s3-no-head \
+            --multi-thread-streams 8 \
+            --s3-chunk-size 64M --s3-upload-concurrency 8 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
@@ -223,12 +225,12 @@ jobs:
           set +e
           # 源→目标单向镜像:目标桶根下不在源端的文件会被删除。
           # --size-only: wopan 侧 mtime 不可靠,只能按大小比对。
+          # 传输参数与 Copy 一致:8 文件并发 × 8 线程分段下载 × 8 并发分片上传。
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --fast-list \
             --transfers 8 --checkers 8 \
-            --multi-thread-streams 1 \
-            --s3-chunk-size 64M --s3-upload-concurrency 2 \
-            --s3-no-head \
+            --multi-thread-streams 8 \
+            --s3-chunk-size 64M --s3-upload-concurrency 8 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee sync.log
           rc=${PIPESTATUS[0]}

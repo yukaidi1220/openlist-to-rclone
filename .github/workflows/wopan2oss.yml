@@ -1,8 +1,10 @@
 # 联通网盘(wopan) → 阿里云 OSS 回迁执行器(公开仓运行,凭据经私有仓 conf 注入)
 #
 # 与 oss2wopan.yml 互为逆操作:
-#   - 源端:wopan(s3-bak/<源桶名>/<原 key>,OSS2wopan 迁移的落盘结构)
-#   - 目标端:OSS 桶(AK/SK 直写,root=桶根,桶内结构原封还原)
+#   - 源端:wopan(s3-bak/<源桶名>/<rc4hex(源桶名)>/<原 key>,OSS2wopan 迁移的落盘结构)
+#   - 目标端:OSS 桶(AK/SK 直写;root=rc4hex(目的桶名) 前缀,桶内结构原封还原)
+#   - RC4 前缀映射(与 oss-migrate 同机制):剥掉 src 前缀、补上 dst 前缀,
+#     跨桶回迁自动重映射,同桶还原为恒等映射
 #   - 源端 wopan 段 token 继承私有仓根目录 oss2wopan.conf(launcher 生成)
 #
 # wopan 源端特有限制(详见 rclone wopan 文档):
@@ -123,13 +125,21 @@ jobs:
           [ -n "$SRC_BASE" ] || { echo "::error::无法确定 wopan 源端基路径(srcbase 为空且未传 src_bucket)"; exit 1; }
           DST_BUCKET=$(awk -F' *= *' '/^\[dst\]/{f=1;next} /^\[/{f=0} f&&$1=="bucket"{print $2}' "$RCLONE_CONFIG")
           [ -n "$DST_BUCKET" ] || { echo "::error::conf 缺少 dst.bucket"; exit 1; }
+          # RC4 前缀映射(launcher 写入 [map] 段,与 oss-migrate 同款机制):
+          # wopan 上对象 key 自带 rc4hex(源桶名) 前缀(OSS2wopan 迁移时原样保留),
+          # 回迁用 path 前缀映射:剥掉 src 前缀、补上 dst 前缀 →
+          #   同桶还原 = 恒等映射(对象回到原 key)
+          #   跨桶回迁 = 自动重映射为新桶的 rc4hex 前缀
+          SRC_PREFIX=$(awk -F' *= *' '/^\[map\]/{f=1;next} /^\[/{f=0} f&&$1=="src_prefix"{print $2}' "$RCLONE_CONFIG")
+          DST_PREFIX=$(awk -F' *= *' '/^\[map\]/{f=1;next} /^\[/{f=0} f&&$1=="dst_prefix"{print $2}' "$RCLONE_CONFIG")
+          [ -n "$SRC_PREFIX" ] && [ -n "$DST_PREFIX" ] || { echo "::error::conf 缺少 [map] src_prefix/dst_prefix(需由 wopan2oss launcher 生成)"; exit 1; }
           PARAM_PREFIX="$PATH_PREFIX"
           if [ -n "$PARAM_PREFIX" ]; then
-            SRC="wopan:$SRC_BASE/$PARAM_PREFIX"
-            DST="dst:$DST_BUCKET/$PARAM_PREFIX"
+            SRC="wopan:$SRC_BASE/$SRC_PREFIX/$PARAM_PREFIX"
+            DST="dst:$DST_BUCKET/$DST_PREFIX/$PARAM_PREFIX"
           else
-            SRC="wopan:$SRC_BASE"
-            DST="dst:$DST_BUCKET"
+            SRC="wopan:$SRC_BASE/$SRC_PREFIX"
+            DST="dst:$DST_BUCKET/$DST_PREFIX"
           fi
           { echo "set -a"; echo "SRC=$SRC"; echo "DST=$DST"; echo "set +a"; } > /tmp/paths.src
           echo "== paths.src =="

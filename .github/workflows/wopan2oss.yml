@@ -13,6 +13,8 @@
 #     完整性由结尾抽样双端下载 md5 兜底
 #   - 下载走 wopan 下发直链:8 文件并发 × ≥100Mi 大文件 8 线程 Range 分段
 #     (wopan 直链 Range 未充分验证,内容正确性由结尾抽样双端下载 md5 兜底)
+#   - 全局禁用 HTTP/2(RCLONE_DISABLE_HTTP2=true + [dst] disable_http2):
+#     H2 单连接被断会批量波及并发请求(see "use of closed network connection")
 #
 # WARP 出口模式(warp_mode,仅 copy/sync 生效;与 oss2wopan.yml 同一套实现):
 #   - bare=不装 WARP(生产默认);v6-only/v4-only/dual 为诊断用途
@@ -87,6 +89,10 @@ jobs:
     env:
       TZ: Asia/Shanghai
       RCLONE_CONFIG: /tmp/wopan2oss.conf
+      # 全局禁用 HTTP/2(作用于全局 transport,含 s3 backend 的 client):
+      # H2 单连接多路复用,连接被服务端/中间设备掐断时会波及该连接上全部并发
+      # 请求("use of closed network connection" 批量报错);HTTP/1.1 每请求独立连接
+      RCLONE_DISABLE_HTTP2: 'true'
     steps:
       - name: Fetch config from private repo
         env:
@@ -192,7 +198,7 @@ jobs:
           esac
           echo ">>> WARP 模式: $MODE (V4_WANT=$V4_WANT V6_WANT=$V6_WANT)"
           sudo apt-get update -qq
-          # tcpdump:proof test 抓包用(不预装);不用 wg-quick,无需 resolvconf
+          # tcpdump:诊断抓包用(不预装);不用 wg-quick,无需 resolvconf
           sudo apt-get install -y -qq wireguard-tools tcpdump
           curl -fsSL --retry 3 --retry-delay 5 \
             -o /tmp/wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
@@ -329,85 +335,6 @@ jobs:
           # 必须用带桶名的操作(命中泛解析);只读列根目录,不写任何数据
           rclone lsjson "$DST" --max-depth 1 --no-check-certificate > /dev/null
           echo "dst signed API OK (bucket-scoped)"
-
-      # ---- 上传协议族验证(tcpdump 铁证),与 oss2wopan 的 proof test 对应 ----
-      # 本方向是"从 wopan 下载":抓包对象改为 wopan 直链下载流量,
-      # 下载落到 runner 本地 /tmp(不往任何桶写测试文件),统计 v6/v4。
-      # 任何模式(含 bare)都执行:验证 wopan 直链实际走 v4 还是 v6。
-      - name: V6 proof test - tcpdump during small download (wopan direct link)
-        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' }}
-        run: |
-          . /tmp/paths.src
-          set -o pipefail
-          # 挑 2 个 256KiB~16MiB 的文件(太小看不出流量特征);区间没有再退回最小文件
-          mapfile -t FILES < <(rclone lsjson "$SRC" -R --files-only --min-size 256Ki --max-size 16Mi \
-            --no-mimetype --no-modtime --no-check-certificate | jq -r 'sort_by(.Size) | .[0:2][] | .Path')
-          if [ ${#FILES[@]} -lt 2 ]; then
-            mapfile -t FILES < <(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi \
-              --no-mimetype --no-modtime --no-check-certificate | jq -r 'sort_by(.Size) | .[0:2][] | .Path')
-          fi
-          echo "样本文件: ${FILES[*]}"
-          [ ${#FILES[@]} -gt 0 ] || { echo "::error::找不到小文件样本"; exit 1; }
-          # 消除 libibverbs 枚举接口的无害警告噪音
-          sudo mkdir -p /etc/libibverbs.d
-          # 开始抓包(any 接口,全流量,-s 0 全包长,保留 TLS Client Hello 与负载)
-          sudo rm -f /tmp/v6test.pcap /tmp/pcap.txt
-          sudo timeout 300 tcpdump -i any -s 0 -w /tmp/v6test.pcap 'ip6 or ip' & TCPDUMP_PID=$!
-          sleep 2
-          FAIL=0
-          for f in "${FILES[@]}"; do
-            echo ">>> 下载: $f"
-            # 与正式传输同参:8 线程分段下载,顺带验证 wopan 直链 Range 可用;
-            # 落到本地 /tmp,不写任何云端桶
-            if ! rclone copyto "$SRC/$f" "/tmp/v6test_$(basename "$f")" \
-              --size-only --ignore-checksum --no-check-certificate \
-              --multi-thread-streams 8 --transfers 1 --checkers 4 \
-              --retries 1 --low-level-retries 5 --contimeout 15s -v; then
-              FAIL=1
-              echo "::warning::下载失败: $f(pcap 已保留,继续统计)"
-            fi
-            rm -f "/tmp/v6test_$(basename "$f")"
-          done
-          sleep 3
-          sudo kill -INT "$TCPDUMP_PID" 2>/dev/null || true
-          sleep 2
-          # 先保存 pcap 到 workspace(供 artifact 上传),再做统计分析
-          sudo cp /tmp/v6test.pcap "$GITHUB_WORKSPACE/v6test.pcap"
-          sudo chown "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/v6test.pcap"
-          ls -l "$GITHUB_WORKSPACE/v6test.pcap"
-          # 统计
-          sudo tcpdump -nn -r /tmp/v6test.pcap 2>/dev/null > /tmp/pcap.txt || true
-          wc -l /tmp/pcap.txt
-          echo "===== 协议族包数 ====="
-          v6c=$(grep -c ' IP6 ' /tmp/pcap.txt || true)
-          v4c=$(grep ' IP ' /tmp/pcap.txt | grep -vc ' IP6 ' || true)
-          echo "IPv6 包数: $v6c"
-          echo "IPv4 包数: $v4c"
-          echo "===== IPv6 top 对端 ====="
-          grep ' IP6 ' /tmp/pcap.txt | awk '{print $3, " -> ", $5}' | sort | uniq -c | sort -rn | head -15 || true
-          echo "===== IPv4 top 对端 ====="
-          grep ' IP ' /tmp/pcap.txt | grep -v ' IP6 ' | awk '{print $3, " -> ", $5}' | sort | uniq -c | sort -rn | head -15 || true
-          # 自动判定:下载流量大头在哪个协议族
-          if [ "$v6c" -gt "$v4c" ] && [ "$v6c" -gt 100 ]; then
-            echo ">>> 结论:下载流量以 IPv6 为主(走了 WARP v6)"
-          elif [ "$v4c" -gt "$v6c" ] && [ "$v4c" -gt 100 ]; then
-            echo ">>> 结论:下载流量以 IPv4 为主(没走 v6!wopan 直链可能无 AAAA 或回退 v4)"
-          else
-            echo ">>> 结论:流量太少无法判定,请看 top 对端明细"
-          fi
-          if [ "$FAIL" = "1" ]; then
-            echo "::error::存在下载失败(当前出口到 wopan 直链大概率不通),详见上方 pcap 统计"
-            exit 1
-          fi
-
-      # pcap 原始文件 artifact(下载后即 zip 包,内含 v6test.pcap)
-      - name: Upload pcap artifact
-        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync') && always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: v6test-pcap
-          path: v6test.pcap
-          if-no-files-found: ignore
 
       # ---- 复制 ----
       - name: Copy (dry-run)

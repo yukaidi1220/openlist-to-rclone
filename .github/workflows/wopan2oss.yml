@@ -14,6 +14,10 @@
 #   - 下载走 wopan 下发直链:8 文件并发 × ≥100Mi 大文件 8 线程 Range 分段
 #     (wopan 直链 Range 未充分验证,内容正确性由结尾抽样双端下载 md5 兜底)
 #
+# WARP 出口模式(warp_mode,仅 copy/sync 生效;与 oss2wopan.yml 同一套实现):
+#   - bare=不装 WARP(生产默认);v6-only/v4-only/dual 为诊断用途
+#   - 实测备忘(2026-08-30):WARP v4 出口到 wopan 控制面不通;v6 可达但速度不理想
+#
 # 配置:路径由 config_file 输入指定(launcher 每轮生成时间戳配置于私有仓
 #       wopan2oss-configs/ 并随 dispatch 传入,同名 .srcbase 存源端基路径;
 #       手动直触不填则用根目录 wopan2oss.conf + srcbase 缺省 s3-bak/<src_bucket>)。
@@ -54,6 +58,16 @@ on:
         type: boolean
         required: false
         default: false
+      warp_mode:
+        description: "WARP 出口模式(仅 copy/sync 生效)。bare=不装 WARP(生产默认);v6-only=仅 v6 进隧道;v4-only=仅 v4 进隧道;dual=双栈都进隧道"
+        type: choice
+        required: false
+        default: "bare"
+        options:
+          - bare
+          - v6-only
+          - v4-only
+          - dual
       dst_bucket:
         description: "目标桶名(launcher 自动填入,仅用于 run 标题辨识;实际桶在 conf 的 [dst])"
         required: false
@@ -145,6 +159,145 @@ jobs:
           echo "== paths.src =="
           cat /tmp/paths.src
 
+      # ---- WARP(四条线,由 warp_mode 输入切换;bare 不执行本步骤)----
+      #   线4 bare    : 不装 WARP,全部流量走 runner 原生网络(生产迁移默认)
+      #   线1 v6-only : 仅 v6 进隧道,v4 保持原生直连
+      #   线3 v4-only : 仅 v4 进隧道,v6 不拉起
+      #   线2 dual    : v4+v6 都进隧道
+      # 实测备忘(2026-08-30,oss2wopan 期间):
+      #   - WARP v4 出口(104.28.x)到 wopan 控制面不通(run 33326950520 抓包证实)
+      #   - WARP v6 出口可达(上传走 v6 实锤),但速度不理想
+      #   → 生产迁移用 bare;其余三种模式仅作诊断用途
+      # 生死细节:v4 进隧道的模式(v4-only/dual)必须把 wireguard endpoint /32、
+      #   Azure 平台服务 168.63.129.16、私有/微软/GitHub 网段钉回原网关,
+      #   否则隧道封包进自己(路由循环)或 runner 失联。
+      - name: Setup Cloudflare WARP
+        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync') && inputs.warp_mode != 'bare' }}
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -e
+          MODE="${{ inputs.warp_mode }}"
+          case "$MODE" in
+            v6-only|v4-only|dual) ;;
+            "") echo "warp_mode 未指定,按 bare 跳过(兼容旧 launcher)"; exit 0 ;;
+            *) echo "::error::未知 warp_mode: $MODE"; exit 1 ;;
+          esac
+          V4_WANT=0; V6_WANT=0
+          case "$MODE" in
+            v6-only) V6_WANT=1 ;;
+            v4-only) V4_WANT=1 ;;
+            dual)    V4_WANT=1; V6_WANT=1 ;;
+          esac
+          echo ">>> WARP 模式: $MODE (V4_WANT=$V4_WANT V6_WANT=$V6_WANT)"
+          sudo apt-get update -qq
+          # tcpdump:proof test 抓包用(不预装);不用 wg-quick,无需 resolvconf
+          sudo apt-get install -y -qq wireguard-tools tcpdump
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o /tmp/wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
+          chmod +x /tmp/wgcf && sudo mv /tmp/wgcf /usr/local/bin/wgcf
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -H "Authorization: token $RCLONE_PAT" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
+            -o wgcf-account.toml || { echo "::error::拉取 wgcf-account.toml 失败"; exit 1; }
+          wgcf generate
+          # PrivateKey 打码后输出(公开仓 run 日志,私钥不能见)
+          echo "===== wgcf-profile.conf(PrivateKey 已打码)====="
+          sed 's/^PrivateKey.*/PrivateKey = ***REDACTED***/' wgcf-profile.conf
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          # profile 的 Address 是单行逗号分隔(如 "172.16.0.2/32, 2606:.../128"),必须按逗号拆
+          ADDR_V4=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep -v ':' | head -1)
+          ADDR_V6=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep ':' | head -1)
+          PEER_KEY=$(grep 'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep 'Endpoint' wgcf-profile.conf | awk '{print $NF}')
+          DEV=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+          GW=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -1)
+          echo "ADDR_V4=$ADDR_V4 ADDR_V6=$ADDR_V6 DEV=$DEV GW=$GW"
+          # 需要的地址必须齐全
+          [ "$V4_WANT" = "1" ] && [ -z "$ADDR_V4" ] && { echo "::error::WARP 未分配 IPv4 地址"; exit 1; }
+          [ "$V6_WANT" = "1" ] && [ -z "$ADDR_V6" ] && { echo "::error::WARP 未分配 IPv6 地址"; exit 1; }
+          # ---- 钉扎(在任何路由劫持之前执行)----
+          # endpoint /32 与 Azure 平台服务 168.63.129.16 无条件钉回原网关:
+          # v4 被劫持的模式(v4-only/dual)是生死线;v6-only 时 v4 未劫持,加了也无害
+          ENDPOINT_HOST=${ENDPOINT%%:*}
+          EP_PORT=${ENDPOINT##*:}
+          EP_IP=$(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null | head -1)
+          [ -n "$EP_IP" ] || { echo "::error::无法解析 WARP 端点,按要求终止"; exit 1; }
+          echo ">>> 钉扎:endpoint $EP_IP/32、Azure 平台服务 168.63.129.16/32 via $GW ($DEV)"
+          sudo ip route add "$EP_IP/32" via "$GW" dev "$DEV" 2>/dev/null || true
+          sudo ip route add 168.63.129.16/32 via "$GW" dev "$DEV" 2>/dev/null || true
+          if [ "$V4_WANT" = "1" ]; then
+            # 私有/保留 + 微软/Azure(20/8 13/8 52/8 168/8) + GitHub(140/8 185.199/16)
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 \
+                       20.0.0.0/8 13.0.0.0/8 52.0.0.0/8 168.0.0.0/8 \
+                       140.0.0.0/8 185.199.0.0/16; do
+              sudo ip route add "$NET" via "$GW" dev "$DEV" 2>/dev/null || \
+                sudo ip route add "$NET" via "$GW" 2>/dev/null || true
+            done
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            # v6:仅私有 ULA 走原始网卡(过宽的大区段不钉,避免 on-link 路由把有 AAAA 的目标弄不可达)
+            sudo ip -6 route add fc00::/7 dev "$DEV" 2>/dev/null || true
+          fi
+          # ---- 拉起接口与路由(按模式)----
+          sudo ip link add wgcf type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set wgcf private-key /dev/stdin
+          # wg endpoint 用钉扎过的 IP,杜绝 wg 内部二次解析与 dig 结果不一致导致钉扎失效
+          WG_ENDPOINT="${EP_IP}:${EP_PORT}"
+          if [ "$V4_WANT" = "1" ] && [ "$V6_WANT" = "1" ]; then
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "0.0.0.0/0, ::/0"
+          elif [ "$V4_WANT" = "1" ]; then
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "0.0.0.0/0"
+          else
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "::/0"
+          fi
+          sudo ip link set mtu 1280 up dev wgcf
+          [ "$V4_WANT" = "1" ] && sudo ip addr add "$ADDR_V4" dev wgcf
+          [ "$V6_WANT" = "1" ] && sudo ip addr add "$ADDR_V6" dev wgcf
+          [ "$V4_WANT" = "1" ] && sudo ip -4 route replace 0.0.0.0/0 dev wgcf
+          [ "$V6_WANT" = "1" ] && sudo ip -6 route replace ::/0 dev wgcf
+          # MSS 钳制:WARP MTU=1280,防 PMTUD 黑洞
+          if [ "$V4_WANT" = "1" ]; then
+            sudo iptables -t mangle -A OUTPUT -o wgcf -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            sudo ip6tables -t mangle -A OUTPUT -o wgcf -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+          fi
+          # ---- 出口探测与校验 ----
+          echo "===== IP 出口探测 ====="
+          if [ "$V4_WANT" = "1" ]; then
+            echo "--- dash.cloudflare trace (v4) ---"
+            curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v4 不通)"
+            w4=$(curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^warp=(on|plus)' || true)
+            case "$w4" in "warp=on"|"warp=plus") ;; *) echo "::error::WARP v4 未接管,终止"; exit 1 ;; esac
+          else
+            echo "--- dash.cloudflare trace (v4,应保持 runner 原生出口) ---"
+            curl -4 -sS --max-time 10 "https://www.cloudflare-cn.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v4 不通)"
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            echo "--- dash.cloudflare trace (v6) ---"
+            curl -6 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v6 不通)"
+            w6=$(curl -6 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^warp=(on|plus)' || true)
+            case "$w6" in "warp=on"|"warp=plus") ;; *) echo "::error::WARP v6 未接管,终止"; exit 1 ;; esac
+          fi
+          # wopan 控制面:v6 出口可达(硬校验);v4 出口已知被屏蔽(软校验)
+          if [ "$V6_WANT" = "1" ]; then
+            echo ">>> [硬校验] wopan 控制面经 WARP v6(panservice.mail.wo.cn)"
+            code=$(curl -6 -sS --max-time 15 -o /dev/null -w "%{http_code}" https://panservice.mail.wo.cn) \
+              || { echo "::error::wopan 控制面经 WARP v6 不通,终止"; exit 1; }
+            echo "wopan v6 HTTP $code"
+          fi
+          if [ "$V4_WANT" = "1" ]; then
+            echo ">>> [软校验] wopan 控制面经 WARP v4(已知可能被屏蔽,由 proof test 定论)"
+            code=$(curl -4 -sS --max-time 15 -o /dev/null -w "%{http_code}" https://panservice.mail.wo.cn) \
+              || echo "::warning::wopan 控制面经 WARP v4 不通(继续)"
+            echo "wopan v4 HTTP ${code:-N/A}"
+          fi
+
       - name: "Install rclone (custom build: wopan backend)"
         run: |
           URL="https://github.com/yukaidi1220/rclone/releases/latest/download/rclone-cdn-linux-amd64"
@@ -176,6 +329,85 @@ jobs:
           # 必须用带桶名的操作(命中泛解析);只读列根目录,不写任何数据
           rclone lsjson "$DST" --max-depth 1 --no-check-certificate > /dev/null
           echo "dst signed API OK (bucket-scoped)"
+
+      # ---- 上传协议族验证(tcpdump 铁证),与 oss2wopan 的 proof test 对应 ----
+      # 本方向是"从 wopan 下载":抓包对象改为 wopan 直链下载流量,
+      # 下载落到 runner 本地 /tmp(不往任何桶写测试文件),统计 v6/v4。
+      # 任何模式(含 bare)都执行:验证 wopan 直链实际走 v4 还是 v6。
+      - name: V6 proof test - tcpdump during small download (wopan direct link)
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' }}
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          # 挑 2 个 256KiB~16MiB 的文件(太小看不出流量特征);区间没有再退回最小文件
+          mapfile -t FILES < <(rclone lsjson "$SRC" -R --files-only --min-size 256Ki --max-size 16Mi \
+            --no-mimetype --no-modtime --no-check-certificate | jq -r 'sort_by(.Size) | .[0:2][] | .Path')
+          if [ ${#FILES[@]} -lt 2 ]; then
+            mapfile -t FILES < <(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi \
+              --no-mimetype --no-modtime --no-check-certificate | jq -r 'sort_by(.Size) | .[0:2][] | .Path')
+          fi
+          echo "样本文件: ${FILES[*]}"
+          [ ${#FILES[@]} -gt 0 ] || { echo "::error::找不到小文件样本"; exit 1; }
+          # 消除 libibverbs 枚举接口的无害警告噪音
+          sudo mkdir -p /etc/libibverbs.d
+          # 开始抓包(any 接口,全流量,-s 0 全包长,保留 TLS Client Hello 与负载)
+          sudo rm -f /tmp/v6test.pcap /tmp/pcap.txt
+          sudo timeout 300 tcpdump -i any -s 0 -w /tmp/v6test.pcap 'ip6 or ip' & TCPDUMP_PID=$!
+          sleep 2
+          FAIL=0
+          for f in "${FILES[@]}"; do
+            echo ">>> 下载: $f"
+            # 与正式传输同参:8 线程分段下载,顺带验证 wopan 直链 Range 可用;
+            # 落到本地 /tmp,不写任何云端桶
+            if ! rclone copyto "$SRC/$f" "/tmp/v6test_$(basename "$f")" \
+              --size-only --ignore-checksum --no-check-certificate \
+              --multi-thread-streams 8 --transfers 1 --checkers 4 \
+              --retries 1 --low-level-retries 5 --contimeout 15s -v; then
+              FAIL=1
+              echo "::warning::下载失败: $f(pcap 已保留,继续统计)"
+            fi
+            rm -f "/tmp/v6test_$(basename "$f")"
+          done
+          sleep 3
+          sudo kill -INT "$TCPDUMP_PID" 2>/dev/null || true
+          sleep 2
+          # 先保存 pcap 到 workspace(供 artifact 上传),再做统计分析
+          sudo cp /tmp/v6test.pcap "$GITHUB_WORKSPACE/v6test.pcap"
+          sudo chown "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/v6test.pcap"
+          ls -l "$GITHUB_WORKSPACE/v6test.pcap"
+          # 统计
+          sudo tcpdump -nn -r /tmp/v6test.pcap 2>/dev/null > /tmp/pcap.txt || true
+          wc -l /tmp/pcap.txt
+          echo "===== 协议族包数 ====="
+          v6c=$(grep -c ' IP6 ' /tmp/pcap.txt || true)
+          v4c=$(grep ' IP ' /tmp/pcap.txt | grep -vc ' IP6 ' || true)
+          echo "IPv6 包数: $v6c"
+          echo "IPv4 包数: $v4c"
+          echo "===== IPv6 top 对端 ====="
+          grep ' IP6 ' /tmp/pcap.txt | awk '{print $3, " -> ", $5}' | sort | uniq -c | sort -rn | head -15 || true
+          echo "===== IPv4 top 对端 ====="
+          grep ' IP ' /tmp/pcap.txt | grep -v ' IP6 ' | awk '{print $3, " -> ", $5}' | sort | uniq -c | sort -rn | head -15 || true
+          # 自动判定:下载流量大头在哪个协议族
+          if [ "$v6c" -gt "$v4c" ] && [ "$v6c" -gt 100 ]; then
+            echo ">>> 结论:下载流量以 IPv6 为主(走了 WARP v6)"
+          elif [ "$v4c" -gt "$v6c" ] && [ "$v4c" -gt 100 ]; then
+            echo ">>> 结论:下载流量以 IPv4 为主(没走 v6!wopan 直链可能无 AAAA 或回退 v4)"
+          else
+            echo ">>> 结论:流量太少无法判定,请看 top 对端明细"
+          fi
+          if [ "$FAIL" = "1" ]; then
+            echo "::error::存在下载失败(当前出口到 wopan 直链大概率不通),详见上方 pcap 统计"
+            exit 1
+          fi
+
+      # pcap 原始文件 artifact(下载后即 zip 包,内含 v6test.pcap)
+      - name: Upload pcap artifact
+        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync') && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: v6test-pcap
+          path: v6test.pcap
+          if-no-files-found: ignore
 
       # ---- 复制 ----
       - name: Copy (dry-run)

@@ -542,10 +542,12 @@ jobs:
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |
           . /tmp/paths.src
-          set -o pipefail
           # 并发容错:源桶可能被其他客户端并发修改(对象瞬时消失/内容变动)。
-          # 任一端读取失败(cat 非零)或 stderr 出现 error/notice 时,跳过该样本并警告,
-          # 绝不删除目标文件;只有双端都完整读出且 md5 不一致才判为真实损坏。
+          # 下载用 rclone copy 落盘,而非 cat|md5sum 管道:cat 是单次流式读取,
+          # 网络中断即作废且无重试;copy 自带 --retries 文件级重试与 multi-thread
+          # 分段续传,中断后自动重跑直到成功。落盘后先核对字节数再算 md5,
+          # 任何一端失败/字节数不符都跳过该样本并警告,绝不删除目标文件;
+          # 只有双端都完整落盘且 md5 不一致才判为真实损坏。
           rclone lsjson "$SRC" -R --files-only --no-mimetype --no-modtime > files.json
           total=$(jq 'length' files.json)
           echo "total files: $total"
@@ -555,16 +557,29 @@ jobs:
           for p in "${picks[@]}"; do
             size=$(jq -r --arg p "$p" '.[] | select(.Path==$p) | .Size' files.json)
             echo "== sample: $p ($size bytes)" | tee -a sample.log
-            src_md5=$(rclone cat "$SRC/$p" --no-check-certificate 2>/tmp/src.err | md5sum | awk '{print $1}') \
+            if [ "$size" -eq 0 ]; then
+              echo "   SKIP: 0 字节文件(wopan 不支持),跳过" | tee -a sample.log; skip=$((skip+1)); continue
+            fi
+            rm -rf /tmp/vsrc /tmp/vdst; mkdir -p /tmp/vsrc /tmp/vdst
+            rclone copy "$SRC/$p" /tmp/vsrc --no-check-certificate \
+              --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
+              --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
+              --stats 0 -q 2>/tmp/src.err \
               || { echo "   SKIP: 源端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue; }
-            if [ -s /tmp/src.err ] && grep -qiE 'error|notice|failed|not found' /tmp/src.err; then
-              echo "   SKIP: 源端 stderr 异常,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue
+            src_file=$(find /tmp/vsrc -type f | head -1)
+            if [ -z "$src_file" ] || [ "$(stat -c%s "$src_file")" -ne "$size" ]; then
+              echo "   SKIP: 源端字节数不符,跳过(不删目标)" | tee -a sample.log; skip=$((skip+1)); continue
             fi
-            dst_md5=$(rclone cat "$DST/$p" 2>/tmp/dst.err | md5sum | awk '{print $1}') \
+            rclone copy "$DST/$p" /tmp/vdst \
+              --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
+              --stats 0 -q 2>/tmp/dst.err \
               || { echo "   SKIP: 目标端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/dst.err | sed 's/^/   dst: /' | tee -a sample.log; skip=$((skip+1)); continue; }
-            if [ -s /tmp/dst.err ] && grep -qiE 'error|notice|failed|not found' /tmp/dst.err; then
-              echo "   SKIP: 目标端 stderr 异常,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/dst.err | sed 's/^/   dst: /' | tee -a sample.log; skip=$((skip+1)); continue
+            dst_file=$(find /tmp/vdst -type f | head -1)
+            if [ -z "$dst_file" ] || [ "$(stat -c%s "$dst_file")" -ne "$size" ]; then
+              echo "   SKIP: 目标端字节数不符,跳过(不删目标)" | tee -a sample.log; skip=$((skip+1)); continue
             fi
+            src_md5=$(md5sum "$src_file" | awk '{print $1}')
+            dst_md5=$(md5sum "$dst_file" | awk '{print $1}')
             echo "   src md5: $src_md5" | tee -a sample.log
             echo "   dst md5: $dst_md5" | tee -a sample.log
             if [ "$src_md5" != "$dst_md5" ]; then

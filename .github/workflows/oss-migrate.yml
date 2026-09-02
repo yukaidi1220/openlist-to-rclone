@@ -201,10 +201,11 @@ jobs:
           # copy 落盘再 stat,而非 cat|wc -c:cat 断流无重试且截断输出会被
           # 当作真实字节数;copy 自带重试,落盘后核对待测对象真实大小。
           # || true:copy 失败时不被 bash -e 硬杀,落入下方字节数诊断路径。
+          # 多线程 Range 分段下载(≥64Mi 8 线程):CDN 侧 Range 分段问题已修复。
           rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
           rclone copy "$SRC/$probe" /tmp/vprobe --no-check-certificate \
             --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-            --multi-thread-streams 1 \
+            --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
             --stats 0 -q 2>/tmp/probe.err || true
           probe_file=$(find /tmp/vprobe -type f | head -1)
           got=$([ -n "$probe_file" ] && stat -c%s "$probe_file" || echo 0)
@@ -231,10 +232,11 @@ jobs:
           # 不出示 yukaidi 证书,HeadObject 等 SDK 请求会 TLS 验证失败
           # 定制版 rclone 会把 HeadObject(上传后验证/目标探测等)也经
           # download_host 预签名走 CDN。
-          # --multi-thread-streams 1: 禁用多线程直写。CDN 对部分扩展名
-          #   (.7z/.exe/.iso 等)的 Range 分段请求不可靠(2026-08-25 两轮
-          #   抽样证实:多线程上传的大文件大小正确但内容错乱),改纯单流
-          #   下载 + multipart 上传,用更高 --transfers 补速度。
+          # --multi-thread-streams 1: 禁用多线程直写。历史背景:CDN 曾对部分
+          #   扩展名(.7z/.exe/.iso 等)的 Range 分段请求不可靠(2026-08-25 抽样
+          #   证实内容错乱),当时改纯单流下载规避。该问题 CDN 侧已修复
+          #   (download_host 已切回 ccip11.6996696.xyz),verify/probe 抽样已
+          #   恢复多线程;Copy 此处保留单流 + 高 --transfers 的传输策略不变。
           #   注意:rclone 语义里 --multi-thread-cutoff 0 是"全部启用"
           #   (size < cutoff 才跳过),禁用必须用 streams <= 1。
           # --s3-no-head: 海量小文件场景下,每文件 4 次跨洋往返中省掉
@@ -435,12 +437,11 @@ jobs:
             # 下载源桶算 MD5(总是需要)。用 rclone copy 落盘而非 cat|md5sum:
             # cat 是单次流式读取,网络中断即作废且无重试;copy 自带 --retries
             # 文件级重试。落盘后核对字节数再算 md5。
-            # --multi-thread-streams 1:禁止 Range 分段,与 Copy 步骤同样规避
-            # CDN 对部分扩展名 Range 分段不可靠的问题(否则拿到错乱内容会误删好文件)。
+            # 多线程 Range 分段下载(≥64Mi 8 线程):CDN 侧 Range 分段问题已修复。
             rm -rf /tmp/vsrc; mkdir -p /tmp/vsrc
             if ! timeout 900 rclone copy "$SRC/$fpath" /tmp/vsrc --no-check-certificate \
               --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-              --multi-thread-streams 1 \
+              --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
               --stats 0 -q 2>/tmp/src_cat.log; then
               echo "   [错误] src 下载失败: $(head -1 /tmp/src_cat.log)" | tee -a sample.log
               fail=1
@@ -472,7 +473,7 @@ jobs:
               rm -rf /tmp/vdst; mkdir -p /tmp/vdst
               if ! timeout 900 rclone copy "$DST/$fpath" /tmp/vdst --no-check-certificate \
                 --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-                --multi-thread-streams 1 \
+                --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
                 --stats 0 -q 2>/tmp/dst_cat.log; then
                 echo "   [错误] dst 下载失败: $(head -1 /tmp/dst_cat.log)" | tee -a sample.log
                 fail=1

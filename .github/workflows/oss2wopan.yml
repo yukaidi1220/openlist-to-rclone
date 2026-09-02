@@ -333,11 +333,11 @@ jobs:
           # copy 落盘再 stat,而非 cat|wc -c:cat 断流无重试且截断输出会被当作
           # 真实字节数;copy 自带重试,落盘后核对待测对象真实大小。
           # || true:copy 失败时不被 bash -e 硬杀,落入 20s 重试分支(与原 cat 版
-          # "失败也进重试"语义一致);--multi-thread-streams 1 禁止 Range 分段。
+          # "失败也进重试"语义一致)。多线程 Range 分段下载:CDN 侧问题已修复。
           rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
           got=$(rclone copy "$SRC/$probe" /tmp/vprobe --no-check-certificate \
             --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-            --multi-thread-streams 1 \
+            --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
             --stats 0 -q 2>/tmp/cat.err || true; \
             probe_file=$(find /tmp/vprobe -type f | head -1); \
             [ -n "$probe_file" ] && stat -c%s "$probe_file" || echo -1)
@@ -349,7 +349,7 @@ jobs:
             rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
             got=$(rclone copy "$SRC/$probe" /tmp/vprobe --no-check-certificate \
               --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-              --multi-thread-streams 1 \
+              --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
               --stats 0 -q 2>/tmp/cat.err || true; \
               probe_file=$(find /tmp/vprobe -type f | head -1); \
               [ -n "$probe_file" ] && stat -c%s "$probe_file" || echo -1)
@@ -563,8 +563,7 @@ jobs:
           # 重跑直到成功。落盘后先核对字节数再算 md5,
           # 任何一端失败/字节数不符都跳过该样本并警告,绝不删除目标文件;
           # 只有双端都完整落盘且 md5 不一致才判为真实损坏。
-          # --multi-thread-streams 1:禁止 Range 分段读取,保证 verify 兜底路径
-          # 独立于 Copy 传输方式(CDN 对部分扩展名 Range 分段不可靠)。
+          # 多线程 Range 分段下载(≥64Mi 8 线程):CDN 侧 Range 分段问题已修复。
           rclone lsjson "$SRC" -R --files-only --no-mimetype --no-modtime > files.json
           total=$(jq 'length' files.json)
           echo "total files: $total"
@@ -580,7 +579,7 @@ jobs:
             rm -rf /tmp/vsrc /tmp/vdst; mkdir -p /tmp/vsrc /tmp/vdst
             rclone copy "$SRC/$p" /tmp/vsrc --no-check-certificate \
               --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-              --multi-thread-streams 1 \
+              --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
               --stats 0 -q 2>/tmp/src.err \
               || { echo "   SKIP: 源端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue; }
             src_file=$(find /tmp/vsrc -type f | head -1)
@@ -590,7 +589,7 @@ jobs:
             fi
             rclone copy "$DST/$p" /tmp/vdst \
               --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-              --multi-thread-streams 1 \
+              --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
               --stats 0 -q 2>/tmp/dst.err \
               || { echo "   SKIP: 目标端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/dst.err | sed 's/^/   dst: /' | tee -a sample.log; skip=$((skip+1)); continue; }
             dst_file=$(find /tmp/vdst -type f | head -1)

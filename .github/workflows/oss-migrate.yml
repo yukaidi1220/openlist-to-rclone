@@ -200,10 +200,12 @@ jobs:
 
           # copy 落盘再 stat,而非 cat|wc -c:cat 断流无重试且截断输出会被
           # 当作真实字节数;copy 自带重试,落盘后核对待测对象真实大小。
+          # || true:copy 失败时不被 bash -e 硬杀,落入下方字节数诊断路径。
           rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
           rclone copy "$SRC/$probe" /tmp/vprobe --no-check-certificate \
             --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-            --stats 0 -q
+            --multi-thread-streams 1 \
+            --stats 0 -q 2>/tmp/probe.err || true
           probe_file=$(find /tmp/vprobe -type f | head -1)
           got=$([ -n "$probe_file" ] && stat -c%s "$probe_file" || echo 0)
           echo "got: $got bytes"
@@ -432,23 +434,31 @@ jobs:
 
             # 下载源桶算 MD5(总是需要)。用 rclone copy 落盘而非 cat|md5sum:
             # cat 是单次流式读取,网络中断即作废且无重试;copy 自带 --retries
-            # 文件级重试与 multi-thread 分段续传。落盘后核对字节数再算 md5。
+            # 文件级重试。落盘后核对字节数再算 md5。
+            # --multi-thread-streams 1:禁止 Range 分段,与 Copy 步骤同样规避
+            # CDN 对部分扩展名 Range 分段不可靠的问题(否则拿到错乱内容会误删好文件)。
             rm -rf /tmp/vsrc; mkdir -p /tmp/vsrc
             if ! timeout 900 rclone copy "$SRC/$fpath" /tmp/vsrc --no-check-certificate \
               --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-              --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
+              --multi-thread-streams 1 \
               --stats 0 -q 2>/tmp/src_cat.log; then
               echo "   [错误] src 下载失败: $(head -1 /tmp/src_cat.log)" | tee -a sample.log
               fail=1
               continue
             fi
             src_file=$(find /tmp/vsrc -type f | head -1)
-            if [ -z "$src_file" ] || [ "$(stat -c%s "$src_file")" -ne "$fsize" ]; then
-              echo "   [错误] src 字节数不符(截断/空响应),视为下载失败" | tee -a sample.log
+            src_size=$(stat -c%s "$src_file" 2>/dev/null || echo -1)
+            if [ -z "$src_file" ] || [ "$src_size" -ne "$fsize" ]; then
+              echo "   [错误] src 字节数不符(截断/空响应),视为下载失败: $(head -1 /tmp/src_cat.log)" | tee -a sample.log
               fail=1
               continue
             fi
             src_md5=$(md5sum "$src_file" | awk '{print $1}')
+            if [ ${#src_md5} -ne 32 ]; then
+              echo "   [错误] src 本地 md5 计算失败,视为下载失败" | tee -a sample.log
+              fail=1
+              continue
+            fi
             echo "   src md5: $src_md5 (下载源桶计算)"
 
             # 获取目标桶该文件的 MD5:
@@ -462,19 +472,25 @@ jobs:
               rm -rf /tmp/vdst; mkdir -p /tmp/vdst
               if ! timeout 900 rclone copy "$DST/$fpath" /tmp/vdst --no-check-certificate \
                 --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-                --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
+                --multi-thread-streams 1 \
                 --stats 0 -q 2>/tmp/dst_cat.log; then
                 echo "   [错误] dst 下载失败: $(head -1 /tmp/dst_cat.log)" | tee -a sample.log
                 fail=1
                 continue
               fi
               dst_file=$(find /tmp/vdst -type f | head -1)
-              if [ -z "$dst_file" ] || [ "$(stat -c%s "$dst_file")" -ne "$fsize" ]; then
-                echo "   [错误] dst 字节数不符(截断/空响应),视为下载失败" | tee -a sample.log
+              dst_size=$(stat -c%s "$dst_file" 2>/dev/null || echo -1)
+              if [ -z "$dst_file" ] || [ "$dst_size" -ne "$fsize" ]; then
+                echo "   [错误] dst 字节数不符(截断/空响应),视为下载失败: $(head -1 /tmp/dst_cat.log)" | tee -a sample.log
                 fail=1
                 continue
               fi
               dst_md5=$(md5sum "$dst_file" | awk '{print $1}')
+              if [ ${#dst_md5} -ne 32 ]; then
+                echo "   [错误] dst 本地 md5 计算失败,视为下载失败" | tee -a sample.log
+                fail=1
+                continue
+              fi
               echo "   dst md5: $dst_md5 (下载目标桶计算)"
             fi
 

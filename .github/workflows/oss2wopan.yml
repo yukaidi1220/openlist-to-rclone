@@ -332,10 +332,13 @@ jobs:
           echo "probing: $probe ($expect bytes)"
           # copy 落盘再 stat,而非 cat|wc -c:cat 断流无重试且截断输出会被当作
           # 真实字节数;copy 自带重试,落盘后核对待测对象真实大小。
+          # || true:copy 失败时不被 bash -e 硬杀,落入 20s 重试分支(与原 cat 版
+          # "失败也进重试"语义一致);--multi-thread-streams 1 禁止 Range 分段。
           rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
-          got=$(rclone copy "$SRC/$probe" /tmp/vprobe \
+          got=$(rclone copy "$SRC/$probe" /tmp/vprobe --no-check-certificate \
             --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-            --stats 0 -q 2>/tmp/cat.err; \
+            --multi-thread-streams 1 \
+            --stats 0 -q 2>/tmp/cat.err || true; \
             probe_file=$(find /tmp/vprobe -type f | head -1); \
             [ -n "$probe_file" ] && stat -c%s "$probe_file" || echo -1)
           if [ -s /tmp/cat.err ]; then echo "--- cat stderr ---"; cat /tmp/cat.err; fi
@@ -344,9 +347,10 @@ jobs:
             echo "首次不符,视为 IP 脏瞬态失败,等待 20s(404 边缘缓存 TTL)后重试一次"
             sleep 20
             rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
-            got=$(rclone copy "$SRC/$probe" /tmp/vprobe \
+            got=$(rclone copy "$SRC/$probe" /tmp/vprobe --no-check-certificate \
               --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-              --stats 0 -q 2>/tmp/cat.err; \
+              --multi-thread-streams 1 \
+              --stats 0 -q 2>/tmp/cat.err || true; \
               probe_file=$(find /tmp/vprobe -type f | head -1); \
               [ -n "$probe_file" ] && stat -c%s "$probe_file" || echo -1)
             if [ -s /tmp/cat.err ]; then echo "--- cat stderr (retry) ---"; cat /tmp/cat.err; fi
@@ -555,10 +559,12 @@ jobs:
           . /tmp/paths.src
           # 并发容错:源桶可能被其他客户端并发修改(对象瞬时消失/内容变动)。
           # 下载用 rclone copy 落盘,而非 cat|md5sum 管道:cat 是单次流式读取,
-          # 网络中断即作废且无重试;copy 自带 --retries 文件级重试与 multi-thread
-          # 分段续传,中断后自动重跑直到成功。落盘后先核对字节数再算 md5,
+          # 网络中断即作废且无重试;copy 自带 --retries 文件级重试,中断后自动
+          # 重跑直到成功。落盘后先核对字节数再算 md5,
           # 任何一端失败/字节数不符都跳过该样本并警告,绝不删除目标文件;
           # 只有双端都完整落盘且 md5 不一致才判为真实损坏。
+          # --multi-thread-streams 1:禁止 Range 分段读取,保证 verify 兜底路径
+          # 独立于 Copy 传输方式(CDN 对部分扩展名 Range 分段不可靠)。
           rclone lsjson "$SRC" -R --files-only --no-mimetype --no-modtime > files.json
           total=$(jq 'length' files.json)
           echo "total files: $total"
@@ -574,23 +580,29 @@ jobs:
             rm -rf /tmp/vsrc /tmp/vdst; mkdir -p /tmp/vsrc /tmp/vdst
             rclone copy "$SRC/$p" /tmp/vsrc --no-check-certificate \
               --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-              --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
+              --multi-thread-streams 1 \
               --stats 0 -q 2>/tmp/src.err \
               || { echo "   SKIP: 源端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue; }
             src_file=$(find /tmp/vsrc -type f | head -1)
-            if [ -z "$src_file" ] || [ "$(stat -c%s "$src_file")" -ne "$size" ]; then
-              echo "   SKIP: 源端字节数不符,跳过(不删目标)" | tee -a sample.log; skip=$((skip+1)); continue
+            src_size=$(stat -c%s "$src_file" 2>/dev/null || echo -1)
+            if [ -z "$src_file" ] || [ "$src_size" -ne "$size" ]; then
+              echo "   SKIP: 源端字节数不符,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue
             fi
             rclone copy "$DST/$p" /tmp/vdst \
               --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
+              --multi-thread-streams 1 \
               --stats 0 -q 2>/tmp/dst.err \
               || { echo "   SKIP: 目标端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/dst.err | sed 's/^/   dst: /' | tee -a sample.log; skip=$((skip+1)); continue; }
             dst_file=$(find /tmp/vdst -type f | head -1)
-            if [ -z "$dst_file" ] || [ "$(stat -c%s "$dst_file")" -ne "$size" ]; then
-              echo "   SKIP: 目标端字节数不符,跳过(不删目标)" | tee -a sample.log; skip=$((skip+1)); continue
+            dst_size=$(stat -c%s "$dst_file" 2>/dev/null || echo -1)
+            if [ -z "$dst_file" ] || [ "$dst_size" -ne "$size" ]; then
+              echo "   SKIP: 目标端字节数不符,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/dst.err | sed 's/^/   dst: /' | tee -a sample.log; skip=$((skip+1)); continue
             fi
             src_md5=$(md5sum "$src_file" | awk '{print $1}')
             dst_md5=$(md5sum "$dst_file" | awk '{print $1}')
+            if [ ${#src_md5} -ne 32 ] || [ ${#dst_md5} -ne 32 ]; then
+              echo "   SKIP: 本地 md5 计算失败,跳过(不删目标)" | tee -a sample.log; skip=$((skip+1)); continue
+            fi
             echo "   src md5: $src_md5" | tee -a sample.log
             echo "   dst md5: $dst_md5" | tee -a sample.log
             if [ "$src_md5" != "$dst_md5" ]; then

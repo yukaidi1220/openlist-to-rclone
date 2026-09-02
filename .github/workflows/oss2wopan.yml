@@ -330,14 +330,25 @@ jobs:
           fi
           expect=$(rclone lsjson "$SRC/$probe" --no-mimetype --no-modtime | jq -r '.[0].Size')
           echo "probing: $probe ($expect bytes)"
-          # || got=-1:让 cat 命令失败(403/404/网络错)也落入重试分支,而不是被 bash -e 直接终止
-          got=$(rclone cat "$SRC/$probe" 2>/tmp/cat.err | wc -c) || got=-1
+          # copy 落盘再 stat,而非 cat|wc -c:cat 断流无重试且截断输出会被当作
+          # 真实字节数;copy 自带重试,落盘后核对待测对象真实大小。
+          rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
+          got=$(rclone copy "$SRC/$probe" /tmp/vprobe \
+            --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
+            --stats 0 -q 2>/tmp/cat.err; \
+            probe_file=$(find /tmp/vprobe -type f | head -1); \
+            [ -n "$probe_file" ] && stat -c%s "$probe_file" || echo -1)
           if [ -s /tmp/cat.err ]; then echo "--- cat stderr ---"; cat /tmp/cat.err; fi
           echo "got: $got bytes"
           if [ "$got" -ne "$expect" ]; then
             echo "首次不符,视为 IP 脏瞬态失败,等待 20s(404 边缘缓存 TTL)后重试一次"
             sleep 20
-            got=$(rclone cat "$SRC/$probe" 2>/tmp/cat.err | wc -c) || got=-1
+            rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
+            got=$(rclone copy "$SRC/$probe" /tmp/vprobe \
+              --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
+              --stats 0 -q 2>/tmp/cat.err; \
+              probe_file=$(find /tmp/vprobe -type f | head -1); \
+              [ -n "$probe_file" ] && stat -c%s "$probe_file" || echo -1)
             if [ -s /tmp/cat.err ]; then echo "--- cat stderr (retry) ---"; cat /tmp/cat.err; fi
             echo "got(retry): $got bytes"
           fi

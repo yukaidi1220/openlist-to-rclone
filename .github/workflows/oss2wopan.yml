@@ -493,13 +493,14 @@ jobs:
           for p in "${picks[@]}"; do
             size=$(jq -r --arg p "$p" '.[] | select(.Path==$p) | .Size' files.json)
             echo "== sample: $p ($size bytes)" | tee -a sample.log
-            if [ "$size" -eq 0 ]; then
-              echo "   SKIP: 0 字节文件(wopan 不支持),跳过" | tee -a sample.log; skip=$((skip+1)); continue
+            # 字符串比较:文件在 lsjson 之后被并发删除时 size 为空,数字比较会崩溃整步
+            if [ "$size" = "" ] || [ "$size" = "0" ]; then
+              echo "   SKIP: 对象缺失或 0 字节(wopan 不支持 0 字节),跳过" | tee -a sample.log; skip=$((skip+1)); continue
             fi
             rm -rf /tmp/vsrc /tmp/vdst; mkdir -p /tmp/vsrc /tmp/vdst
             rclone copy "$SRC/$p" /tmp/vsrc --no-check-certificate \
               --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-              --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
+              --multi-thread-cutoff 1Mi --multi-thread-streams 16 \
               --stats 0 -q 2>/tmp/src.err \
               || { echo "   SKIP: 源端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue; }
             src_file=$(find /tmp/vsrc -type f | head -1)
@@ -509,7 +510,7 @@ jobs:
             fi
             rclone copy "$DST/$p" /tmp/vdst \
               --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-              --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
+              --multi-thread-cutoff 1Mi --multi-thread-streams 16 \
               --stats 0 -q 2>/tmp/dst.err \
               || { echo "   SKIP: 目标端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/dst.err | sed 's/^/   dst: /' | tee -a sample.log; skip=$((skip+1)); continue; }
             dst_file=$(find /tmp/vdst -type f | head -1)
@@ -526,7 +527,7 @@ jobs:
             echo "   dst md5: $dst_md5" | tee -a sample.log
             if [ "$src_md5" != "$dst_md5" ]; then
               echo "   MISMATCH -> 删除目标坏文件以便重传" | tee -a sample.log
-              rclone deletefile "$DST/$p"
+              rclone deletefile --no-check-certificate "$DST/$p" --retries 5
               fail=$((fail+1))
             else
               echo "   MATCH" | tee -a sample.log

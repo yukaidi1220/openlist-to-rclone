@@ -40,7 +40,10 @@ JOBS="${JOBS:-8}"
 CHECKERS="${CHECKERS:-4}"
 CHUNK_PER_100M=104857600
 PYTHON="${PYTHON:-python3}"
-WORKDIR="$(mktemp -d /tmp/probe.XXXXXX)"
+# 固定诊断目录名,便于 workflow 用 upload-artifact 稳定打包;探测只读且按桶分组串行,
+# 不同 bucket 各自 runner 独立 /tmp 无冲突。
+WORKDIR="/tmp/probe-artifact"
+rm -rf "$WORKDIR"; mkdir -p "$WORKDIR"
 
 SRC="${1:?src:path required}"
 DST="${2:?dst:path required}"
@@ -101,19 +104,38 @@ probed_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) ))
 tick "阶段1b 分片计划完成: files_candidates=$total_count -> probed=$probed_files total_chunks=$total_chunks"
 
 # ---- 阶段 2: 并行拉取 (每片 源+目标 各落盘一文件) ----
+: > "$WORKDIR/sizes.tsv"
+# 汇总文件(供 artifact)之前若存在则清零
+: > "$WORKDIR/result.txt"
 tick "阶段2开始 并行拉取分片 jobs=$JOBS (共 $total_chunks 片)"
 
 # per-chunk 拉取函数 (并行子进程)
+# 取证设计: 不丢弃 rclone stderr(存 d_<seq>.src/.dst.log),落盘后 du -b 核对实际字节,
+#           与请求 len 对比:远大于 len → 疑似未走 Range、整文件下载(计入 sizes 供诊断)。
 fetch_one() {
   local line="$1" #  Path<TAB>off<TAB>len<TAB>seq
   local path="${line%%$'\t'*}" rest="${line#*$'\t'}"
   local off="${rest%%$'\t'*}" rest2="${rest#*$'\t'}"
   local len="${rest2%%$'\t'*}" seq="${rest2#*$'\t'}"
   local srcf="$WORKDIR/d_${seq}.src" dstf="$WORKDIR/d_${seq}.dst"
+  # 源端
   "$RCLONE" cat "$SRC/$path" --offset "$off" --count "$len" --no-check-certificate \
-    --retries 5 --low-level-retries 20 > "$srcf" 2>/dev/null || { rm -f "$srcf"; echo "SRCFAIL" > "$WORKDIR/d_${seq}.fail"; }
+    --retries 5 --low-level-retries 20 > "$srcf" 2>"$WORKDIR/d_${seq}.src.log" \
+    || { rm -f "$srcf"; echo "SRCFAIL $path" > "$WORKDIR/d_${seq}.fail"; }
+  local ss=$(( $(du -b "$srcf" 2>/dev/null | cut -f1) + 0 ))
+  printf '%s\tSRC\t%s\t%s\t%s\n' "$seq" "$ss" "$len" "$path" >> "$WORKDIR/sizes.tsv"
+  if [ "$ss" -gt $(( len + 1048576 )) ]; then  # 超过 len 1MiB 容差 = 疑似全量下载
+    echo "::warning::WARN 源端疑似整文件下载 seq=$seq off=$off want=$len got=$ss $path" >&2
+  fi
+  # 目标端
   "$RCLONE" cat "$DST/$path" --offset "$off" --count "$len" --no-check-certificate \
-    --retries 5 --low-level-retries 20 > "$dstf" 2>/dev/null || { rm -f "$dstf"; echo "DSTFAIL" > "$WORKDIR/d_${seq}.fail"; }
+    --retries 5 --low-level-retries 20 > "$dstf" 2>"$WORKDIR/d_${seq}.dst.log" \
+    || { rm -f "$dstf"; echo "DSTFAIL $path" > "$WORKDIR/d_${seq}.fail"; }
+  local ds=$(( $(du -b "$dstf" 2>/dev/null | cut -f1) + 0 ))
+  printf '%s\tDST\t%s\t%s\t%s\n' "$seq" "$ds" "$len" "$path" >> "$WORKDIR/sizes.tsv"
+  if [ "$ds" -gt $(( len + 1048576 )) ]; then
+    echo "::warning::WARN 目标端疑似整文件下载 seq=$seq off=$off want=$len got=$ds $path" >&2
+  fi
 }
 export -f fetch_one
 export RCLONE SRC DST WORKDIR
@@ -201,6 +223,12 @@ ok_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) - mism_files ))
 tick "阶段3完成"
 echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files chunks_total=$total_chunks chunks_ok=$tot_ok chunks_mismatch=$tot_mism chunks_skip=$tot_skip ===" >&2
 
-if [ -z "${NO_CLEAN:-}" ]; then rm -rf "$WORKDIR"; else echo "workdir=$WORKDIR" >&2; fi
+# 保留诊断文件供 artifact(字节核对 sizes.tsv / lsjson.vv.log / 各片 rclone 日志 / result)
+# WORKDIR 默认保留;设 CLEANUP=1 时才删除。分片本体(大)在比对后可删,留 *.log/tsv/result。
+if [ "${CLEANUP:-}" = "1" ]; then
+  find "$WORKDIR" -name 'd_*.src' -o -name 'd_*.dst' | xargs -r rm -f
+  rm -f "$WORKDIR/chunks.0"
+fi
+echo "WORKDIR_ARTIFACT=$WORKDIR" >&2
 
 [ "$tot_mism" -eq 0 ] && [ "$tot_skip" -eq 0 ]

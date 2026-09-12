@@ -139,5 +139,15 @@ jobs:
           fi
           bin/chunk-probe.sh "$SRC" "$DST" --limit "$LIMIT"
           rc=$?
+          # 捕获脚本输出 WORKDIR_ARTIFACT 供 artifact 步骤
+          echo "last_rc=$rc"
           echo "probe exit=$rc" >> "$GITHUB_STEP_SUMMARY"
           exit $rc
+
+      - name: 上传诊断 artifact(sizes.tsv / rclone 日志 / result)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-diagnose-${{ inputs.src_bucket }}-${{ github.run_id }}
+          path: /tmp/probe-artifact/
+          if-no-files-found: ignore

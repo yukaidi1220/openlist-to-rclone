@@ -483,7 +483,9 @@ jobs:
           # 重跑直到成功。落盘后先核对字节数再算 md5,
           # 任何一端失败/字节数不符都跳过该样本并警告,绝不删除目标文件;
           # 只有双端都完整落盘且 md5 不一致才判为真实损坏。
-          # 多线程 Range 分段下载(≥64Mi 8 线程):CDN 侧 Range 分段问题已修复。
+          # 多线程 Range 分段下载(--multi-thread-cutoff 1Mi --multi-thread-streams 16):
+          # CDN 侧 Range 分段问题已修复;cutoff 降至 1Mi 让中小文件也并行下载,
+          # 双端比对耗时大幅缩短(2026-09-12 实测,7.5GB ISO 40+ 分钟 → 分钟级)。
           rclone lsjson "$SRC" -R --files-only --no-mimetype --no-modtime > files.json
           total=$(jq 'length' files.json)
           echo "total files: $total"

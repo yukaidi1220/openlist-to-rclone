@@ -1,0 +1,138 @@
+# 探针演练:基于随机分片 Range 下载的双端内容比对 (chunk-probe.sh)
+#
+# 目标:对已迁移完成的桶,按体积抽 N=min(ceil(Size/100MiB),100) 片,
+#       随机偏移下各拉取两端同一小片 (rclone cat --offset/--count, 走 HTTP Range -> 206),
+#       比对 md5, 快速定位内容损坏而无需整文件下载。
+#
+# 复用 oss2wopan 的配置拉取(src/wopan conf 经私有仓注入)与路径解析。
+# 安全:只读,不写目标,不碰 refresh_token(no_refresh 剥离)。默认只探测 --limit 个最大文件,
+#       限流请求量,适合快速演练。
+
+name: chunk probe
+run-name: chunk-probe (${{ inputs.src_bucket }} | limit=${{ inputs.limit }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      src_bucket:
+        description: "源桶名(仅用于标识与 run 标题)"
+        required: true
+      config_file:
+        description: "私有仓配置文件路径(相对仓库根)。launcher 生成的时间戳配置在 oss2wopan-configs/ 下"
+        required: true
+        default: "oss2wopan.conf"
+      path:
+        description: "探测路径前缀(留空=整桶)"
+        required: false
+        default: ""
+      limit:
+        description: "最多探测多少个文件(-1=不限,默认 0=仅最大的一个,用于限流演练)"
+        required: false
+        default: "0"
+      slice:
+        description: "单片下载字节数(1MiB 对齐,默认 4194304=4MiB)"
+        required: false
+        default: "4194304"
+      min_size:
+        description: "只探测 >= 该字节的对象(默认 1048576=1MiB)"
+        required: false
+        default: "1048576"
+      no_refresh:
+        description: "剥离 refresh_token,永不刷新(安全只读)"
+        type: boolean
+        required: false
+        default: true
+
+concurrency:
+  # 探针只读,可与迁移并行,按 src_bucket 分组防同桶重复跑
+  group: chunk-probe-${{ inputs.src_bucket }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TZ: Asia/Shanghai
+      RCLONE_CONFIG: /tmp/probe.conf
+    steps:
+      - name: 检出仓库(含 chunk-probe.sh)
+        uses: actions/checkout@v6
+
+      - name: Fetch config from private repo
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          CONF_PATH: ${{ inputs.config_file }}
+        run: |
+          umask 077
+          CONF_PATH="${CONF_PATH:-oss2wopan.conf}"
+          DSTBASE_PATH="${CONF_PATH%.conf}.dstbase"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/$CONF_PATH" \
+              -o "$RCLONE_CONFIG" \
+              && curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/$DSTBASE_PATH" \
+              -o /tmp/dstbase; then
+              echo "配置获取成功"; break
+            fi
+            echo "获取失败,重试 $i/3..."; sleep $((i * 5))
+          done
+          [ -f "$RCLONE_CONFIG" ] || { echo "::error::无法获取 $CONF_PATH"; exit 1; }
+          echo "::add-mask::$(cat "$RCLONE_CONFIG")"
+          if [ "${{ inputs.no_refresh }}" = "true" ]; then
+            sed -i '/^refresh_token/d' "$RCLONE_CONFIG"
+            echo "no_refresh: 已剥离 refresh_token"
+          fi
+
+      - name: Parse config & set paths
+        env:
+          PATH_PREFIX: ${{ inputs.path }}
+        run: |
+          SRC_BUCKET=$(grep '^bucket' "$RCLONE_CONFIG" | tr -s ' ' | cut -d' ' -f3 | head -1)
+          [ -n "$SRC_BUCKET" ] || { echo "::error::conf 缺少 src.bucket"; exit 1; }
+          DST_BASE=$(cat /tmp/dstbase)
+          PARAM_PREFIX="$PATH_PREFIX"
+          if [ -n "$PARAM_PREFIX" ]; then
+            SRC="src:$SRC_BUCKET/$PARAM_PREFIX"
+            DST="wopan:$DST_BASE/$PARAM_PREFIX"
+          else
+            SRC="src:$SRC_BUCKET"
+            DST="wopan:$DST_BASE"
+          fi
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
+          echo "DST=$DST" >> "$GITHUB_ENV"
+
+      - name: "Install rclone (custom build: s3 download_host + wopan)"
+        run: |
+          URL="https://github.com/yukaidi1220/rclone/releases/latest/download/rclone-cdn-linux-amd64"
+          curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 5 \
+            -o /tmp/rclone "$URL" || { echo "::error::无法下载 rclone release"; exit 1; }
+          chmod +x /tmp/rclone
+          sudo mv /tmp/rclone /usr/local/bin/rclone
+          rclone version | head -2
+
+      - name: 运行分片抽检探针
+        env:
+          RCLONE: rclone
+          SLICE: ${{ inputs.slice }}
+          LIMIT: ${{ inputs.limit }}
+          MIN_SIZE: ${{ inputs.min_size }}
+        run: |
+          chmod +x bin/chunk-probe.sh
+          # 探针脚本直接读 $RCLONE_CONFIG 环境,上游已 export;这里显式注入
+          export RCLONE_CONFIG
+          # limit 默认 0 = 只探测最大的一个文件(演练用,防失控)
+          if [ "$LIMIT" = "0" ]; then
+            LIMIT=1
+            echo "::warning::limit=0 已归一为 1(只探测最大文件);评估结果后可放宽"
+          fi
+          bin/chunk-probe.sh "$SRC" "$DST" --limit "$LIMIT"
+          rc=$?
+          echo "probe exit=$rc" >> "$GITHUB_STEP_SUMMARY"
+          exit $rc

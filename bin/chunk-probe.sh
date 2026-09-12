@@ -53,53 +53,46 @@ tick() { local label="$1"; echo "  [$(date -u +%H:%M:%S) t=$((SECONDS-START_TS))
 tick "阶段1开始 造清单 src=$SRC dst=$DST slice=$SLICE limit=$LIMIT jobs=$JOBS"
 
 # 先 lsjson 一次取候选 (列出 >= MIN_SIZE 的文件)
-# lsjson 全桶递归列所有对象(阿里 OSS ListObjectsV2 高位接口,应快);-vv 存独立日志,
-# 若卡住可定位是 OSS 接口还是 jq 解析。
-tick "阶段1a 发起 rclone lsjson -R (全桶递归列对象)..."
-mapfile -t CAND < <(
-  "$RCLONE" lsjson "$SRC" -R --files-only --no-mimetype --no-modtime -vv 2>"$WORKDIR/lsjson.vv.log" \
-    | jq -r '.[] | select(.Size >= '"$MIN_SIZE"') | [.Path, .Size] | @tsv'
-)
-tick "阶段1a 完成 lsjson, candidates=${#CAND[@]} (已过滤 >= ${MIN_SIZE}B)"
-[ "${#CAND[@]}" -gt 0 ] || { echo "::error::lsjson 无候选文件(>= $MIN_SIZE B)"; exit 1; }
-grep -c "" "$WORKDIR/lsjson.vv.log" >/dev/null 2>&1 && tail -5 "$WORKDIR/lsjson.vv.log" >&2 || true
-total_count=${#CAND[@]}
+# lsjson 全桶递归列所有对象(阿里 OSS ListObjectsV2 高位接口,应快)。
+# 关键: 结果重定向到文件(流式写盘), 不落 bash 数组 —— bash 数组对几十万元素极慢,
+#       迁移流程用 > files.json 写盘未卡, 探针此前用 mapfile 存数组才卡死。
+tick "阶段1a 发起 rclone lsjson -R -> files.json (全桶递归)..."
+FILES_JSON="$WORKDIR/files.json"
+"$RCLONE" lsjson "$SRC" -R --files-only --no-mimetype --no-modtime -vv 2>"$WORKDIR/lsjson.vv.log" >"$FILES_JSON"
+LIST_RC=$?
+[ "$LIST_RC" -eq 0 ] || { echo "::error::lsjson 失败 rc=$LIST_RC (见 lsjson.vv.log)"; tail -20 "$WORKDIR/lsjson.vv.log" >&2; exit 1; }
+tick "阶段1a 完成 lsjson -> files.json ($(du -h "$FILES_JSON" | cut -f1))"
 
-# python 生成平铺分片清单: out: <work>/chunks.0 (每行 Path<TAB>off<TAB>len<TAB>seq)
-# 按最小的文件取 LIMIT 个(即文件按其 Size 降序排序后取前 LIMIT, 聚焦大文件命中率)
-LIMIT_PY="${LIMIT}"
-FILES_TSV="$(mktemp -p "$WORKDIR" cand.XXXXXX.tsv)"
-printf '%s\n' "${CAND[@]}" >> "$FILES_TSV"
-
-"$PYTHON" - "$FILES_TSV" "$WORKDIR/chunks.0" "$CHUNK_PER_100M" "$SLICE" "$LIMIT_PY" "$MIN_SIZE" <<'PY'
-import sys, math, random
-tv, out, per100m, sl, lim, minsz = sys.argv[1:]
+# python:从 files.json 流式取 top LIMIT 大文件并生成平铺分片清单
+# 不在 bash 里建大数组; python json.load 一次性读 + 内存排序, 比 bash mapfile 可靠。
+tick "阶段1b 分片计划 (top ${LIMIT} 大文件)..."
+total_count=$("$PYTHON" - "$FILES_JSON" "$WORKDIR/chunks.0" "$CHUNK_PER_100M" "$SLICE" "$LIMIT" "$MIN_SIZE" <<'PY')
+import sys, math, random, json
+fj, out, per100m, sl, lim, minsz = sys.argv[1:]
 per100m, sl, minsz, lim = int(per100m), int(sl), int(minsz), int(lim)
-files=[]
-with open(tv) as f:
-    for line in f:
-        line=line.rstrip('\n')
-        if not line: continue
-        path,size=line.split('\t',1)
-        files.append((path,int(size)))
+with open(fj) as f:
+    data = json.load(f)
+files = [(o["Path"], int(o["Size"])) for o in data if int(o["Size"]) >= minsz]
+total = len(files)
 # 降序取 limit (聚焦大文件; -1=全部)
-if lim>=0:
-    files.sort(key=lambda x:-x[1])
-    files=files[:lim]
+if lim >= 0:
+    files.sort(key=lambda x: -x[1])
+    files = files[:lim]
 random.seed(0x5EED)
-with open(out,'w') as o:
-    for path,size in files:
-        n=max(1,min(math.ceil(size/per100m),100))
-        eff=max(0,size-sl)
+with open(out, "w") as o:
+    for path, size in files:
+        n = max(1, min(math.ceil(size / per100m), 100))
+        eff = max(0, size - sl)
         for i in range(n):
-            lo=size*i//n
-            hi=size*(i+1)//n-1
-            hix=max(lo, min(hi-sl+1, eff))
-            off=random.randint(lo,hix)
-            # 1MiB 对齐, 不越文件尾
-            off=(off//(1024*1024))*(1024*1024)
-            if off>eff: off=eff
+            lo = size * i // n
+            hi = size * (i + 1) // n - 1
+            hix = max(lo, min(hi - sl + 1, eff))
+            off = random.randint(lo, hix)
+            off = (off // (1024 * 1024)) * (1024 * 1024)  # 1MiB 对齐
+            if off > eff:
+                off = eff
             o.write(f"{path}\t{off}\t{sl}\t{i}\n")
+print(total)
 PY
 
 CHUNKS_FILE="$WORKDIR/chunks.0"

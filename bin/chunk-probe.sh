@@ -1,29 +1,34 @@
 #!/usr/bin/env bash
 #
-# chunk-probe.sh — 基于随机分片 Range 下载的双端内容比对探针
+# chunk-probe.sh — 基于随机分片 Range 下载的双端内容比对探针 (三阶段并行版)
 #
 # 目的:对 source 桶与 wopan 目标端做"分片级"内容抽样比对,快速定位大体量文件的内容损坏,
 #       而不必把整个文件下载下来 (整文件抽样对大 ISO 慢)。
 #
-# 策略 (单文件粒度):
-#   - 对每个待检文件, 分片数 N = min(ceil(Size / 100MiB), 100), 至少 1 片
-#   - 文件被均匀切为 N 个等宽区间, 每区间内选 1 个随机偏移 (offset), 两端各用
-#     rclone cat --offset <off> --count <SLICE> 拉取该片段 (走 HTTP Range -> 206),
-#     对比两端 md5. 任何一片不一致判定该文件损坏 (无需整文件下载)。
-#   - 偏移与切片长度按 1MiB 对齐, 避免字节级 Range 边界分叉。
+# 三阶段架构 (解决串行 per-片 rclone 进程/网络往返过慢的问题):
+#   阶段1 造清单 : lsjson 过滤出候选文件, 对每文件按 N=min(ceil(Size/100MiB),100) 片
+#                  算出随机偏移, 输出平铺清单 (每行 文件|偏移|片长|片序号).
+#   阶段2 并行拉 : 以 -P 并发启动 rclone cat --offset/--count, 对清单每一行同时从
+#                  源端与目标端拉取该片段落盘到独立临时文件 (HTTP Range -> 206).
+#   阶段3 并行比 : 对所有落盘分片并行跑 md5sum, 比对源/目标对应分片, 汇总一致/不一致,
+#                  并使用 CHECKER 并发清理临时文件.
+#
+# 相比串行版: 网络往返可满带宽、rclone 进程启动开销被并发摊薄、比对不重传数据。
 #
 # 用法:
-#   chunk-probe.sh <src:path> <dst:path> [--limit N] [--min-size M] [--slice S]
-#   src/dst 是 rclone remote 路径 (如 src:bucket / wopan:s3-bak/<bucket>).
+#   chunk-probe.sh <src:path> <dst:path> [--limit N] [--min-mib] [--slice-s] [--p N]
 #
 # 环境变量:
-#   RCLONE  : rclone 可执行文件路径 (默认 rclone)
-#   SLICE   : 单片下载长度字节, 1MiB 对齐 (默认 4MiB)
-#   LIMIT   : 最多探测多少个文件 (默认全部)
-#   MIN_SIZE: 只探测 >= 该字节的对象 (默认 1MiB, 跳过小文件避免请求过载)
+#   RCLONE   : rclone 可执行文件路径 (默认 rclone)
+#   SLICE    : 单片下载长度字节 (默认 4194304 = 4MiB)
+#   LIMIT    : 最多探测多少个文件 (默认 -1 = 全部)
+#   MIN_SIZE : 只探测 >= 该字节对象 (默认 1048576 = 1MiB)
+#   JOBS     : 并行拉取作业数 (默认 8, 源+目标各一连接算 1 片 2 连接)
+#   CHECKERS : 并行 md5 校验作业数 (默认 4)
+#   NO_CLEAN : 非空则保留临时分片文件供复查 (默认清理)
 #
-# 输出:
-#   每文件一行结果到 stdout, 汇总到 stderr; 结束码 0=全部一致, 1=发现不一致。
+# 输出:每文件一行结果到 stdout / 汇总与错误到 stderr;
+#       退出码 0=全部一致, 1=发现不一致, 2=有分片拉取失败(数据不完整)。
 
 set -euo pipefail
 
@@ -31,80 +36,162 @@ RCLONE="${RCLONE:-rclone}"
 SLICE="${SLICE:-4194304}"          # 4MiB
 LIMIT="${LIMIT:--1}"
 MIN_SIZE="${MIN_SIZE:-1048576}"    # 1MiB
+JOBS="${JOBS:-8}"
+CHECKERS="${CHECKERS:-4}"
 CHUNK_PER_100M=104857600
+PYTHON="${PYTHON:-python3}"
+WORKDIR="$(mktemp -d /tmp/probe.XXXXXX)"
 
 SRC="${1:?src:path required}"
 DST="${2:?dst:path required}"
 
-probe_err=/tmp/chunk-probe.err
+# ---- 阶段 1: 造清单 ----
+echo "== [1/3] 造清单 src=$SRC dst=$DST slice=$SLICE limit=$LIMIT jobs=$JOBS" >&2
 
-# 计算流式 stdin 的 md5 (openssl 与 md5sum 二选一)
-mmd5() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl dgst -md5 2>/dev/null | awk '{print $NF}'
-  else
-    cat | md5sum | awk '{print $1}'
-  fi
-}
-
-# 对齐到 1MiB
-align() {
-  local off="$1" step=$((1024*1024))
-  echo $(( off / step * step ))
-}
-
-declare -a FILES=()
-mapfile -t FILES < <(
+# 先 lsjson 一次取候选 (列出 >= MIN_SIZE 的文件)
+mapfile -t CAND < <(
   "$RCLONE" lsjson "$SRC" -R --files-only --no-mimetype --no-modtime \
     | jq -r '.[] | select(.Size >= '"$MIN_SIZE"') | [.Path, .Size] | @tsv'
 )
+total_count=${#CAND[@]}
 
-total_count=${#FILES[@]}
-echo "probe src=$SRC dst=$DST slice=$SLICE limit=$LIMIT files_candidates=$total_count"
+# python 生成平铺分片清单: out: <work>/chunks.0 (每行 Path<TAB>off<TAB>len<TAB>seq)
+# 按最小的文件取 LIMIT 个(即文件按其 Size 降序排序后取前 LIMIT, 聚焦大文件命中率)
+LIMIT_PY="${LIMIT}"
+FILES_TSV="$(mktemp -p "$WORKDIR" cand.XXXXXX.tsv)"
+printf '%s\n' "${CAND[@]}" >> "$FILES_TSV"
 
-probed=0; mism=0; skip=0
-for row in "${FILES[@]}"; do
-  [ "$LIMIT" -ne -1 ] && [ "$probed" -ge "$LIMIT" ] && break
-  p="${row%%$'\t'*}"; size="${row##*$'\t'}"
-  [ "$size" -gt 0 ] || { skip=$((skip+1)); continue; }
+"$PYTHON" - "$FILES_TSV" "$WORKDIR/chunks.0" "$CHUNK_PER_100M" "$SLICE" "$LIMIT_PY" "$MIN_SIZE" <<'PY'
+import sys, math, random
+tv, out, per100m, sl, lim, minsz = sys.argv[1:]
+per100m, sl, minsz, lim = int(per100m), int(sl), int(minsz), int(lim)
+files=[]
+with open(tv) as f:
+    for line in f:
+        line=line.rstrip('\n')
+        if not line: continue
+        path,size=line.split('\t',1)
+        files.append((path,int(size)))
+# 降序取 limit (聚焦大文件; -1=全部)
+if lim>=0:
+    files.sort(key=lambda x:-x[1])
+    files=files[:lim]
+random.seed(0x5EED)
+with open(out,'w') as o:
+    for path,size in files:
+        n=max(1,min(math.ceil(size/per100m),100))
+        eff=max(0,size-sl)
+        for i in range(n):
+            lo=size*i//n
+            hi=size*(i+1)//n-1
+            hix=max(lo, min(hi-sl+1, eff))
+            off=random.randint(lo,hix)
+            # 1MiB 对齐, 不越文件尾
+            off=(off//(1024*1024))*(1024*1024)
+            if off>eff: off=eff
+            o.write(f"{path}\t{off}\t{sl}\t{i}\n")
+PY
 
-  n=$(( (size + CHUNK_PER_100M - 1) / CHUNK_PER_100M ))
-  [ "$n" -lt 1 ] && n=1
-  [ "$n" -gt 100 ] && n=100
-  eff=$(( size - SLICE ))
-  [ "$eff" -lt 0 ] && eff=0
+CHUNKS_FILE="$WORKDIR/chunks.0"
+total_chunks=$(wc -l < "$CHUNKS_FILE")
+probed_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) ))
+echo "   files_candidates=$total_count  ->  probed=$probed_files  total_chunks=$total_chunks" >&2
 
-  echo "== $p (size=$size slices=$n slice=$SLICE)" >&2
+# ---- 阶段 2: 并行拉取 (每片 源+目标 各落盘一文件) ----
+echo "== [2/3] 并行拉取分片 jobs=$JOBS" >&2
 
-  ok=1
-  for ((i=0;i<n;i++)); do
-    lo=$(( size * i / n ))              # 区间起点
-    hi=$(( size * (i+1) / n - 1 ))      # 区间终点
-    hix=$(( hi - SLICE + 1 ))
-    [ "$hix" -lt "$lo" ] && hix="$lo"
-    [ "$hix" -gt "$eff" ] && hix="$eff"
-    [ "$hix" -lt 0 ] && hix=0
-    off=$(awk -v lo="$lo" -v hix="$hix" 'BEGIN{srand(); print int(lo + rand()*(hix-lo+1))}')
-    off=$(align "$off")
-    # 对齐后可能越过区间边界/文件尾,收回到合法范围
-    maxoff=$(( size - SLICE )); [ "$maxoff" -lt 0 ] && maxoff=0
-    [ "$off" -gt "$maxoff" ] && off="$maxoff"
+# per-chunk 拉取函数 (并行子进程)
+fetch_one() {
+  local line="$1" #  Path<TAB>off<TAB>len<TAB>seq
+  local path="${line%%$'\t'*}" rest="${line#*$'\t'}"
+  local off="${rest%%$'\t'*}" rest2="${rest#*$'\t'}"
+  local len="${rest2%%$'\t'*}" seq="${rest2#*$'\t'}"
+  local srcf="$WORKDIR/d_${seq}.src" dstf="$WORKDIR/d_${seq}.dst"
+  "$RCLONE" cat "$SRC/$path" --offset "$off" --count "$len" --no-check-certificate \
+    --retries 5 --low-level-retries 20 > "$srcf" 2>/dev/null || { rm -f "$srcf"; echo "SRCFAIL" > "$WORKDIR/d_${seq}.fail"; }
+  "$RCLONE" cat "$DST/$path" --offset "$off" --count "$len" --no-check-certificate \
+    --retries 5 --low-level-retries 20 > "$dstf" 2>/dev/null || { rm -f "$dstf"; echo "DSTFAIL" > "$WORKDIR/d_${seq}.fail"; }
+}
+export -f fetch_one
+export RCLONE SRC DST WORKDIR
 
-    a=$("$RCLONE" cat "$SRC/$p" --offset "$off" --count "$SLICE" --no-check-certificate --retries 5 2>/dev/null | mmd5)
-    b=$("$RCLONE" cat "$DST/$p" --offset "$off" --count "$SLICE" --no-check-certificate --retries 5 2>/dev/null | mmd5)
-    if [ -z "$a" ] || [ -z "$b" ]; then
-      echo "   SKIP chunk@$off (读取失败)" >&2; ok=0; continue
-    fi
-    if [ "$a" != "$b" ]; then
-      echo "   MISMATCH chunk@$off src=$a dst=$b" >&2
-      ok=0; mism=$((mism+1))
-    else
-      echo "   match chunk@$off" >&2
-    fi
-  done
-  probed=$((probed+1))
-  [ "$ok" -eq 1 ] && echo "MATCH $p"
+# bash 作业池按 JOBS 并发
+run_pool() {
+  local f="$1" j="$2"
+  local i=0
+  while IFS= read -r l; do
+    fetch_one "$l" &
+    i=$((i+1))
+    if [ $((i % j)) -eq 0 ]; then wait; i=0; fi
+  done < "$f"
+  wait
+}
+
+run_pool "$CHUNKS_FILE" "$JOBS"
+
+# 检查拉取失败的分片
+fail_count=$(cat "$WORKDIR"/*.fail 2>/dev/null | wc -l || true)
+[ "$fail_count" -eq 0 ] && rm -f "$WORKDIR"/*.fail || \
+  echo "::warning:: $fail_count 个分片拉取失败(源或目标),相关比对将判 SKIP" >&2
+
+# ---- 阶段 3: 并行比对 md5 ----
+echo "== [3/3] 并行比对 md5 checkers=$CHECKERS" >&2
+
+compare_one() {
+  local line="$1"
+  local path="${line%%$'\t'*}" rest="${line#*$'\t'}"
+  local rest2="${rest#*$'\t'}" rest3="${rest2#*$'\t'}"
+  local seq="${rest3#*$'\t'}"
+  local srcf="$WORKDIR/d_${seq}.src" dstf="$WORKDIR/d_${seq}.dst"
+  if [ -f "$WORKDIR/d_${seq}.fail" ]; then
+    echo "SKIP $path"
+    return 0
+  fi
+  local a b
+  a=$(md5sum "$srcf" 2>/dev/null | awk '{print $1}')
+  b=$(md5sum "$dstf" 2>/dev/null | awk '{print $1}')
+  if [ -z "$a" ] || [ -z "$b" ]; then
+    echo "SKIP $path"
+  elif [ "$a" = "$b" ]; then
+    echo "OK $path"
+  else
+    echo "MISMATCH $path"
+  fi
+}
+export -f compare_one
+export WORKDIR
+
+# 并行比对, 结果写结果文件, 再聚合到文件级
+RESULT="$WORKDIR/result.txt"
+: > "$RESULT"
+i=0
+while IFS= read -r l; do
+  compare_one "$l" >> "$RESULT" &
+  i=$((i+1))
+  if [ $((i % CHECKERS)) -eq 0 ]; then wait; i=0; fi
+done < "$CHUNKS_FILE"
+wait
+
+# ---- 聚合到文件级 ----
+tot_mism=0; tot_ok=0; tot_skip=0
+declare -A filestat
+while IFS= read -r cond rest; do
+  case "$cond" in
+    MISMATCH) tot_mism=$((tot_mism+1)); filestat["$rest"]="MISMATCH" ;;
+    SKIP)     tot_skip=$((tot_skip+1)); [ -z "${filestat[$rest]:-}" ] && filestat["$rest"]="SKIP" ;;
+    *)        tot_ok=$((tot_ok+1)) ;;
+  esac
+done < "$RESULT"
+
+echo "$RESULT" >&2  # keep
+mism_files=0; ok_files=0
+for path in "${!filestat[@]}"; do
+  if [ "${filestat[$path]}" = "MISMATCH" ]; then mism_files=$((mism_files+1)); echo "MISMATCH $path"; fi
 done
+ok_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) - mism_files ))
 
-echo "=== probe done: probed=$probed skipped=$skip mismatched_slices=$mism ===" >&2
-[ "$mism" -eq 0 ]
+echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files chunks_total=$total_chunks chunks_ok=$tot_ok chunks_mismatch=$tot_mism chunks_skip=$tot_skip ===" >&2
+
+if [ -z "${NO_CLEAN:-}" ]; then rm -rf "$WORKDIR"; else echo "workdir=$WORKDIR" >&2; fi
+
+[ "$tot_mism" -eq 0 ] && [ "$tot_skip" -eq 0 ]

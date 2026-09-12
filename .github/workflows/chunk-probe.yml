@@ -37,6 +37,10 @@ on:
         description: "只探测 >= 该字节的对象(默认 1048576=1MiB)"
         required: false
         default: "1048576"
+      jobs:
+        description: "并行拉取作业数(默认 8,每片源+目标各一连接)"
+        required: false
+        default: "8"
       no_refresh:
         description: "剥离 refresh_token,永不刷新(安全只读)"
         type: boolean
@@ -123,10 +127,11 @@ jobs:
           SLICE: ${{ inputs.slice }}
           LIMIT: ${{ inputs.limit }}
           MIN_SIZE: ${{ inputs.min_size }}
+          JOBS: ${{ inputs.jobs }}
         run: |
           chmod +x bin/chunk-probe.sh
           # 探针脚本直接读 $RCLONE_CONFIG 环境,上游已 export;这里显式注入
-          export RCLONE_CONFIG
+          export RCLONE_CONFIG PYTHON
           # limit 默认 0 = 只探测最大的一个文件(演练用,防失控)
           if [ "$LIMIT" = "0" ]; then
             LIMIT=1

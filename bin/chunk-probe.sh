@@ -45,14 +45,24 @@ WORKDIR="$(mktemp -d /tmp/probe.XXXXXX)"
 SRC="${1:?src:path required}"
 DST="${2:?dst:path required}"
 
+# 打点器: 输出 mm:ss 相对运行开始的时间戳 (便于定位卡点)
+START_TS=$SECONDS
+tick() { local label="$1"; echo "  [$(date -u +%H:%M:%S) t=$((SECONDS-START_TS))s] $label" >&2; }
+
 # ---- 阶段 1: 造清单 ----
-echo "== [1/3] 造清单 src=$SRC dst=$DST slice=$SLICE limit=$LIMIT jobs=$JOBS" >&2
+tick "阶段1开始 造清单 src=$SRC dst=$DST slice=$SLICE limit=$LIMIT jobs=$JOBS"
 
 # 先 lsjson 一次取候选 (列出 >= MIN_SIZE 的文件)
+# lsjson 全桶递归列所有对象(阿里 OSS ListObjectsV2 高位接口,应快);-vv 存独立日志,
+# 若卡住可定位是 OSS 接口还是 jq 解析。
+tick "阶段1a 发起 rclone lsjson -R (全桶递归列对象)..."
 mapfile -t CAND < <(
-  "$RCLONE" lsjson "$SRC" -R --files-only --no-mimetype --no-modtime \
+  "$RCLONE" lsjson "$SRC" -R --files-only --no-mimetype --no-modtime -vv 2>"$WORKDIR/lsjson.vv.log" \
     | jq -r '.[] | select(.Size >= '"$MIN_SIZE"') | [.Path, .Size] | @tsv'
 )
+tick "阶段1a 完成 lsjson, candidates=${#CAND[@]} (已过滤 >= ${MIN_SIZE}B)"
+[ "${#CAND[@]}" -gt 0 ] || { echo "::error::lsjson 无候选文件(>= $MIN_SIZE B)"; exit 1; }
+grep -c "" "$WORKDIR/lsjson.vv.log" >/dev/null 2>&1 && tail -5 "$WORKDIR/lsjson.vv.log" >&2 || true
 total_count=${#CAND[@]}
 
 # python 生成平铺分片清单: out: <work>/chunks.0 (每行 Path<TAB>off<TAB>len<TAB>seq)
@@ -95,10 +105,10 @@ PY
 CHUNKS_FILE="$WORKDIR/chunks.0"
 total_chunks=$(wc -l < "$CHUNKS_FILE")
 probed_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) ))
-echo "   files_candidates=$total_count  ->  probed=$probed_files  total_chunks=$total_chunks" >&2
+tick "阶段1b 分片计划完成: files_candidates=$total_count -> probed=$probed_files total_chunks=$total_chunks"
 
 # ---- 阶段 2: 并行拉取 (每片 源+目标 各落盘一文件) ----
-echo "== [2/3] 并行拉取分片 jobs=$JOBS" >&2
+tick "阶段2开始 并行拉取分片 jobs=$JOBS (共 $total_chunks 片)"
 
 # per-chunk 拉取函数 (并行子进程)
 fetch_one() {
@@ -118,16 +128,21 @@ export RCLONE SRC DST WORKDIR
 # bash 作业池按 JOBS 并发
 run_pool() {
   local f="$1" j="$2"
-  local i=0
+  local n=0 done=0
+  local total=$(wc -l < "$f")
   while IFS= read -r l; do
     fetch_one "$l" &
-    i=$((i+1))
-    if [ $((i % j)) -eq 0 ]; then wait; i=0; fi
+    n=$((n+1))
+    if [ $((n % j)) -eq 0 ]; then
+      wait; done=$((done+j))
+      if [ $((n * 10 / total % 2)) -eq 0 ]; then tick "阶段2 拉片进度 ${done}/${total}"; fi
+    fi
   done < "$f"
   wait
 }
 
 run_pool "$CHUNKS_FILE" "$JOBS"
+tick "阶段2完成 全部 ${total_chunks} 片已双端拉取"
 
 # 检查拉取失败的分片
 fail_count=$(cat "$WORKDIR"/*.fail 2>/dev/null | wc -l || true)
@@ -135,7 +150,7 @@ fail_count=$(cat "$WORKDIR"/*.fail 2>/dev/null | wc -l || true)
   echo "::warning:: $fail_count 个分片拉取失败(源或目标),相关比对将判 SKIP" >&2
 
 # ---- 阶段 3: 并行比对 md5 ----
-echo "== [3/3] 并行比对 md5 checkers=$CHECKERS" >&2
+tick "阶段3开始 并行比对 md5 checkers=$CHECKERS"
 
 compare_one() {
   local line="$1"
@@ -190,6 +205,7 @@ for path in "${!filestat[@]}"; do
 done
 ok_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) - mism_files ))
 
+tick "阶段3完成"
 echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files chunks_total=$total_chunks chunks_ok=$tot_ok chunks_mismatch=$tot_mism chunks_skip=$tot_skip ===" >&2
 
 if [ -z "${NO_CLEAN:-}" ]; then rm -rf "$WORKDIR"; else echo "workdir=$WORKDIR" >&2; fi

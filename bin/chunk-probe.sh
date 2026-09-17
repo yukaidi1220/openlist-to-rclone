@@ -39,7 +39,7 @@ SLICE="${SLICE:-2097152}"          # 2MiB(减半,提升分片数量与命中率)
 LIMIT="${LIMIT:--1}"
 RANDOM_PICK="${RANDOM_PICK:-0}"    # 随机抽样 N 个文件(>0 生效,优先于 LIMIT top-N)
 MIN_SIZE="${MIN_SIZE:-1048576}"    # 1MiB
-JOBS="${JOBS:-32}"                 # 网络无成本,提高并发摊薄 rclone 进程启动开销
+JOBS="${JOBS:-100}"                # 网络无成本,高并发摊薄 rclone 进程启动开销(32 实测偏慢)
 CHECKERS="${CHECKERS:-4}"
 CHUNKS_PER_FILE="${CHUNKS_PER_FILE:-10}"   # 每个文件固定抽 10 片(默认)
 DEL_MISMATCH="${DEL_MISMATCH:-}"   # 非空 = 分片不一致时删目标端文件(迁移 verify 自治)
@@ -190,11 +190,13 @@ run_pool() {
       done
       pids=("${alive[@]}")
     fi
-    # 打完成进度:VERBOSE=1 逐片打(50 片内也不算刷屏,500 片会稍密);
+    # 打完成进度:VERBOSE=1 每 5 片打一次(100 并发下逐片太刷屏,5 片粒度足够看推进);
     # 默认每完成 total/10 打一次
     if [ "${#pids[@]}" -ge "$j" ]; then
       if [ "$VERBOSE" = "1" ]; then
-        tick "阶段2 完成 ${done}/${total}"
+        if [ $((done % 5)) -eq 0 ] || [ "$done" -eq "$total" ]; then
+          tick "阶段2 完成 ${done}/${total}"
+        fi
       elif [ $(( done * 10 / total )) -gt $(( (done - 1) * 10 / total )) ]; then
         tick "阶段2 完成 ${done}/${total}"
       fi

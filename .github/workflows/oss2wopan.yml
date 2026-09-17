@@ -478,7 +478,7 @@ jobs:
         env:
           RCLONE: rclone
           SLICE: "2097152"              # 2MiB 片
-          JOBS: "32"                    # 并发拉取(网络无成本,摊薄 rclone 启动)
+          JOBS: "100"                   # 并发拉取(网络无成本,摊薄 rclone 启动;32 实测偏慢)
           RANDOM_PICK: "50"             # 全桶随机抽 50 个文件
           CHUNKS_PER_FILE: "10"         # 每文件 10 片
           DEL_MISMATCH: "1"             # 不一致 → 删除目标坏文件,重跑 sync 修复

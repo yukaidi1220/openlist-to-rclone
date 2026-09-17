@@ -38,9 +38,9 @@ on:
         required: false
         default: "1048576"
       jobs:
-        description: "并行拉取作业数(默认 32,每片源+目标各一连接)"
+        description: "并行拉取作业数(默认 100,每片源+目标各一连接)"
         required: false
-        default: "32"
+        default: "100"
       chunks_per_file:
         description: "每个文件固定抽多少片(默认 10,替代按体积切,控制总片数)"
         required: false

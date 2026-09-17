@@ -39,7 +39,7 @@ SLICE="${SLICE:-2097152}"          # 2MiB(减半,提升分片数量与命中率)
 LIMIT="${LIMIT:--1}"
 RANDOM_PICK="${RANDOM_PICK:-0}"    # 随机抽样 N 个文件(>0 生效,优先于 LIMIT top-N)
 MIN_SIZE="${MIN_SIZE:-1048576}"    # 1MiB
-JOBS="${JOBS:-100}"                # 网络无成本,高并发摊薄 rclone 进程启动开销(32 实测偏慢)
+JOBS="${JOBS:-50}"                # 联通云盘下载侧并发硬限制~40,100 打爆后端;50 兼顾速度与稳定
 CHECKERS="${CHECKERS:-4}"
 CHUNKS_PER_FILE="${CHUNKS_PER_FILE:-10}"   # 每个文件固定抽 10 片(默认)
 DEL_MISMATCH="${DEL_MISMATCH:-}"   # 非空 = 分片不一致时删目标端文件(迁移 verify 自治)

@@ -85,6 +85,8 @@ if lim >= 0:
     files.sort(key=lambda x: -x[1])
     files = files[:lim]
 random.seed(0x5EED)
+gseq = 0  # 全局唯一分片序号! 过去误用每文件片内索引 i(0..9),5 文件×10 片全冲突,
+          # d_<seq>.src/.dst/.fail 互相覆盖 → compare 读错文件、SKIP 全挂。
 with open(out, "w") as o:
     for path, size in files:
         # 文件均分 cpf 段,每段取一个 1MiB 对齐偏移;文件过小(<cpf 倍片长)则退化整文件取首片
@@ -99,7 +101,8 @@ with open(out, "w") as o:
             off = (off // (1024 * 1024)) * (1024 * 1024)  # 1MiB 对齐
             if off > eff:
                 off = eff
-            o.write(f"{path}\t{off}\t{sl}\t{i}\n")
+            o.write(f"{path}\t{off}\t{sl}\t{gseq}\n")
+            gseq += 1
 print(total)
 PY
 

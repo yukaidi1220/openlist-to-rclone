@@ -116,7 +116,8 @@ fetch_one() {
   local line="$1" #  Path<TAB>off<TAB>len<TAB>seq
   local path="${line%%$'\t'*}" rest="${line#*$'\t'}"
   local off="${rest%%$'\t'*}" rest2="${rest#*$'\t'}"
-  local len="${rest2%%$'\t'*}" seq="${rest2#*$'\t'}"
+  local len="${rest2%%$'\t'*}"
+  local seq="${rest2#*$'\t'}"
   local srcf="$WORKDIR/d_${seq}.src" dstf="$WORKDIR/d_${seq}.dst"
   # 源端
   "$RCLONE" cat "$SRC/$path" --offset "$off" --count "$len" --no-check-certificate \
@@ -170,7 +171,10 @@ tick "阶段3开始 并行比对 md5 checkers=$CHECKERS"
 compare_one() {
   local line="$1"
   local path="${line%%$'\t'*}" rest="${line#*$'\t'}"
-  local rest2="${rest#*$'\t'}" rest3="${rest2#*$'\t'}"
+  # 注意:set -u 下同一行 local 声明后,右值引用同名/相邻变量仍被视为未绑定,
+  #       必须拆行逐个 local 再引用,否则 unbound variable。
+  local rest2="${rest#*$'\t'}"
+  local rest3="${rest2#*$'\t'}"
   local seq="${rest3#*$'\t'}"
   local srcf="$WORKDIR/d_${seq}.src" dstf="$WORKDIR/d_${seq}.dst"
   if [ -f "$WORKDIR/d_${seq}.fail" ]; then

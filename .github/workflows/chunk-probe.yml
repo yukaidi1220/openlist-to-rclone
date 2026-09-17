@@ -41,6 +41,10 @@ on:
         description: "并行拉取作业数(默认 32,每片源+目标各一连接)"
         required: false
         default: "32"
+      chunks_per_file:
+        description: "每个文件固定抽多少片(默认 10,替代按体积切,控制总片数)"
+        required: false
+        default: "10"
       no_refresh:
         description: "剥离 refresh_token,永不刷新(安全只读)"
         type: boolean
@@ -128,6 +132,7 @@ jobs:
           LIMIT: ${{ inputs.limit }}
           MIN_SIZE: ${{ inputs.min_size }}
           JOBS: ${{ inputs.jobs }}
+          CHUNKS_PER_FILE: ${{ inputs.chunks_per_file }}
         run: |
           chmod +x bin/chunk-probe.sh
           # 探针脚本直接读 $RCLONE_CONFIG 环境,上游已 export;这里显式注入

@@ -224,9 +224,13 @@ run_pool "$CHUNKS_FILE" "$JOBS"
 tick "阶段2完成 全部 ${total_chunks} 片已双端拉取"
 
 # 检查拉取失败的分片
-fail_count=$(cat "$WORKDIR"/*.fail 2>/dev/null | wc -l || true)
-[ "$fail_count" -eq 0 ] && rm -f "$WORKDIR"/*.fail || \
-  echo "::warning:: $fail_count 个分片拉取失败(源或目标),相关比对将判 SKIP" >&2
+# 用文件数统计而非 wc -l 行数——两端都失败时 SRCFAIL/DSTFAIL 覆盖写入,文件仍只算 1 片
+fail_files=$(find "$WORKDIR" -name 'd_*.fail' 2>/dev/null | wc -l || true)
+if [ "$fail_files" -gt 0 ]; then
+  echo "::warning:: $fail_files 个分片拉取失败(源或目标),相关比对将判 SKIP" >&2
+else
+  rm -f "$WORKDIR"/*.fail
+fi
 
 # ---- 阶段 3: 并行比对 md5 ----
 tick "阶段3开始 并行比对 md5 checkers=$CHECKERS"
@@ -241,14 +245,14 @@ compare_one() {
   local seq="${rest3#*$'\t'}"
   local srcf="$WORKDIR/d_${seq}.src" dstf="$WORKDIR/d_${seq}.dst"
   if [ -f "$WORKDIR/d_${seq}.fail" ]; then
-    echo "SKIP $path"
+    echo "SKIP(file_fail) $path"
     return 0
   fi
   local a b
   a=$(md5sum "$srcf" 2>/dev/null | awk '{print $1}')
   b=$(md5sum "$dstf" 2>/dev/null | awk '{print $1}')
   if [ -z "$a" ] || [ -z "$b" ]; then
-    echo "SKIP $path"
+    echo "SKIP(md5_empty) $path"
   elif [ "$a" = "$b" ]; then
     echo "OK $path"
   else
@@ -270,16 +274,28 @@ done < "$CHUNKS_FILE"
 wait
 
 # ---- 聚合到文件级 ----
-tot_mism=0; tot_ok=0; tot_skip=0
+tot_mism=0; tot_ok=0; tot_skip=0; skip_ff=0; skip_me=0
 declare -A filestat
 : > "$WORKDIR/mismatch_files.txt"
 while IFS= read -r cond rest; do
   case "$cond" in
-    MISMATCH) tot_mism=$((tot_mism+1)); filestat["$rest"]="MISMATCH"; echo "$rest" >> "$WORKDIR/mismatch_files.txt" ;;
-    SKIP)     tot_skip=$((tot_skip+1)); [ -z "${filestat[$rest]:-}" ] && filestat["$rest"]="SKIP" ;;
-    *)        tot_ok=$((tot_ok+1)) ;;
+    MISMATCH)          tot_mism=$((tot_mism+1)); filestat["$rest"]="MISMATCH"; echo "$rest" >> "$WORKDIR/mismatch_files.txt" ;;
+    SKIP*)             tot_skip=$((tot_skip+1))
+                       case "$cond" in
+                         SKIP\(file_fail\))  skip_ff=$((skip_ff+1)) ;;
+                         SKIP\(md5_empty\))   skip_me=$((skip_me+1)) ;;
+                       esac
+                       [ -z "${filestat[$rest]:-}" ] && filestat["$rest"]="SKIP" ;;
+    *)                 tot_ok=$((tot_ok+1)) ;;
   esac
 done < "$RESULT"
+
+# 交叉验证:阶段2统计的 .fail 文件数 vs 阶段3 result.txt 里的 SKIP(file_fail) 行数
+cross_ok=1
+if [ "$skip_ff" -ne "$fail_files" ]; then
+  echo "::warning::计数不一致:阶段2有 $fail_files 个 .fail 文件,但阶段3只看到 $skip_ff 个 SKIP(file_fail)" >&2
+  cross_ok=0
+fi
 
 echo "$RESULT" >&2  # keep
 mism_files=0; ok_files=0
@@ -305,7 +321,7 @@ if [ -n "$DEL_MISMATCH" ] && [ "$mism_files" -gt 0 ]; then
 fi
 
 tick "阶段3完成"
-echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files chunks_total=$total_chunks chunks_ok=$tot_ok chunks_mismatch=$tot_mism chunks_skip=$tot_skip ===" >&2
+echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files chunks_total=$total_chunks chunks_ok=$tot_ok chunks_mismatch=$tot_mism chunks_skip=$tot_skip (skip_ff=$skip_ff skip_me=$skip_me fail_files=$fail_files cross_ok=$cross_ok) ===" >&2
 
 # 保留诊断文件供 artifact(字节核对 sizes.tsv / lsjson.vv.log / 各片 rclone 日志 / result)
 # WORKDIR 默认保留;设 CLEANUP=1 时才删除。分片本体(大)在比对后可删,留 *.log/tsv/result。

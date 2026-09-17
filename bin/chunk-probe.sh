@@ -16,35 +16,63 @@
 # 相比串行版: 网络往返可满带宽、rclone 进程启动开销被并发摊薄、比对不重传数据。
 #
 # 用法:
-#   chunk-probe.sh <src:path> <dst:path> [--limit N] [--min-mib] [--slice-s] [--p N]
+#   chunk-probe.sh <src:path> <dst:path> [选项]
 #
-# 环境变量:
+# 选项 (优先级:命令行 > 环境变量 > 默认值):
+#   --limit N               top-N 大文件档位 (-1=全部,默认 -1;与 --random-pick 互斥)
+#   --random-pick N         全桶随机抽 N 个文件 (0=不用,默认 0)
+#   --chunks-per-file N     每个文件固定抽多少片 (默认 10)
+#   --slice BYTES           单片下载长度字节 (默认 2097152 = 2MiB)
+#   --min-size BYTES        只探测 >= 该字节对象 (默认 1048576 = 1MiB)
+#   --jobs N                并行拉取作业数 (默认 100, 源+目标各一连接)
+#   --checkers N            并行 md5 校验作业数 (默认 4)
+#   --del-mismatch          分片不一致时删除目标端对应文件(迁移 verify 自治)
+#   --verbose               逐片打进度 tick
+#   --help, -h              显示帮助并退出
+#
+# 环境变量 (命令行未指定时生效):
 #   RCLONE    : rclone 可执行文件路径 (默认 rclone)
-#   SLICE     : 单片下载长度字节 (默认 2097152 = 2MiB)
-#   LIMIT     : top-N 大文件档位 (默认 -1 = 全部;与 RANDOM_PICK 互斥,优先 RANDOM_PICK)
-#   RANDOM_PICK: 随机抽样 N 个文件(0/空 = 不用随机,按 LIMIT 取大文件)。迁移 verify 用 50。
-#   MIN_SIZE  : 只探测 >= 该字节对象 (默认 1048576 = 1MiB)
-#   JOBS      : 并行拉取作业数 (默认 32, 每片源+目标各一连接)
-#   CHECKERS  : 并行 md5 校验作业数 (默认 4)
-#   DEL_MISMATCH: 非空则分片不一致时删除目标端对应文件(rclone deletefile),用于迁移 verify 自治
-#   CHUNKS_PER_FILE: 每个文件固定抽多少片 (默认 10)
+#   PYTHON    : python 可执行文件路径 (默认 python3)
 #
 # 输出:每文件一行结果到 stdout / 汇总与错误到 stderr;
 #       退出码 0=全部一致(允许 skip), 1=发现不一致(已删除目标坏文件,重跑 sync 修复)。
 
 set -euo pipefail
 
+# ---- 命令行参数解析 (命令行 > 环境变量 > 默认值) ----
+_LIMIT=""; _RANDOM_PICK=""; _CHUNKS_PER_FILE=""; _SLICE=""; _MIN_SIZE=""; _JOBS=""; _CHECKERS=""; _DEL_MISMATCH=""; _VERBOSE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --limit)            _LIMIT="$2";            shift 2 ;;
+    --random-pick)      _RANDOM_PICK="$2";      shift 2 ;;
+    --chunks-per-file)  _CHUNKS_PER_FILE="$2";  shift 2 ;;
+    --slice)            _SLICE="$2";            shift 2 ;;
+    --min-size)         _MIN_SIZE="$2";         shift 2 ;;
+    --jobs)             _JOBS="$2";             shift 2 ;;
+    --checkers)         _CHECKERS="$2";         shift 2 ;;
+    --del-mismatch)     _DEL_MISMATCH=1;        shift ;;
+    --verbose)          _VERBOSE=1;             shift ;;
+    --help|-h)
+      sed -n '2,34p' "$0"
+      exit 0 ;;
+    --) shift; break ;;
+    -*) echo "未知参数: $1 (用法见 --help)" >&2; exit 2 ;;
+    *) break ;;   # 位置参数 (src dst) 开始,跳出
+  esac
+done
+
 RCLONE="${RCLONE:-rclone}"
-SLICE="${SLICE:-2097152}"          # 2MiB(减半,提升分片数量与命中率)
-LIMIT="${LIMIT:--1}"
-RANDOM_PICK="${RANDOM_PICK:-0}"    # 随机抽样 N 个文件(>0 生效,优先于 LIMIT top-N)
-MIN_SIZE="${MIN_SIZE:-1048576}"    # 1MiB
-JOBS="${JOBS:-50}"                # 联通云盘下载侧并发硬限制~40,100 打爆后端;50 兼顾速度与稳定
-CHECKERS="${CHECKERS:-4}"
-CHUNKS_PER_FILE="${CHUNKS_PER_FILE:-10}"   # 每个文件固定抽 10 片(默认)
-DEL_MISMATCH="${DEL_MISMATCH:-}"   # 非空 = 分片不一致时删目标端文件(迁移 verify 自治)
-VERBOSE="${VERBOSE:-0}"            # 非空/非0 = 每片完成都打 tick(默认每 1/10 打一次,VERBOSE 逐片)
 PYTHON="${PYTHON:-python3}"
+SLICE="${_SLICE:-${SLICE:-2097152}}"       # 2MiB
+LIMIT="${_LIMIT:-${LIMIT:--1}}"
+RANDOM_PICK="${_RANDOM_PICK:-${RANDOM_PICK:-0}}"
+MIN_SIZE="${_MIN_SIZE:-${MIN_SIZE:-1048576}}"
+JOBS="${_JOBS:-${JOBS:-100}}"
+CHECKERS="${_CHECKERS:-${CHECKERS:-4}}"
+CHUNKS_PER_FILE="${_CHUNKS_PER_FILE:-${CHUNKS_PER_FILE:-10}}"
+DEL_MISMATCH="${_DEL_MISMATCH:-${DEL_MISMATCH:-}}"
+VERBOSE="${_VERBOSE:-${VERBOSE:-0}}"
+
 # 固定诊断目录名,便于 workflow 用 upload-artifact 稳定打包;探测只读且按桶分组串行,
 # 不同 bucket 各自 runner 独立 /tmp 无冲突。
 WORKDIR="/tmp/probe-artifact"

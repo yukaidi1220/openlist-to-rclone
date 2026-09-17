@@ -66,9 +66,23 @@ tick "阶段1开始 造清单 src=$SRC dst=$DST slice=$SLICE limit=$LIMIT jobs=$
 #       迁移流程用 > files.json 写盘未卡, 探针此前用 mapfile 存数组才卡死。
 tick "阶段1a 发起 rclone lsjson -R -> files.json (全桶递归)..."
 FILES_JSON="$WORKDIR/files.json"
-"$RCLONE" lsjson "$SRC" -R --files-only --no-mimetype --no-modtime -vv 2>"$WORKDIR/lsjson.vv.log" >"$FILES_JSON"
-LIST_RC=$?
-[ "$LIST_RC" -eq 0 ] || { echo "::error::lsjson 失败 rc=$LIST_RC (见 lsjson.vv.log)"; tail -20 "$WORKDIR/lsjson.vv.log" >&2; exit 1; }
+# 注意:set -e 下,简单命令非零返回立即自杀,LIST_RC=$? 永远到达不了;
+# 必须用 if 或 cmd || true 才能捕获退出码(此前 LIST_RC 检查是死代码,lsjson 失败直接 exit 1)。
+if "$RCLONE" lsjson "$SRC" -R --files-only --no-mimetype --no-modtime -vv \
+   2>"$WORKDIR/lsjson.vv.log" >"$FILES_JSON"; then
+  LIST_RC=0
+else
+  LIST_RC=$?
+  # 部分失败(如 OSS 瞬断读某个对象)可能 lsjson 返回非零但 files.json 已有内容;
+  # 只要 JSON 非空且可解析,继续走下去(跳过那一个坏对象);真正全空/不可解析才报错退出。
+  if [ -s "$FILES_JSON" ]; then
+    echo "::warning::lsjson rc=$LIST_RC(部分失败,files.json 有内容,继续处理已有数据)" >&2
+  else
+    echo "::error::lsjson 失败 rc=$LIST_RC,files.json 为空 (见 lsjson.vv.log)" >&2
+    tail -20 "$WORKDIR/lsjson.vv.log" >&2
+    exit 1
+  fi
+fi
 tick "阶段1a 完成 lsjson -> files.json ($(du -h "$FILES_JSON" | cut -f1))"
 
 # python:从 files.json 取文件并生成平铺分片清单

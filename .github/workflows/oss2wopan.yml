@@ -508,16 +508,19 @@ jobs:
           # 同时 tee 落盘 sample.log 供 artifact。此前 2> sample.err 导致运行中
           # 全程零输出、只能在结束时 tail,排查极不便。
           # 探针内部 stderr 打 tick 进度、stdout 打结果;合并流式输出最直观。
+          # set -o pipefail 下管道返回第一个非零退出码,chunk-probe 退出码能准确捕获。
           if /tmp/chunk-probe.sh "$SRC" "$DST" 2>&1 | tee sample.log; then
             echo "random sample content PASSED" | tee -a sample.log
             rc=0
           else
             rc=$?
-            echo "random sample content FAILED(exit=$rc,目标坏文件已删,重跑 sync 修复)" | tee -a sample.log
-            rc=1
+            # 探针内部已打印 MISMATCH/DEL_MISMATCH 等语义行,此处补充统一摘要;
+            # 不强制覆盖 rc=1,保留原始退出码便于排查脚本异常(脚本崩 != 发现 mismatch)。
+            echo "random sample content FAILED(chunk-probe exit=$rc)" | tee -a sample.log
           fi
-          echo "--- 探针汇总(stderr) ---" | tee -a sample.log
-          tail -20 sample.err | tee -a sample.log
+          echo "--- 探针汇总(探针尾部 summary 行) ---" | tee -a sample.log
+          grep -a "probe done\|lsjson 失败\|阶段" sample.log 2>/dev/null | tail -20 | tee -a sample.log || true
+          echo "WORKDIR artifact 路径: $WORKDIR" | tee -a sample.log
           exit $rc
 
       - name: Upload logs

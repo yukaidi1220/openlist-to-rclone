@@ -277,15 +277,16 @@ wait
 tot_mism=0; tot_ok=0; tot_skip=0; skip_ff=0; skip_me=0
 declare -A filestat
 : > "$WORKDIR/mismatch_files.txt"
-while IFS= read -r cond rest; do
+# 用第一个空格做分割点——path 可能含空格(如"英特尔® XTU/xxx.iso"),IFS= 只读第一个空格会截断
+while IFS= read -r line; do
+  [ -z "$line" ] && continue                      # 空行跳过
+  cond="${line%% *}"                              # 第一个空格前的结果类型
+  path="${line#* }"                               # 第一个空格后的完整路径
   case "$cond" in
-    MISMATCH)          tot_mism=$((tot_mism+1)); filestat["$rest"]="MISMATCH"; echo "$rest" >> "$WORKDIR/mismatch_files.txt" ;;
-    SKIP*)             tot_skip=$((tot_skip+1))
-                       case "$cond" in
-                         SKIP\(file_fail\))  skip_ff=$((skip_ff+1)) ;;
-                         SKIP\(md5_empty\))   skip_me=$((skip_me+1)) ;;
-                       esac
-                       [ -z "${filestat[$rest]:-}" ] && filestat["$rest"]="SKIP" ;;
+    MISMATCH)          tot_mism=$((tot_mism+1)); filestat["$path"]="MISMATCH"; echo "$path" >> "$WORKDIR/mismatch_files.txt" ;;
+    SKIP\(file_fail\)) tot_skip=$((tot_skip+1)); skip_ff=$((skip_ff+1)); [ -z "${filestat[$path]+x}" ] && filestat["$path"]="SKIP" ;;
+    SKIP\(md5_empty\)) tot_skip=$((tot_skip+1)); skip_me=$((skip_me+1)); [ -z "${filestat[$path]+x}" ] && filestat["$path"]="SKIP" ;;
+    SKIP*)             tot_skip=$((tot_skip+1)); [ -z "${filestat[$path]+x}" ] && filestat["$path"]="SKIP" ;;  # 兜底:裸 SKIP 兼容
     *)                 tot_ok=$((tot_ok+1)) ;;
   esac
 done < "$RESULT"

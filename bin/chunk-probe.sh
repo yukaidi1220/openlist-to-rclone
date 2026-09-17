@@ -38,7 +38,7 @@ LIMIT="${LIMIT:--1}"
 MIN_SIZE="${MIN_SIZE:-1048576}"    # 1MiB
 JOBS="${JOBS:-32}"                 # 网络无成本,提高并发摊薄 rclone 进程启动开销
 CHECKERS="${CHECKERS:-4}"
-CHUNK_PER_100M=104857600
+CHUNKS_PER_FILE="${CHUNKS_PER_FILE:-10}"   # 每个文件固定抽 10 片(默认)
 PYTHON="${PYTHON:-python3}"
 # 固定诊断目录名,便于 workflow 用 upload-artifact 稳定打包;探测只读且按桶分组串行,
 # 不同 bucket 各自 runner 独立 /tmp 无冲突。
@@ -68,11 +68,14 @@ tick "阶段1a 完成 lsjson -> files.json ($(du -h "$FILES_JSON" | cut -f1))"
 
 # python:从 files.json 流式取 top LIMIT 大文件并生成平铺分片清单
 # 不在 bash 里建大数组; python json.load 一次性读 + 内存排序, 比 bash mapfile 可靠。
-tick "阶段1b 分片计划 (top ${LIMIT} 大文件)..."
-total_count=$("$PYTHON" - "$FILES_JSON" "$WORKDIR/chunks.0" "$CHUNK_PER_100M" "$SLICE" "$LIMIT" "$MIN_SIZE" <<'PY')
+# 分片策略: 每文件固定 CHUNKS_PER_FILE 段(默认 10),把文件均分 N 段、每段内 1MiB
+# 对齐随机取一个偏移——相比按体积(每 100MiB 一片)对超大片会切出几百片、进程启动
+# 开销爆炸(每片起 2 个 rclone),固定 10 片总量可控且首中尾都被覆盖,命中率更高。
+tick "阶段1b 分片计划 (top ${LIMIT} 大文件, 每文件 ${CHUNKS_PER_FILE} 片)..."
+total_count=$("$PYTHON" - "$FILES_JSON" "$WORKDIR/chunks.0" "$CHUNKS_PER_FILE" "$SLICE" "$LIMIT" "$MIN_SIZE" <<'PY')
 import sys, math, random, json
-fj, out, per100m, sl, lim, minsz = sys.argv[1:]
-per100m, sl, minsz, lim = int(per100m), int(sl), int(minsz), int(lim)
+fj, out, cpf, sl, lim, minsz = sys.argv[1:]
+cpf, sl, minsz, lim = int(cpf), int(sl), int(minsz), int(lim)
 with open(fj) as f:
     data = json.load(f)
 files = [(o["Path"], int(o["Size"])) for o in data if int(o["Size"]) >= minsz]
@@ -84,13 +87,15 @@ if lim >= 0:
 random.seed(0x5EED)
 with open(out, "w") as o:
     for path, size in files:
-        n = max(1, min(math.ceil(size / per100m), 100))
+        # 文件均分 cpf 段,每段取一个 1MiB 对齐偏移;文件过小(<cpf 倍片长)则退化整文件取首片
+        n = max(1, min(cpf, size // sl if size >= sl else 1))
         eff = max(0, size - sl)
+        step = size / n
         for i in range(n):
-            lo = size * i // n
-            hi = size * (i + 1) // n - 1
+            lo = int(i * step)
+            hi = int((i + 1) * step) - 1
             hix = max(lo, min(hi - sl + 1, eff))
-            off = random.randint(lo, hix)
+            off = random.randint(lo, hix) if hix >= lo else lo
             off = (off // (1024 * 1024)) * (1024 * 1024)  # 1MiB 对齐
             if off > eff:
                 off = eff
@@ -151,14 +156,15 @@ run_pool() {
   local f="$1" j="$2"
   local total=$(wc -l < "$f")
   local -a pids=()
-  local n=0
+  local n=0 done=0
   while IFS= read -r l; do
     fetch_one "$l" &
     pids+=("$!")
     n=$((n+1))
-    # 达到窗口上限 → 等任意一个结束,过滤已死 pid(保持窗口滑动,立即补位)
+    # 达到窗口上限 → 等任意一个结束(累计 done),过滤已死 pid,立即补位
     if [ "${#pids[@]}" -ge "$j" ]; then
       wait -n 2>/dev/null || true
+      done=$((done+1))
       local -a alive=()
       local p
       for p in "${pids[@]}"; do
@@ -166,10 +172,14 @@ run_pool() {
       done
       pids=("${alive[@]}")
     fi
-    if [ $((n % 100)) -eq 0 ]; then tick "阶段2 拉片进度 ${n}/${total}(窗口已启动,完成数见末尾)"; fi
+    # 打完成进度(不是启动数!): 每完成 total/10 打一次
+    if [ "${#pids[@]}" -ge "$j" ] && [ $(( done * 10 / total )) -gt $(( (done - 1) * 10 / total )) ]; then
+      tick "阶段2 完成 ${done}/${total}"
+    fi
   done < "$f"
   wait
-  tick "阶段2 拉片全部结束"
+  done=$total
+  tick "阶段2 拉片全部结束(共 ${done})"
 }
 run_pool "$CHUNKS_FILE" "$JOBS"
 tick "阶段2完成 全部 ${total_chunks} 片已双端拉取"

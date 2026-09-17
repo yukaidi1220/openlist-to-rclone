@@ -19,26 +19,30 @@
 #   chunk-probe.sh <src:path> <dst:path> [--limit N] [--min-mib] [--slice-s] [--p N]
 #
 # 环境变量:
-#   RCLONE   : rclone 可执行文件路径 (默认 rclone)
-#   SLICE    : 单片下载长度字节 (默认 4194304 = 4MiB)
-#   LIMIT    : 最多探测多少个文件 (默认 -1 = 全部)
-#   MIN_SIZE : 只探测 >= 该字节对象 (默认 1048576 = 1MiB)
-#   JOBS     : 并行拉取作业数 (默认 8, 源+目标各一连接算 1 片 2 连接)
-#   CHECKERS : 并行 md5 校验作业数 (默认 4)
-#   NO_CLEAN : 非空则保留临时分片文件供复查 (默认清理)
+#   RCLONE    : rclone 可执行文件路径 (默认 rclone)
+#   SLICE     : 单片下载长度字节 (默认 2097152 = 2MiB)
+#   LIMIT     : top-N 大文件档位 (默认 -1 = 全部;与 RANDOM_PICK 互斥,优先 RANDOM_PICK)
+#   RANDOM_PICK: 随机抽样 N 个文件(0/空 = 不用随机,按 LIMIT 取大文件)。迁移 verify 用 50。
+#   MIN_SIZE  : 只探测 >= 该字节对象 (默认 1048576 = 1MiB)
+#   JOBS      : 并行拉取作业数 (默认 32, 每片源+目标各一连接)
+#   CHECKERS  : 并行 md5 校验作业数 (默认 4)
+#   DEL_MISMATCH: 非空则分片不一致时删除目标端对应文件(rclone deletefile),用于迁移 verify 自治
+#   CHUNKS_PER_FILE: 每个文件固定抽多少片 (默认 10)
 #
 # 输出:每文件一行结果到 stdout / 汇总与错误到 stderr;
-#       退出码 0=全部一致, 1=发现不一致, 2=有分片拉取失败(数据不完整)。
+#       退出码 0=全部一致(允许 skip), 1=发现不一致(已删除目标坏文件,重跑 sync 修复)。
 
 set -euo pipefail
 
 RCLONE="${RCLONE:-rclone}"
 SLICE="${SLICE:-2097152}"          # 2MiB(减半,提升分片数量与命中率)
 LIMIT="${LIMIT:--1}"
+RANDOM_PICK="${RANDOM_PICK:-0}"    # 随机抽样 N 个文件(>0 生效,优先于 LIMIT top-N)
 MIN_SIZE="${MIN_SIZE:-1048576}"    # 1MiB
 JOBS="${JOBS:-32}"                 # 网络无成本,提高并发摊薄 rclone 进程启动开销
 CHECKERS="${CHECKERS:-4}"
 CHUNKS_PER_FILE="${CHUNKS_PER_FILE:-10}"   # 每个文件固定抽 10 片(默认)
+DEL_MISMATCH="${DEL_MISMATCH:-}"   # 非空 = 分片不一致时删目标端文件(迁移 verify 自治)
 PYTHON="${PYTHON:-python3}"
 # 固定诊断目录名,便于 workflow 用 upload-artifact 稳定打包;探测只读且按桶分组串行,
 # 不同 bucket 各自 runner 独立 /tmp 无冲突。
@@ -66,25 +70,35 @@ LIST_RC=$?
 [ "$LIST_RC" -eq 0 ] || { echo "::error::lsjson 失败 rc=$LIST_RC (见 lsjson.vv.log)"; tail -20 "$WORKDIR/lsjson.vv.log" >&2; exit 1; }
 tick "阶段1a 完成 lsjson -> files.json ($(du -h "$FILES_JSON" | cut -f1))"
 
-# python:从 files.json 流式取 top LIMIT 大文件并生成平铺分片清单
-# 不在 bash 里建大数组; python json.load 一次性读 + 内存排序, 比 bash mapfile 可靠。
+# python:从 files.json 取文件并生成平铺分片清单
+# 不在 bash 里建大数组; python json.load 一次性读 + 内存排序/随机, 比 bash mapfile 可靠。
+# 抽样: RANDOM_PICK>0 → 全桶随机抽 N 个文件(LIMIT 忽略);否则 top-LIMIT 大文件。
 # 分片策略: 每文件固定 CHUNKS_PER_FILE 段(默认 10),把文件均分 N 段、每段内 1MiB
 # 对齐随机取一个偏移——相比按体积(每 100MiB 一片)对超大片会切出几百片、进程启动
 # 开销爆炸(每片起 2 个 rclone),固定 10 片总量可控且首中尾都被覆盖,命中率更高。
-tick "阶段1b 分片计划 (top ${LIMIT} 大文件, 每文件 ${CHUNKS_PER_FILE} 片)..."
-total_count=$("$PYTHON" - "$FILES_JSON" "$WORKDIR/chunks.0" "$CHUNKS_PER_FILE" "$SLICE" "$LIMIT" "$MIN_SIZE" <<'PY')
+if [ "$RANDOM_PICK" -gt 0 ] 2>/dev/null; then
+  PICK_LABEL="全桶随机 ${RANDOM_PICK} 个文件"
+else
+  PICK_LABEL="top ${LIMIT} 大文件"
+fi
+tick "阶段1b 分片计划 ($PICK_LABEL, 每文件 ${CHUNKS_PER_FILE} 片)..."
+total_count=$("$PYTHON" - "$FILES_JSON" "$WORKDIR/chunks.0" "$CHUNKS_PER_FILE" "$SLICE" "$LIMIT" "$MIN_SIZE" "$RANDOM_PICK" <<'PY')
 import sys, math, random, json
-fj, out, cpf, sl, lim, minsz = sys.argv[1:]
-cpf, sl, minsz, lim = int(cpf), int(sl), int(minsz), int(lim)
+fj, out, cpf, sl, lim, minsz, rpick = sys.argv[1:]
+cpf, sl, minsz, lim, rpick = int(cpf), int(sl), int(minsz), int(lim), int(rpick)
 with open(fj) as f:
     data = json.load(f)
 files = [(o["Path"], int(o["Size"])) for o in data if int(o["Size"]) >= minsz]
 total = len(files)
-# 降序取 limit (聚焦大文件; -1=全部)
-if lim >= 0:
+random.seed(0x5EED)  # 固定种子,结果可复现(排查友好)
+if rpick > 0:
+    # 全桶随机抽 N 个(不按体积偏置;文件不足 N 则全取)
+    random.shuffle(files)
+    files = files[:rpick]
+elif lim >= 0:
+    # 降序取 limit (聚焦大文件; -1=全部)
     files.sort(key=lambda x: -x[1])
     files = files[:lim]
-random.seed(0x5EED)
 gseq = 0  # 全局唯一分片序号! 过去误用每文件片内索引 i(0..9),5 文件×10 片全冲突,
           # d_<seq>.src/.dst/.fail 互相覆盖 → compare 读错文件、SKIP 全挂。
 with open(out, "w") as o:
@@ -236,9 +250,10 @@ wait
 # ---- 聚合到文件级 ----
 tot_mism=0; tot_ok=0; tot_skip=0
 declare -A filestat
+: > "$WORKDIR/mismatch_files.txt"
 while IFS= read -r cond rest; do
   case "$cond" in
-    MISMATCH) tot_mism=$((tot_mism+1)); filestat["$rest"]="MISMATCH" ;;
+    MISMATCH) tot_mism=$((tot_mism+1)); filestat["$rest"]="MISMATCH"; echo "$rest" >> "$WORKDIR/mismatch_files.txt" ;;
     SKIP)     tot_skip=$((tot_skip+1)); [ -z "${filestat[$rest]:-}" ] && filestat["$rest"]="SKIP" ;;
     *)        tot_ok=$((tot_ok+1)) ;;
   esac
@@ -251,6 +266,22 @@ for path in "${!filestat[@]}"; do
 done
 ok_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) - mism_files ))
 
+# DEL_MISMATCH:迁移 verify 自治——把不一致的目标文件删掉,重跑 sync 即重传修复。
+# 串行逐个删(失败不影响其他),删除走 rclone deletefile(幂等,文件不存在也成功)。
+# 注:SRC/DST/RCLONE 已在 fetch 段 export,此处(主进程)直接可见。
+if [ -n "$DEL_MISMATCH" ] && [ "$mism_files" -gt 0 ]; then
+  echo "== DEL_MISMATCH 已开启,删除 $mism_files 个不一致目标文件 ==" >&2
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    if "$RCLONE" deletefile --no-check-certificate "$DST/$p" --retries 5 \
+       2>"$WORKDIR/del.err"; then
+      echo "  deleted: $p" >&2
+    else
+      echo "::warning::删除失败(目标端): $p" >&2
+    fi
+  done < "$WORKDIR/mismatch_files.txt"
+fi
+
 tick "阶段3完成"
 echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files chunks_total=$total_chunks chunks_ok=$tot_ok chunks_mismatch=$tot_mism chunks_skip=$tot_skip ===" >&2
 
@@ -262,4 +293,6 @@ if [ "${CLEANUP:-}" = "1" ]; then
 fi
 echo "WORKDIR_ARTIFACT=$WORKDIR" >&2
 
-[ "$tot_mism" -eq 0 ] && [ "$tot_skip" -eq 0 ]
+# 退出语义: 仅发现不一致(MISMATCH,且已 DEL_MISMATCH 删除目标)才非 0;
+# 拉取失败(SKIP)不致命——目标端目录缺失等 read 失败由 sync 阶段 size-only 兜底。
+[ "$tot_mism" -eq 0 ]

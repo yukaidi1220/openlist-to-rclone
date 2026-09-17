@@ -10,7 +10,7 @@
 #   - 上传后 mtime 不可改 → copy 必须带 --size-only,否则每轮都全量重传
 #   - 不支持 0 字节文件(遇到会报错跳过,不影响其他文件)
 #   - 文件名 ≤100 字符,部分特殊符号/4 字节字符不可用
-#   - ≥8MiB 文件 MD5 有分钟级沉降窗口(抽样的 cat|md5sum 是真实内容,不受影响)
+#   - ≥8MiB 文件 MD5 有分钟级沉降窗口(抽样校验用分片 Range 下载真实内容,不受影响)
 #
 # 断点语义:copy 粒度为整文件,重跑自动跳过已存在(--size-only)的文件。
 
@@ -473,80 +473,39 @@ jobs:
           if [ "$rc" -ne 0 ]; then echo "::warning::rclone check exit=$rc(存在目标缺失/错误,已放行;详见 check.log)"; fi
           echo "full one-way size check done (rc=$rc)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Verify - random sample content md5 (双端真实下载)
+      - name: Verify - random sample content (分片抽样,不再整文件下载)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
+        env:
+          RCLONE: rclone
+          SLICE: "2097152"              # 2MiB 片
+          JOBS: "32"                    # 并发拉取(网络无成本,摊薄 rclone 启动)
+          RANDOM_PICK: "50"             # 全桶随机抽 50 个文件
+          CHUNKS_PER_FILE: "10"         # 每文件 10 片
+          DEL_MISMATCH: "1"             # 不一致 → 删除目标坏文件,重跑 sync 修复
+          MIN_SIZE: "1048576"           # 只探 ≥1MiB 对象
         run: |
           . /tmp/paths.src
-          # 并发容错:源桶可能被其他客户端并发修改(对象瞬时消失/内容变动)。
-          # 下载用 rclone copy 落盘,而非 cat|md5sum 管道:cat 是单次流式读取,
-          # 网络中断即作废且无重试;copy 自带 --retries 文件级重试,中断后自动
-          # 重跑直到成功。落盘后先核对字节数再算 md5,
-          # 任何一端失败/字节数不符都跳过该样本并警告,绝不删除目标文件;
-          # 只有双端都完整落盘且 md5 不一致才判为真实损坏。
-          # 多线程 Range 分段下载(--multi-thread-cutoff 1Mi --multi-thread-streams 16):
-          # CDN 侧 Range 分段问题已修复;cutoff 降至 1Mi 让中小文件也并行下载,
-          # 双端比对耗时大幅缩短(2026-09-12 实测,7.5GB ISO 40+ 分钟 → 分钟级)。
-          rclone lsjson "$SRC" -R --files-only --no-mimetype --no-modtime > files.json
-          total=$(jq 'length' files.json)
-          echo "total files: $total"
-          mapfile -t picks < <(jq -r '.[].Path' files.json | shuf -n 5)
-          : > sample.log
-          fail=0; skip=0; ok=0
-          for p in "${picks[@]}"; do
-            size=$(jq -r --arg p "$p" '.[] | select(.Path==$p) | .Size' files.json)
-            echo "== sample: $p ($size bytes)" | tee -a sample.log
-            # 字符串比较:文件在 lsjson 之后被并发删除时 size 为空,数字比较会崩溃整步
-            if [ "$size" = "" ] || [ "$size" = "0" ]; then
-              echo "   SKIP: 对象缺失或 0 字节(wopan 不支持 0 字节),跳过" | tee -a sample.log; skip=$((skip+1)); continue
-            fi
-            rm -rf /tmp/vsrc /tmp/vdst; mkdir -p /tmp/vsrc /tmp/vdst
-            rclone copy "$SRC/$p" /tmp/vsrc --no-check-certificate \
-              --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-              --multi-thread-cutoff 1Mi --multi-thread-streams 16 \
-              --stats 0 -q 2>/tmp/src.err \
-              || { echo "   SKIP: 源端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue; }
-            src_file=$(find /tmp/vsrc -type f | head -1)
-            src_size=$(stat -c%s "$src_file" 2>/dev/null || echo -1)
-            if [ -z "$src_file" ] || [ "$src_size" -ne "$size" ]; then
-              echo "   SKIP: 源端字节数不符,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue
-            fi
-            rclone copy "$DST/$p" /tmp/vdst \
-              --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
-              --multi-thread-cutoff 1Mi --multi-thread-streams 16 \
-              --stats 0 -q 2>/tmp/dst.err \
-              || { echo "   SKIP: 目标端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/dst.err | sed 's/^/   dst: /' | tee -a sample.log; skip=$((skip+1)); continue; }
-            dst_file=$(find /tmp/vdst -type f | head -1)
-            dst_size=$(stat -c%s "$dst_file" 2>/dev/null || echo -1)
-            if [ -z "$dst_file" ] || [ "$dst_size" -ne "$size" ]; then
-              echo "   SKIP: 目标端字节数不符,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/dst.err | sed 's/^/   dst: /' | tee -a sample.log; skip=$((skip+1)); continue
-            fi
-            src_md5=$(md5sum "$src_file" | awk '{print $1}')
-            dst_md5=$(md5sum "$dst_file" | awk '{print $1}')
-            if [ ${#src_md5} -ne 32 ] || [ ${#dst_md5} -ne 32 ]; then
-              echo "   SKIP: 本地 md5 计算失败,跳过(不删目标)" | tee -a sample.log; skip=$((skip+1)); continue
-            fi
-            echo "   src md5: $src_md5" | tee -a sample.log
-            echo "   dst md5: $dst_md5" | tee -a sample.log
-            if [ "$src_md5" != "$dst_md5" ]; then
-              echo "   MISMATCH -> 删除目标坏文件以便重传" | tee -a sample.log
-              rclone deletefile --no-check-certificate "$DST/$p" --retries 5
-              fail=$((fail+1))
-            else
-              echo "   MATCH" | tee -a sample.log
-              ok=$((ok+1))
-            fi
-          done
-          if [ "$fail" -ne 0 ]; then
-            echo "::warning::抽样发现 $fail 个不一致的目标文件已删除,重跑 copy 即可修复"
-            exit 1
+          set -o pipefail
+          # 分片抽样比对(替代旧的整文件 copy+md5sum):
+          #   - 每文件固定 10 片、文件均分覆盖首中尾,2MiB Range 下载,不整传大文件
+          #   - 双端并行 + 滑动窗口作业池(32 并发),进程启动开销被摊薄
+          #   - seq 全局唯一(修复过互覆盖 bug),md5 逐片比对
+          #   - DEL_MISMATCH:分片不一致即删目标端该文件,run 非 0 退出,
+          #     重跑 sync(size-only)自动重传修复;拉取失败(SKIP)不致命
+          #   - 退出 1 = 有损坏已删,退出 0 = 抽样全部一致
+          chmod +x bin/chunk-probe.sh
+          export RCLONE_CONFIG PYTHON
+          if bin/chunk-probe.sh "$SRC" "$DST" > sample.out 2> sample.err; then
+            echo "random sample content PASSED" | tee -a sample.log
+            rc=0
+          else
+            rc=$?
+            echo "random sample content FAILED(exit=$rc,目标坏文件已删,重跑 sync 修复)" | tee -a sample.log
+            rc=1
           fi
-          if [ "$skip" -ne 0 ]; then
-            echo "::warning::抽样有 $skip 个样本因读取失败被跳过(可能是源桶并发修改),未删任何目标文件"
-          fi
-          if [ "$ok" -eq 0 ] && [ "$skip" -ne 0 ]; then
-            echo "::warning::本次抽样没有有效样本,内容校验未真正完成,建议重跑 verify"
-          fi
-          echo "random sample content-md5 PASSED (ok=$ok skip=$skip)" >> "$GITHUB_STEP_SUMMARY"
+          echo "--- 探针汇总(stderr) ---" | tee -a sample.log
+          tail -20 sample.err | tee -a sample.log
+          exit $rc
 
       - name: Upload logs
         if: always()
@@ -557,6 +516,8 @@ jobs:
             copy.log
             check.log
             sample.log
+            sample.err
+            /tmp/probe-artifact/
           if-no-files-found: ignore
 
       - name: Writeback refreshed wopan token (best-effort)

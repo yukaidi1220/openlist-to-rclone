@@ -43,6 +43,7 @@ JOBS="${JOBS:-32}"                 # 网络无成本,提高并发摊薄 rclone �
 CHECKERS="${CHECKERS:-4}"
 CHUNKS_PER_FILE="${CHUNKS_PER_FILE:-10}"   # 每个文件固定抽 10 片(默认)
 DEL_MISMATCH="${DEL_MISMATCH:-}"   # 非空 = 分片不一致时删目标端文件(迁移 verify 自治)
+VERBOSE="${VERBOSE:-0}"            # 非空/非0 = 每片完成都打 tick(默认每 1/10 打一次,VERBOSE 逐片)
 PYTHON="${PYTHON:-python3}"
 # 固定诊断目录名,便于 workflow 用 upload-artifact 稳定打包;探测只读且按桶分组串行,
 # 不同 bucket 各自 runner 独立 /tmp 无冲突。
@@ -166,7 +167,7 @@ fetch_one() {
   fi
 }
 export -f fetch_one
-export RCLONE SRC DST WORKDIR
+export RCLONE SRC DST WORKDIR VERBOSE
 
 # 滑动窗口作业池: 不整批 wait,窗口满即等一个结束并补位,消灭"整批等最慢"的黑洞
 run_pool() {
@@ -189,9 +190,14 @@ run_pool() {
       done
       pids=("${alive[@]}")
     fi
-    # 打完成进度(不是启动数!): 每完成 total/10 打一次
-    if [ "${#pids[@]}" -ge "$j" ] && [ $(( done * 10 / total )) -gt $(( (done - 1) * 10 / total )) ]; then
-      tick "阶段2 完成 ${done}/${total}"
+    # 打完成进度:VERBOSE=1 逐片打(50 片内也不算刷屏,500 片会稍密);
+    # 默认每完成 total/10 打一次
+    if [ "${#pids[@]}" -ge "$j" ]; then
+      if [ "$VERBOSE" = "1" ]; then
+        tick "阶段2 完成 ${done}/${total}"
+      elif [ $(( done * 10 / total )) -gt $(( (done - 1) * 10 / total )) ]; then
+        tick "阶段2 完成 ${done}/${total}"
+      fi
     fi
   done < "$f"
   wait

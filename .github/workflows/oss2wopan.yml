@@ -483,6 +483,7 @@ jobs:
           CHUNKS_PER_FILE: "10"         # 每文件 10 片
           DEL_MISMATCH: "1"             # 不一致 → 删除目标坏文件,重跑 sync 修复
           MIN_SIZE: "1048576"           # 只探 ≥1MiB 对象
+          VERBOSE: "1"                  # 逐片打进度(实时日志可见)
         run: |
           . /tmp/paths.src
           set -o pipefail
@@ -503,7 +504,11 @@ jobs:
           [ -s /tmp/chunk-probe.sh ] || { echo "::error::无法拉取 chunk-probe.sh"; exit 1; }
           chmod +x /tmp/chunk-probe.sh
           export RCLONE_CONFIG PYTHON
-          if /tmp/chunk-probe.sh "$SRC" "$DST" > sample.out 2> sample.err; then
+          # 实时流式输出:探针 tick/进度直接上 GitHub 日志(不再重定向到文件憋着),
+          # 同时 tee 落盘 sample.log 供 artifact。此前 2> sample.err 导致运行中
+          # 全程零输出、只能在结束时 tail,排查极不便。
+          # 探针内部 stderr 打 tick 进度、stdout 打结果;合并流式输出最直观。
+          if /tmp/chunk-probe.sh "$SRC" "$DST" 2>&1 | tee sample.log; then
             echo "random sample content PASSED" | tee -a sample.log
             rc=0
           else

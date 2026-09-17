@@ -33,10 +33,10 @@
 set -euo pipefail
 
 RCLONE="${RCLONE:-rclone}"
-SLICE="${SLICE:-4194304}"          # 4MiB
+SLICE="${SLICE:-2097152}"          # 2MiB(减半,提升分片数量与命中率)
 LIMIT="${LIMIT:--1}"
 MIN_SIZE="${MIN_SIZE:-1048576}"    # 1MiB
-JOBS="${JOBS:-8}"
+JOBS="${JOBS:-32}"                 # 网络无成本,提高并发摊薄 rclone 进程启动开销
 CHECKERS="${CHECKERS:-4}"
 CHUNK_PER_100M=104857600
 PYTHON="${PYTHON:-python3}"
@@ -110,6 +110,7 @@ tick "阶段1b 分片计划完成: files_candidates=$total_count -> probed=$prob
 tick "阶段2开始 并行拉取分片 jobs=$JOBS (共 $total_chunks 片)"
 
 # per-chunk 拉取函数 (并行子进程)
+# 双端并行: 源端与目标端同时拉取(此前串行,慢的一端独占时间)。
 # 取证设计: 不丢弃 rclone stderr(存 d_<seq>.src/.dst.log),落盘后 du -b 核对实际字节,
 #           与请求 len 对比:远大于 len → 疑似未走 Range、整文件下载(计入 sizes 供诊断)。
 fetch_one() {
@@ -119,19 +120,23 @@ fetch_one() {
   local len="${rest2%%$'\t'*}"
   local seq="${rest2#*$'\t'}"
   local srcf="$WORKDIR/d_${seq}.src" dstf="$WORKDIR/d_${seq}.dst"
-  # 源端
-  "$RCLONE" cat "$SRC/$path" --offset "$off" --count "$len" --no-check-certificate \
-    --retries 5 --low-level-retries 20 > "$srcf" 2>"$WORKDIR/d_${seq}.src.log" \
-    || { rm -f "$srcf"; echo "SRCFAIL $path" > "$WORKDIR/d_${seq}.fail"; }
+  # 双端并行拉取(后台 & 同时跑,完了 wait)
+  ( "$RCLONE" cat "$SRC/$path" --offset "$off" --count "$len" --no-check-certificate \
+      --retries 5 --low-level-retries 20 > "$srcf" 2>"$WORKDIR/d_${seq}.src.log" \
+      || { rm -f "$srcf"; echo "SRCFAIL $path" > "$WORKDIR/d_${seq}.fail"; } ) &
+  local pidsrc=$!
+  ( "$RCLONE" cat "$DST/$path" --offset "$off" --count "$len" --no-check-certificate \
+      --retries 5 --low-level-retries 20 > "$dstf" 2>"$WORKDIR/d_${seq}.dst.log" \
+      || { rm -f "$dstf"; echo "DSTFAIL $path" > "$WORKDIR/d_${seq}.fail"; } ) &
+  local piddst=$!
+  wait "$pidsrc" || true
+  wait "$piddst" || true
+  # 落盘字节核对(仅在文件存在时统计;失败文件会被 rm 掉,du 返回 0)
   local ss=$(( $(du -b "$srcf" 2>/dev/null | cut -f1) + 0 ))
   printf '%s\tSRC\t%s\t%s\t%s\n' "$seq" "$ss" "$len" "$path" >> "$WORKDIR/sizes.tsv"
   if [ "$ss" -gt $(( len + 1048576 )) ]; then  # 超过 len 1MiB 容差 = 疑似全量下载
     echo "::warning::WARN 源端疑似整文件下载 seq=$seq off=$off want=$len got=$ss $path" >&2
   fi
-  # 目标端
-  "$RCLONE" cat "$DST/$path" --offset "$off" --count "$len" --no-check-certificate \
-    --retries 5 --low-level-retries 20 > "$dstf" 2>"$WORKDIR/d_${seq}.dst.log" \
-    || { rm -f "$dstf"; echo "DSTFAIL $path" > "$WORKDIR/d_${seq}.fail"; }
   local ds=$(( $(du -b "$dstf" 2>/dev/null | cut -f1) + 0 ))
   printf '%s\tDST\t%s\t%s\t%s\n' "$seq" "$ds" "$len" "$path" >> "$WORKDIR/sizes.tsv"
   if [ "$ds" -gt $(( len + 1048576 )) ]; then
@@ -141,22 +146,31 @@ fetch_one() {
 export -f fetch_one
 export RCLONE SRC DST WORKDIR
 
-# bash 作业池按 JOBS 并发
+# 滑动窗口作业池: 不整批 wait,窗口满即等一个结束并补位,消灭"整批等最慢"的黑洞
 run_pool() {
   local f="$1" j="$2"
-  local n=0 done=0
   local total=$(wc -l < "$f")
+  local -a pids=()
+  local n=0
   while IFS= read -r l; do
     fetch_one "$l" &
+    pids+=("$!")
     n=$((n+1))
-    if [ $((n % j)) -eq 0 ]; then
-      wait; done=$((done+j))
-      if [ $((n * 10 / total % 2)) -eq 0 ]; then tick "阶段2 拉片进度 ${done}/${total}"; fi
+    # 达到窗口上限 → 等任意一个结束,过滤已死 pid(保持窗口滑动,立即补位)
+    if [ "${#pids[@]}" -ge "$j" ]; then
+      wait -n 2>/dev/null || true
+      local -a alive=()
+      local p
+      for p in "${pids[@]}"; do
+        if kill -0 "$p" 2>/dev/null; then alive+=("$p"); fi
+      done
+      pids=("${alive[@]}")
     fi
+    if [ $((n % 100)) -eq 0 ]; then tick "阶段2 拉片进度 ${n}/${total}(窗口已启动,完成数见末尾)"; fi
   done < "$f"
   wait
+  tick "阶段2 拉片全部结束"
 }
-
 run_pool "$CHUNKS_FILE" "$JOBS"
 tick "阶段2完成 全部 ${total_chunks} 片已双端拉取"
 

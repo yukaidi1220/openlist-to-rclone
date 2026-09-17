@@ -30,17 +30,17 @@ on:
         required: false
         default: "0"
       slice:
-        description: "单片下载字节数(1MiB 对齐,默认 4194304=4MiB)"
+        description: "单片下载字节数(1MiB 对齐,默认 2097152=2MiB)"
         required: false
-        default: "4194304"
+        default: "2097152"
       min_size:
         description: "只探测 >= 该字节的对象(默认 1048576=1MiB)"
         required: false
         default: "1048576"
       jobs:
-        description: "并行拉取作业数(默认 8,每片源+目标各一连接)"
+        description: "并行拉取作业数(默认 32,每片源+目标各一连接)"
         required: false
-        default: "8"
+        default: "32"
       no_refresh:
         description: "剥离 refresh_token,永不刷新(安全只读)"
         type: boolean

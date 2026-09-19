@@ -76,7 +76,12 @@ VERBOSE="${_VERBOSE:-${VERBOSE:-0}}"
 # 固定诊断目录名,便于 workflow 用 upload-artifact 稳定打包;探测只读且按桶分组串行,
 # 不同 bucket 各自 runner 独立 /tmp 无冲突。
 WORKDIR="/tmp/probe-artifact"
-rm -rf "$WORKDIR"; mkdir -p "$WORKDIR"
+# 两个子目录分开存放,便于 workflow 分两个 artifact 上传:
+#   diag = 小尺寸诊断文件(清单/结果/各片日志/失败标记),常备、秒下载
+#   chunks = 大体积分片本体(d_*.src/.dst), 取证才拉
+WORKDIR_DIAG="$WORKDIR/diag"
+WORKDIR_CHUNKS="$WORKDIR/chunks"
+rm -rf "$WORKDIR"; mkdir -p "$WORKDIR_DIAG" "$WORKDIR_CHUNKS"
 
 SRC="${1:?src:path required}"
 DST="${2:?dst:path required}"
@@ -93,11 +98,11 @@ tick "阶段1开始 造清单 src=$SRC dst=$DST slice=$SLICE limit=$LIMIT jobs=$
 # 关键: 结果重定向到文件(流式写盘), 不落 bash 数组 —— bash 数组对几十万元素极慢,
 #       迁移流程用 > files.json 写盘未卡, 探针此前用 mapfile 存数组才卡死。
 tick "阶段1a 发起 rclone lsjson -R -> files.json (全桶递归)..."
-FILES_JSON="$WORKDIR/files.json"
+FILES_JSON="$WORKDIR_DIAG/files.json"
 # 注意:set -e 下,简单命令非零返回立即自杀,LIST_RC=$? 永远到达不了;
 # 必须用 if 或 cmd || true 才能捕获退出码(此前 LIST_RC 检查是死代码,lsjson 失败直接 exit 1)。
 if "$RCLONE" lsjson "$SRC" -R --files-only --no-mimetype --no-modtime -vv \
-   2>"$WORKDIR/lsjson.vv.log" >"$FILES_JSON"; then
+   2>"$WORKDIR_DIAG/lsjson.vv.log" >"$FILES_JSON"; then
   LIST_RC=0
 else
   LIST_RC=$?
@@ -107,7 +112,7 @@ else
     echo "::warning::lsjson rc=$LIST_RC(部分失败,files.json 有内容,继续处理已有数据)" >&2
   else
     echo "::error::lsjson 失败 rc=$LIST_RC,files.json 为空 (见 lsjson.vv.log)" >&2
-    tail -20 "$WORKDIR/lsjson.vv.log" >&2
+    tail -20 "$WORKDIR_DIAG/lsjson.vv.log" >&2
     exit 1
   fi
 fi
@@ -125,7 +130,7 @@ else
   PICK_LABEL="top ${LIMIT} 大文件"
 fi
 tick "阶段1b 分片计划 ($PICK_LABEL, 每文件 ${CHUNKS_PER_FILE} 片)..."
-total_count=$("$PYTHON" - "$FILES_JSON" "$WORKDIR/chunks.0" "$CHUNKS_PER_FILE" "$SLICE" "$LIMIT" "$MIN_SIZE" "$RANDOM_PICK" <<'PY')
+total_count=$("$PYTHON" - "$FILES_JSON" "$WORKDIR_DIAG/chunks.0" "$CHUNKS_PER_FILE" "$SLICE" "$LIMIT" "$MIN_SIZE" "$RANDOM_PICK" <<'PY')
 import sys, math, random, json
 fj, out, cpf, sl, lim, minsz, rpick = sys.argv[1:]
 cpf, sl, minsz, lim, rpick = int(cpf), int(sl), int(minsz), int(lim), int(rpick)
@@ -163,15 +168,15 @@ with open(out, "w") as o:
 print(total)
 PY
 
-CHUNKS_FILE="$WORKDIR/chunks.0"
+CHUNKS_FILE="$WORKDIR_DIAG/chunks.0"
 total_chunks=$(wc -l < "$CHUNKS_FILE")
 probed_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) ))
 tick "阶段1b 分片计划完成: files_candidates=$total_count -> probed=$probed_files total_chunks=$total_chunks"
 
 # ---- 阶段 2: 并行拉取 (每片 源+目标 各落盘一文件) ----
-: > "$WORKDIR/sizes.tsv"
+: > "$WORKDIR_DIAG/sizes.tsv"
 # 汇总文件(供 artifact)之前若存在则清零
-: > "$WORKDIR/result.txt"
+: > "$WORKDIR_DIAG/result.txt"
 tick "阶段2开始 并行拉取分片 jobs=$JOBS (共 $total_chunks 片)"
 
 # per-chunk 拉取函数 (并行子进程)
@@ -184,32 +189,32 @@ fetch_one() {
   local off="${rest%%$'\t'*}" rest2="${rest#*$'\t'}"
   local len="${rest2%%$'\t'*}"
   local seq="${rest2#*$'\t'}"
-  local srcf="$WORKDIR/d_${seq}.src" dstf="$WORKDIR/d_${seq}.dst"
+  local srcf="$WORKDIR_CHUNKS/d_${seq}.src" dstf="$WORKDIR_CHUNKS/d_${seq}.dst"
   # 双端并行拉取(后台 & 同时跑,完了 wait)
   ( "$RCLONE" cat "$SRC/$path" --offset "$off" --count "$len" --no-check-certificate \
-      --retries 5 --low-level-retries 20 > "$srcf" 2>"$WORKDIR/d_${seq}.src.log" \
-      || { rm -f "$srcf"; echo "SRCFAIL $path" > "$WORKDIR/d_${seq}.fail"; } ) &
+      --retries 5 --low-level-retries 20 > "$srcf" 2>"$WORKDIR_DIAG/d_${seq}.src.log" \
+      || { rm -f "$srcf"; echo "SRCFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; } ) &
   local pidsrc=$!
   ( "$RCLONE" cat "$DST/$path" --offset "$off" --count "$len" --no-check-certificate \
-      --retries 5 --low-level-retries 20 > "$dstf" 2>"$WORKDIR/d_${seq}.dst.log" \
-      || { rm -f "$dstf"; echo "DSTFAIL $path" > "$WORKDIR/d_${seq}.fail"; } ) &
+      --retries 5 --low-level-retries 20 > "$dstf" 2>"$WORKDIR_DIAG/d_${seq}.dst.log" \
+      || { rm -f "$dstf"; echo "DSTFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; } ) &
   local piddst=$!
   wait "$pidsrc" || true
   wait "$piddst" || true
   # 落盘字节核对(仅在文件存在时统计;失败文件会被 rm 掉,du 返回 0)
   local ss=$(( $(du -b "$srcf" 2>/dev/null | cut -f1) + 0 ))
-  printf '%s\tSRC\t%s\t%s\t%s\n' "$seq" "$ss" "$len" "$path" >> "$WORKDIR/sizes.tsv"
+  printf '%s\tSRC\t%s\t%s\t%s\n' "$seq" "$ss" "$len" "$path" >> "$WORKDIR_DIAG/sizes.tsv"
   if [ "$ss" -gt $(( len + 1048576 )) ]; then  # 超过 len 1MiB 容差 = 疑似全量下载
     echo "::warning::WARN 源端疑似整文件下载 seq=$seq off=$off want=$len got=$ss $path" >&2
   fi
   local ds=$(( $(du -b "$dstf" 2>/dev/null | cut -f1) + 0 ))
-  printf '%s\tDST\t%s\t%s\t%s\n' "$seq" "$ds" "$len" "$path" >> "$WORKDIR/sizes.tsv"
+  printf '%s\tDST\t%s\t%s\t%s\n' "$seq" "$ds" "$len" "$path" >> "$WORKDIR_DIAG/sizes.tsv"
   if [ "$ds" -gt $(( len + 1048576 )) ]; then
     echo "::warning::WARN 目标端疑似整文件下载 seq=$seq off=$off want=$len got=$ds $path" >&2
   fi
 }
 export -f fetch_one
-export RCLONE SRC DST WORKDIR VERBOSE
+export RCLONE SRC DST WORKDIR WORKDIR_DIAG WORKDIR_CHUNKS VERBOSE
 
 # 滑动窗口作业池: 不整批 wait,窗口满即等一个结束并补位,消灭"整批等最慢"的黑洞
 run_pool() {
@@ -253,11 +258,11 @@ tick "阶段2完成 全部 ${total_chunks} 片已双端拉取"
 
 # 检查拉取失败的分片
 # 用文件数统计而非 wc -l 行数——两端都失败时 SRCFAIL/DSTFAIL 覆盖写入,文件仍只算 1 片
-fail_files=$(find "$WORKDIR" -name 'd_*.fail' 2>/dev/null | wc -l || true)
+fail_files=$(find "$WORKDIR_DIAG" -name 'd_*.fail' 2>/dev/null | wc -l || true)
 if [ "$fail_files" -gt 0 ]; then
   echo "::warning:: $fail_files 个分片拉取失败(源或目标),相关比对将判 SKIP" >&2
 else
-  rm -f "$WORKDIR"/*.fail
+  rm -f "$WORKDIR_DIAG"/*.fail
 fi
 
 # ---- 阶段 3: 并行比对 md5 ----
@@ -271,8 +276,8 @@ compare_one() {
   local rest2="${rest#*$'\t'}"
   local rest3="${rest2#*$'\t'}"
   local seq="${rest3#*$'\t'}"
-  local srcf="$WORKDIR/d_${seq}.src" dstf="$WORKDIR/d_${seq}.dst"
-  if [ -f "$WORKDIR/d_${seq}.fail" ]; then
+  local srcf="$WORKDIR_CHUNKS/d_${seq}.src" dstf="$WORKDIR_CHUNKS/d_${seq}.dst"
+  if [ -f "$WORKDIR_DIAG/d_${seq}.fail" ]; then
     echo "SKIP(file_fail) $path"
     return 0
   fi
@@ -288,10 +293,10 @@ compare_one() {
   fi
 }
 export -f compare_one
-export WORKDIR
+export WORKDIR WORKDIR_DIAG WORKDIR_CHUNKS
 
 # 并行比对, 结果写结果文件, 再聚合到文件级
-RESULT="$WORKDIR/result.txt"
+RESULT="$WORKDIR_DIAG/result.txt"
 : > "$RESULT"
 i=0
 while IFS= read -r l; do
@@ -304,14 +309,14 @@ wait
 # ---- 聚合到文件级 ----
 tot_mism=0; tot_ok=0; tot_skip=0; skip_ff=0; skip_me=0
 declare -A filestat
-: > "$WORKDIR/mismatch_files.txt"
+: > "$WORKDIR_DIAG/mismatch_files.txt"
 # 用第一个空格做分割点——path 可能含空格(如"英特尔® XTU/xxx.iso"),IFS= 只读第一个空格会截断
 while IFS= read -r line; do
   [ -z "$line" ] && continue                      # 空行跳过
   cond="${line%% *}"                              # 第一个空格前的结果类型
   path="${line#* }"                               # 第一个空格后的完整路径
   case "$cond" in
-    MISMATCH)          tot_mism=$((tot_mism+1)); filestat["$path"]="MISMATCH"; echo "$path" >> "$WORKDIR/mismatch_files.txt" ;;
+    MISMATCH)          tot_mism=$((tot_mism+1)); filestat["$path"]="MISMATCH"; echo "$path" >> "$WORKDIR_DIAG/mismatch_files.txt" ;;
     SKIP\(file_fail\)) tot_skip=$((tot_skip+1)); skip_ff=$((skip_ff+1)); [ -z "${filestat[$path]+x}" ] && filestat["$path"]="SKIP" ;;
     SKIP\(md5_empty\)) tot_skip=$((tot_skip+1)); skip_me=$((skip_me+1)); [ -z "${filestat[$path]+x}" ] && filestat["$path"]="SKIP" ;;
     SKIP*)             tot_skip=$((tot_skip+1)); [ -z "${filestat[$path]+x}" ] && filestat["$path"]="SKIP" ;;  # 兜底:裸 SKIP 兼容
@@ -341,22 +346,22 @@ if [ -n "$DEL_MISMATCH" ] && [ "$mism_files" -gt 0 ]; then
   while IFS= read -r p; do
     [ -z "$p" ] && continue
     if "$RCLONE" deletefile --no-check-certificate "$DST/$p" --retries 5 \
-       2>"$WORKDIR/del.err"; then
+       2>"$WORKDIR_DIAG/del.err"; then
       echo "  deleted: $p" >&2
     else
       echo "::warning::删除失败(目标端): $p" >&2
     fi
-  done < "$WORKDIR/mismatch_files.txt"
+  done < "$WORKDIR_DIAG/mismatch_files.txt"
 fi
 
 tick "阶段3完成"
 echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files chunks_total=$total_chunks chunks_ok=$tot_ok chunks_mismatch=$tot_mism chunks_skip=$tot_skip (skip_ff=$skip_ff skip_me=$skip_me fail_files=$fail_files cross_ok=$cross_ok) ===" >&2
 
 # 保留诊断文件供 artifact(字节核对 sizes.tsv / lsjson.vv.log / 各片 rclone 日志 / result)
-# WORKDIR 默认保留;设 CLEANUP=1 时才删除。分片本体(大)在比对后可删,留 *.log/tsv/result。
+# WORKDIR 默认保留分片本体供取证(chunks artifact);设 CLEANUP=1 时删除本体(含 diag 里的分片计划)。
 if [ "${CLEANUP:-}" = "1" ]; then
-  find "$WORKDIR" -name 'd_*.src' -o -name 'd_*.dst' | xargs -r rm -f
-  rm -f "$WORKDIR/chunks.0"
+  find "$WORKDIR_CHUNKS" -name 'd_*.src' -o -name 'd_*.dst' | xargs -r rm -f
+  rm -f "$WORKDIR_DIAG/chunks.0"
 fi
 echo "WORKDIR_ARTIFACT=$WORKDIR" >&2
 

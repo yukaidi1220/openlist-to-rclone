@@ -519,16 +519,26 @@ jobs:
           echo "WORKDIR artifact 路径: $WORKDIR" | tee -a sample.log
           exit $rc
 
-      - name: Upload logs
+      - name: Upload logs (diagnostics)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: oss2wopan-logs-${{ github.run_number }}
+          # 小尺寸诊断(结果/清单/各片日志),常备、秒下载;分片本体独立走 chunks artifact
+          name: oss2wopan-diag-${{ github.run_number }}
           path: |
             copy.log
             check.log
             sample.log
-            /tmp/probe-artifact/
+            /tmp/probe-artifact/diag/
+          if-no-files-found: ignore
+
+      - name: Upload probe chunks (大体积分片本体,取证才拉)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss2wopan-chunks-${{ github.run_number }}
+          path: |
+            /tmp/probe-artifact/chunks/
           if-no-files-found: ignore
 
       - name: Writeback refreshed wopan token (best-effort)

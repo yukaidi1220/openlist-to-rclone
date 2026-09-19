@@ -277,6 +277,13 @@ jobs:
         run: |
           . /tmp/paths.src
           set -o pipefail
+          # 单文件源:rclone 对单文件路径禁用 filter(-R/--files-only/--min-size),lsjson 会
+          # CRITICAL "can't limit to single files"。单文件 CDN 预检不适用,内容完整性由 copy/verify 兜底。
+          if rclone lsjson "$SRC" --no-check-certificate --no-mimetype --no-modtime 2>/dev/null \
+            | jq -e 'length==1 and .[0].IsDir==false' >/dev/null 2>&1; then
+            echo "::warning::SRC 为单文件,跳过 CDN presigned probe(内容由 copy/verify 校验)"
+            exit 0
+          fi
           probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi \
                     --no-mimetype --no-modtime \
                     | jq -r 'sort_by(.Size) | .[0].Path // empty')

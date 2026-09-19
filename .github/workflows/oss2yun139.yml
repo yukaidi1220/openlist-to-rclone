@@ -1,0 +1,473 @@
+# OSS → 中国移动云盘(yun139/139) 迁移执行器(公开仓运行,凭据经私有仓 conf 注入)
+#
+# 与 oss2wopan.yml 同架构,目标端换成 yun139:
+#   - 源端:列表/元数据走签名 API,内容经 CDN 预签名下载(download_host)。
+#   - 目标端:yun139(中国移动云盘) 直传,无需 CDN;落盘 <dst_base>/<原 key>(launcher 默认 s3-bak/<源桶名>)
+#   - 令牌:authorization(Basic base64),约 15 天有效期;由【私有仓 launcher 前置探活】负责续期并回写,
+#     公开仓这里【永不刷新、永不回写】——所有触达 yun139 的 rclone 均带 --yun139-no-refresh,401 安全失败。
+#     这样公开仓与任何共用该 yun139 账号的程序(如 OpenList)不互踢。
+#
+# yun139 特有限制(详见 rclone yun139 文档):
+#   - mtime 不可改 → 必须 --size-only,否则全量重传
+#   - part_size 必须 ≥5Mi 且 64 倍数(官方客户端默认 100Mi);大文件先算整体 SHA-256 再分片并发 PUT
+#   - 个人云支持 SHA-256(可 check),家庭云无 hash → 统一按 size-only + 抽样 md5 兜底
+#   - 拒收 8 个保留 ASCII " * : < > ? \ | 与部分控制字符,上传时后端/encoder 已处理
+#
+# WARP 出口模式(warp_mode,仅 copy/sync 生效;bare=不装 WARP 为生产默认,v6-only/v4-only/dual 为诊断用途)。
+#
+# 配置:路径由 config_file 输入指定(launcher 每轮生成时间戳配置于私有仓 oss2yun139-configs/ 并随 dispatch
+#       传入,同名 .dstbase 存目标基路径;手动直触不填则用根目录 oss2yun139.conf + dstbase 缺省 s3-bak/<src_bucket>)。
+#
+# 断点语义:copy 粒度为整文件,重跑自动跳过已存在(--size-only)的文件。
+
+name: OSS2yun139 migrate
+run-name: OSS2yun139 migrate (${{ inputs.src_bucket }} | ${{ inputs.cdn_base }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式"
+        type: choice
+        required: true
+        default: "dry-run"
+        options:
+          - dry-run
+          - copy
+          - sync
+          - verify
+      path:
+        description: "迁移路径前缀(留空=整个目标基路径,相对 <dst_base>)"
+        required: false
+        default: ""
+      src_bucket:
+        description: "源桶名(launcher 自动填入,用于并发分组与 dstbase 缺省;手动直触可空)"
+        required: false
+        default: ""
+      config_file:
+        description: "私有仓配置文件路径(相对仓库根。launcher 生成的时间戳配置在 oss2yun139-configs/ 下;留默认用根目录 oss2yun139.conf)"
+        required: false
+        default: "oss2yun139.conf"
+      cdn_base:
+        description: "源桶 CDN 下载域名(仅用于 run 标题辨识;实际下载域在 conf 的 download_host)"
+        required: false
+        default: ""
+      warp_mode:
+        description: "WARP 出口模式(仅 copy/sync 生效)。bare=不装 WARP(生产默认);v6-only=仅 v6 进隧道;v4-only=仅 v4 进隧道;dual=双栈都进隧道"
+        type: choice
+        required: false
+        default: "bare"
+        options:
+          - bare
+          - v6-only
+          - v4-only
+          - dual
+
+concurrency:
+  # 公开仓永不刷新 yun139 token(launcher 续期后 token 已新鲜),不存在 token 互踢,
+  # 全部 run 按 桶+路径 分组即可并行(同桶同路径互斥,不同路径/不同桶可并行)。
+  group: oss2yun139-${{ inputs.src_bucket }}-${{ inputs.path }}
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      TZ: Asia/Shanghai
+      RCLONE_CONFIG: /tmp/oss2yun139.conf
+      # yun139 分片上传参数(对标 oss2wopan 分阶段并发;经 flag 覆盖 conf 内默认):
+      #   stage1(≤1G 小文件)以文件数取胜,--transfers 高;>part_size 的文件才走分片,单文件并发取小
+      #   stage2(全量)单文件分片并发取大
+      # 内存预算:part_size 100Mi × stage2并发8 × transfers4 ≈ 3.2GiB(runner 16GiB 够,盯 OOM)
+      # 调参顺序:单流极限 → 4 → 8 → 16,停在速度拐点
+      YUN139_PART_SIZE: 100Mi
+      YUN139_UPLOAD_CONCURRENCY: '8'          # 阶段二(全量)单文件分片并发
+      YUN139_UPLOAD_CONCURRENCY_STAGE1: '4'   # 阶段一(≤1G)单文件分片并发
+      YUN139_MT_CUTOFF: 256Mi                 # ≥此大小走 源端 Range 并行下载 + 139 分片上传
+    steps:
+      - name: 检出仓库(含 bin/chunk-probe.sh)
+        uses: actions/checkout@v6
+
+      - name: Fetch config from private repo
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          CONF_PATH: ${{ inputs.config_file }}
+        run: |
+          umask 077
+          CONF_PATH="${CONF_PATH:-oss2yun139.conf}"
+          # dstbase 与 conf 同目录同名(仅后缀不同)
+          DSTBASE_PATH="${CONF_PATH%.conf}.dstbase"
+          echo "config: $CONF_PATH / dstbase: $DSTBASE_PATH"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/$CONF_PATH" \
+              -o "$RCLONE_CONFIG" \
+              && curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/$DSTBASE_PATH" \
+              -o /tmp/dstbase; then
+              echo "配置获取成功"
+              break
+            fi
+            echo "获取失败,重试 $i/3..."
+            sleep $((i * 5))
+          done
+          [ -f "$RCLONE_CONFIG" ] || { echo "::error::无法获取 $CONF_PATH"; exit 1; }
+          [ -f /tmp/dstbase ] || { echo "::error::无法获取 $DSTBASE_PATH"; exit 1; }
+
+      - name: Parse config & set paths
+        env:
+          PATH_PREFIX: ${{ inputs.path }}
+        run: |
+          SRC_BUCKET=$(grep '^bucket' "$RCLONE_CONFIG" | tr -s ' ' | cut -d' ' -f3 | head -1)
+          [ -n "$SRC_BUCKET" ] || { echo "::error::conf 缺少 src.bucket"; exit 1; }
+          # 硬闸:公开仓永不刷新/回写 yun139 token。chunk-probe 等复用脚本内的 rclone 调用
+          # 不逐一加 --yun139-no-refresh,统一依赖 conf 的 [yun139] no_refresh=true(由私有仓
+          # launcher 注入);这里强制校验,缺失即拒绝执行,确保 no-refresh 是硬保证而非间接依赖。
+          grep -A30 '^\[yun139\]' "$RCLONE_CONFIG" | grep -qE '^no_refresh[ \t]*=[ \t]*true' \
+            || { echo "::error::conf [yun139] 缺少 no_refresh=true(须由私有仓 oss2yun139-launcher 生成);公开仓禁止刷新,终止"; exit 1; }
+          DST_BASE=$(cat /tmp/dstbase)
+          PARAM_PREFIX="$PATH_PREFIX"
+          if [ -n "$PARAM_PREFIX" ]; then
+            SRC="src:$SRC_BUCKET/$PARAM_PREFIX"
+            DST="yun139:$DST_BASE/$PARAM_PREFIX"
+          else
+            SRC="src:$SRC_BUCKET"
+            DST="yun139:$DST_BASE"
+          fi
+          { echo "set -a"; echo "SRC=$SRC"; echo "DST=$DST"; echo "set +a"; } > /tmp/paths.src
+          echo "== paths.src =="
+          cat /tmp/paths.src
+          echo "== SRC token check =="
+          grep -c '^SRC=src' /tmp/paths.src
+
+      # ---- WARP(四条线,由 warp_mode 输入切换;bare 不执行本步骤;与 oss2wopan/wopan2oss 同一套实现)----
+      - name: Setup Cloudflare WARP
+        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync') && inputs.warp_mode != 'bare' }}
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -e
+          MODE="${{ inputs.warp_mode }}"
+          case "$MODE" in
+            v6-only|v4-only|dual) ;;
+            "") echo "warp_mode 未指定,按 bare 跳过(兼容旧 launcher)"; exit 0 ;;
+            *) echo "::error::未知 warp_mode: $MODE"; exit 1 ;;
+          esac
+          V4_WANT=0; V6_WANT=0
+          case "$MODE" in
+            v6-only) V6_WANT=1 ;;
+            v4-only) V4_WANT=1 ;;
+            dual)    V4_WANT=1; V6_WANT=1 ;;
+          esac
+          echo ">>> WARP 模式: $MODE (V4_WANT=$V4_WANT V6_WANT=$V6_WANT)"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools tcpdump
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o /tmp/wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
+          chmod +x /tmp/wgcf && sudo mv /tmp/wgcf /usr/local/bin/wgcf
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -H "Authorization: token $RCLONE_PAT" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
+            -o wgcf-account.toml || { echo "::error::拉取 wgcf-account.toml 失败"; exit 1; }
+          wgcf generate
+          echo "===== wgcf-profile.conf(PrivateKey 已打码)====="
+          sed 's/^PrivateKey.*/PrivateKey = ***REDACTED***/' wgcf-profile.conf
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          ADDR_V4=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep -v ':' | head -1)
+          ADDR_V6=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep ':' | head -1)
+          PEER_KEY=$(grep 'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep 'Endpoint' wgcf-profile.conf | awk '{print $NF}')
+          DEV=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+          GW=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -1)
+          echo "ADDR_V4=$ADDR_V4 ADDR_V6=$ADDR_V6 DEV=$DEV GW=$GW"
+          [ "$V4_WANT" = "1" ] && [ -z "$ADDR_V4" ] && { echo "::error::WARP 未分配 IPv4 地址"; exit 1; }
+          [ "$V6_WANT" = "1" ] && [ -z "$ADDR_V6" ] && { echo "::error::WARP 未分配 IPv6 地址"; exit 1; }
+          ENDPOINT_HOST=${ENDPOINT%%:*}
+          EP_PORT=${ENDPOINT##*:}
+          EP_IP=$(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null | head -1)
+          [ -n "$EP_IP" ] || { echo "::error::无法解析 WARP 端点,按要求终止"; exit 1; }
+          echo ">>> 钉扎:endpoint $EP_IP/32、Azure 平台服务 168.63.129.16/32 via $GW ($DEV)"
+          sudo ip route add "$EP_IP/32" via "$GW" dev "$DEV" 2>/dev/null || true
+          sudo ip route add 168.63.129.16/32 via "$GW" dev "$DEV" 2>/dev/null || true
+          if [ "$V4_WANT" = "1" ]; then
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 \
+                       20.0.0.0/8 13.0.0.0/8 52.0.0.0/8 168.0.0.0/8 \
+                       140.0.0.0/8 185.199.0.0/16; do
+              sudo ip route add "$NET" via "$GW" dev "$DEV" 2>/dev/null || \
+                sudo ip route add "$NET" via "$GW" 2>/dev/null || true
+            done
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            sudo ip -6 route add fc00::/7 dev "$DEV" 2>/dev/null || true
+          fi
+          sudo ip link add wgcf type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set wgcf private-key /dev/stdin
+          WG_ENDPOINT="${EP_IP}:${EP_PORT}"
+          if [ "$V4_WANT" = "1" ] && [ "$V6_WANT" = "1" ]; then
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "0.0.0.0/0, ::/0"
+          elif [ "$V4_WANT" = "1" ]; then
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "0.0.0.0/0"
+          else
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "::/0"
+          fi
+          sudo ip link set mtu 1280 up dev wgcf
+          [ "$V4_WANT" = "1" ] && sudo ip addr add "$ADDR_V4" dev wgcf
+          [ "$V6_WANT" = "1" ] && sudo ip addr add "$ADDR_V6" dev wgcf
+          [ "$V4_WANT" = "1" ] && sudo ip -4 route replace 0.0.0.0/0 dev wgcf
+          [ "$V6_WANT" = "1" ] && sudo ip -6 route replace ::/0 dev wgcf
+          if [ "$V4_WANT" = "1" ]; then
+            sudo iptables -t mangle -A OUTPUT -o wgcf -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            sudo ip6tables -t mangle -A OUTPUT -o wgcf -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+          fi
+          echo "===== IP 出口探测 ====="
+          if [ "$V4_WANT" = "1" ]; then
+            w4=$(curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^warp=(on|plus)' || true)
+            case "$w4" in "warp=on"|"warp=plus") ;; *) echo "::error::WARP v4 未接管,终止"; exit 1 ;; esac
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            w6=$(curl -6 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^warp=(on|plus)' || true)
+            case "$w6" in "warp=on"|"warp=plus") ;; *) echo "::error::WARP v6 未接管,终止"; exit 1 ;; esac
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            echo ">>> [硬校验] yun139 控制面经 WARP v6(yun.139.com)"
+            code=$(curl -6 -sS --max-time 15 -o /dev/null -w "%{http_code}" https://yun.139.com) \
+              || { echo "::error::yun139 控制面经 WARP v6 不通,终止"; exit 1; }
+            echo "yun139 v6 HTTP $code"
+          fi
+
+      - name: "Install rclone (custom build: s3 download_host + yun139)"
+        run: |
+          URL="https://github.com/yukaidi1220/rclone/releases/latest/download/rclone-cdn-linux-amd64"
+          curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 5 \
+            -o /tmp/rclone "$URL" || { echo "::error::无法下载 rclone release"; exit 1; }
+          chmod +x /tmp/rclone
+          sudo mv /tmp/rclone /usr/local/bin/rclone
+          rclone version | head -2
+
+      # ---- 预检 ----
+      - name: Preflight - source bucket scoped
+        if: inputs.mode != 'cleanup'
+        run: |
+          . /tmp/paths.src
+          rclone size "$SRC" --json --no-check-certificate > /tmp/size.json
+          jq -r '"objects=\(.count // .files) bytes=\(.bytes)"' /tmp/size.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Preflight - yun139 connectivity (no-refresh)
+        if: inputs.mode != 'cleanup'
+        run: |
+          # 永不刷新:带 --yun139-no-refresh;token 由私有仓 launcher 续期,此处 401 即安全失败
+          rclone lsd yun139: --yun139-no-refresh > /dev/null 2>&1 || \
+            rclone lsf yun139: --yun139-no-refresh --max-depth 1 > /dev/null
+          echo "yun139 OK (no-refresh)"
+
+      - name: Preflight - CDN presigned GET probe
+        if: ${{ inputs.mode != 'cleanup' }}
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi \
+                    --no-mimetype --no-modtime \
+                    | jq -r 'sort_by(.Size) | .[0].Path // empty')
+          if [ -z "$probe" ]; then
+            echo "::warning::范围内没有小文件,跳过 CDN 探测"
+            exit 0
+          fi
+          expect=$(rclone lsjson "$SRC/$probe" --no-mimetype --no-modtime | jq -r '.[0].Size')
+          echo "probing: $probe ($expect bytes)"
+          rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
+          got=$(rclone copy "$SRC/$probe" /tmp/vprobe --no-check-certificate \
+            --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
+            --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
+            --stats 0 -q 2>/tmp/cat.err || true; \
+            probe_file=$(find /tmp/vprobe -type f | head -1); \
+            [ -n "$probe_file" ] && stat -c%s "$probe_file" || echo -1)
+          if [ -s /tmp/cat.err ]; then echo "--- cat stderr ---"; cat /tmp/cat.err; fi
+          echo "got: $got bytes"
+          if [ "$got" -ne "$expect" ]; then
+            echo "首次不符,视为 IP 脏瞬态失败,等待 20s(404 边缘缓存 TTL)后重试一次"
+            sleep 20
+            rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
+            got=$(rclone copy "$SRC/$probe" /tmp/vprobe --no-check-certificate \
+              --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
+              --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
+              --stats 0 -q 2>/tmp/cat.err || true; \
+              probe_file=$(find /tmp/vprobe -type f | head -1); \
+              [ -n "$probe_file" ] && stat -c%s "$probe_file" || echo -1)
+            if [ -s /tmp/cat.err ]; then echo "--- cat stderr (retry) ---"; cat /tmp/cat.err; fi
+            echo "got(retry): $got bytes"
+          fi
+          [ "$got" -eq "$expect" ] || { echo "::error::CDN 下载字节数不符"; exit 1; }
+          echo "CDN presigned GET OK"
+
+      # ---- 复制 ----
+      - name: Copy (dry-run)
+        if: inputs.mode == 'dry-run'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          rclone copy "$SRC" "$DST" --dry-run \
+            --size-only --ignore-checksum --no-check-certificate \
+            --transfers 4 --checkers 8 \
+            --yun139-no-refresh \
+            --stats 60s -v 2>&1 | tee copy.log
+          rclone sync "$SRC" "$DST" --dry-run \
+            --size-only --ignore-checksum --no-check-certificate \
+            --transfers 4 --checkers 8 \
+            --yun139-no-refresh \
+            --stats 60s -v 2>&1 | tee -a copy.log
+
+      - name: Copy - 阶段一 小文件(≤1G)高并发
+        if: inputs.mode == 'copy'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          set +e
+          rclone copy "$SRC" "$DST" \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --max-size 1G --transfers 15 --checkers 8 \
+            --yun139-no-refresh \
+            --yun139-part-size "$YUN139_PART_SIZE" \
+            --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY_STAGE1" \
+            --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
+            --retries 5 --low-level-retries 20 \
+            --stats 30s -vv 2>&1 | tee copy.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          # yun139 端个别文件不可规避错误,重试后仍会使 rclone 非 0 退出;放行并留日志供核对
+          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段一存在文件级错误,已放行;详见 copy.log)"; fi
+      - name: Copy - 阶段二 全量(不限制大小,size-only 跳过已传)
+        if: inputs.mode == 'copy'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          set +e
+          rclone copy "$SRC" "$DST" \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --transfers 4 --checkers 2 \
+            --yun139-no-refresh \
+            --yun139-part-size "$YUN139_PART_SIZE" \
+            --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
+            --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
+            --retries 5 --low-level-retries 20 \
+            --stats 30s -vv 2>&1 | tee -a copy.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段二存在文件级错误,已放行;详见 copy.log)"; fi
+
+      - name: Sync - 阶段一 小文件(≤1G)高并发
+        if: inputs.mode == 'sync'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          set +e
+          rclone sync "$SRC" "$DST" \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --max-size 1G --transfers 15 --checkers 8 \
+            --yun139-no-refresh \
+            --yun139-part-size "$YUN139_PART_SIZE" \
+            --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY_STAGE1" \
+            --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
+            --retries 5 --low-level-retries 20 \
+            --stats 30s -vv 2>&1 | tee copy.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段一存在文件级错误,已放行;详见 copy.log)"; fi
+      - name: Sync - 阶段二 全量(不限制大小,size-only 跳过已传)
+        if: inputs.mode == 'sync'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          set +e
+          rclone sync "$SRC" "$DST" \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --transfers 4 --checkers 2 \
+            --yun139-no-refresh \
+            --yun139-part-size "$YUN139_PART_SIZE" \
+            --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
+            --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
+            --retries 5 --low-level-retries 20 \
+            --stats 30s -vv 2>&1 | tee -a copy.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段二存在文件级错误,已放行;详见 copy.log)"; fi
+
+      # ---- 校验 ----
+      - name: Verify - full one-way check (size, yun139 mtime 不可改→size-only)
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          set +e
+          rclone check "$SRC" "$DST" --one-way --size-only --ignore-errors \
+            --yun139-no-refresh -v 2>&1 | tee check.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "::warning::rclone check exit=$rc(存在目标缺失/错误,已放行;详见 check.log)"; fi
+          echo "full one-way size check done (rc=$rc)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify - random sample content (分片抽样,不再整文件下载)
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
+        env:
+          RCLONE: rclone
+          SLICE: "2097152"              # 2MiB 片
+          JOBS: "100"                   # 双端并行拉取
+          RANDOM_PICK: "50"             # 全桶随机抽 50 个文件
+          CHUNKS_PER_FILE: "10"         # 每文件 10 片
+          DEL_MISMATCH: "1"             # 不一致 → 删除目标坏文件,重跑 sync 修复
+          MIN_SIZE: "1048576"           # 只探 ≥1MiB 对象
+          VERBOSE: "1"                  # 逐片打进度(实时日志可见)
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          chmod +x bin/chunk-probe.sh
+          export RCLONE_CONFIG PYTHON
+          if bin/chunk-probe.sh "$SRC" "$DST" 2>&1 | tee sample.log; then
+            echo "random sample content PASSED" | tee -a sample.log
+            rc=0
+          else
+            rc=$?
+            echo "random sample content FAILED(chunk-probe exit=$rc)" | tee -a sample.log
+          fi
+          echo "--- 探针汇总(探针尾部 summary 行) ---" | tee -a sample.log
+          grep -a "probe done\|lsjson 失败\|阶段" sample.log 2>/dev/null | tail -20 | tee -a sample.log || true
+          echo "WORKDIR artifact 路径: $WORKDIR" | tee -a sample.log
+          exit $rc
+
+      - name: Upload logs (diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss2yun139-diag-${{ github.run_number }}
+          path: |
+            copy.log
+            check.log
+            sample.log
+            /tmp/probe-artifact/diag/
+          if-no-files-found: ignore
+
+      - name: Upload probe chunks (大体积分片本体,取证才拉)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss2yun139-chunks-${{ github.run_number }}
+          path: |
+            /tmp/probe-artifact/chunks/
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Remove fetched config
+        if: always()
+        run: |
+          if [ -f "$RCLONE_CONFIG" ]; then shred -u "$RCLONE_CONFIG" || rm -f "$RCLONE_CONFIG"; fi

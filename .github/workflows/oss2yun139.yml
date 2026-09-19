@@ -37,7 +37,7 @@ on:
           - sync
           - verify
       path:
-        description: "迁移路径前缀(留空=整个目标基路径,相对 <dst_base>)"
+        description: "迁移路径前缀(留空=整个目标基路径,相对 <dst_base>)。须为目录/前缀作用域,勿传单个文件(copy 为目录→目录语义,单文件会被当作目录)"
         required: false
         default: ""
       src_bucket:
@@ -317,6 +317,20 @@ jobs:
           fi
           [ "$got" -eq "$expect" ] || { echo "::error::CDN 下载字节数不符"; exit 1; }
           echo "CDN presigned GET OK"
+
+      - name: Preflight - 源必须是目录(progress copy/sync 拒绝单文件)
+        if: ${{ inputs.mode == 'dry-run' || inputs.mode == 'copy' || inputs.mode == 'sync' }}
+        run: |
+          . /tmp/paths.src
+          # rclone copy/sync 是目录→目录语义:SRC 若解析为单文件,会把 DST 当作目录静默建一个
+          # 与文件同名的目录(实测 yun139 上出现 xxx.wim/ 空目录)。单文件精确复制需用 copyto,
+          # 不在本工具的目录迁移能力内,提前报错而非静默建目录。
+          if rclone lsjson "$SRC" --no-check-certificate --no-mimetype --no-modtime 2>/dev/null \
+            | jq -e 'length==1 and .[0].IsDir==false' >/dev/null 2>&1; then
+            echo "::error::SRC 解析为单文件($SRC)。copy/sync 为目录→目录语义,请把 path 作用到目录/前缀而非单个文件"
+            exit 1
+          fi
+          echo "源为目录,OK"
 
       # ---- 复制 ----
       - name: Copy (dry-run)

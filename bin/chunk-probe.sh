@@ -193,11 +193,13 @@ fetch_one() {
   # 双端并行拉取(后台 & 同时跑,完了 wait)
   ( "$RCLONE" cat "$SRC/$path" --offset "$off" --count "$len" --no-check-certificate \
       --retries 5 --low-level-retries 20 > "$srcf" 2>"$WORKDIR_DIAG/d_${seq}.src.log" \
-      || { rm -f "$srcf"; echo "SRCFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; } ) &
+      || { rm -f "$srcf"; echo "SRCFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; \
+           echo "::warning:: SRCFAIL seq=$seq off=$off (源端 ${SRC}:范围读取失败) $path" >&2; } ) &
   local pidsrc=$!
   ( "$RCLONE" cat "$DST/$path" --offset "$off" --count "$len" --no-check-certificate \
       --retries 5 --low-level-retries 20 > "$dstf" 2>"$WORKDIR_DIAG/d_${seq}.dst.log" \
-      || { rm -f "$dstf"; echo "DSTFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; } ) &
+      || { rm -f "$dstf"; echo "DSTFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; \
+           echo "::warning:: DSTFAIL seq=$seq off=$off (目标端 ${DST}:范围读取失败,文件/目录可能缺失) $path" >&2; } ) &
   local piddst=$!
   wait "$pidsrc" || true
   wait "$piddst" || true
@@ -279,6 +281,7 @@ compare_one() {
   local srcf="$WORKDIR_CHUNKS/d_${seq}.src" dstf="$WORKDIR_CHUNKS/d_${seq}.dst"
   if [ -f "$WORKDIR_DIAG/d_${seq}.fail" ]; then
     echo "SKIP(file_fail) $path"
+    echo "SKIP(file_fail) $path" >&2
     return 0
   fi
   local a b
@@ -286,10 +289,12 @@ compare_one() {
   b=$(md5sum "$dstf" 2>/dev/null | awk '{print $1}')
   if [ -z "$a" ] || [ -z "$b" ]; then
     echo "SKIP(md5_empty) $path"
+    echo "SKIP(md5_empty) $path" >&2
   elif [ "$a" = "$b" ]; then
     echo "OK $path"
   else
     echo "MISMATCH $path"
+    echo "MISMATCH $path" >&2
   fi
 }
 export -f compare_one
@@ -332,11 +337,16 @@ if [ "$skip_ff" -ne "$fail_files" ]; then
 fi
 
 echo "$RESULT" >&2  # keep
-mism_files=0; ok_files=0
+mism_files=0; ok_files=0; skip_files=0
 for path in "${!filestat[@]}"; do
-  if [ "${filestat[$path]}" = "MISMATCH" ]; then mism_files=$((mism_files+1)); echo "MISMATCH $path"; fi
+  case "${filestat[$path]}" in
+    MISMATCH) mism_files=$((mism_files+1)); echo "MISMATCH $path" ;;
+    SKIP)     skip_files=$((skip_files+1)); echo "SKIP(file) $path" ;;
+  esac
 done
-ok_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) - mism_files ))
+# 文件级 OK = 被探测文件 - mismatch 文件 - 被 skip(拉取失败,未真正比对)的文件;
+# 之前漏减 skip_files 会把"没验证到"的文件算成 ok,与 chunks_skip 自相矛盾。
+ok_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) - mism_files - skip_files ))
 
 # DEL_MISMATCH:迁移 verify 自治——把不一致的目标文件删掉,重跑 sync 即重传修复。
 # 串行逐个删(失败不影响其他),删除走 rclone deletefile(幂等,文件不存在也成功)。
@@ -355,7 +365,7 @@ if [ -n "$DEL_MISMATCH" ] && [ "$mism_files" -gt 0 ]; then
 fi
 
 tick "阶段3完成"
-echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files chunks_total=$total_chunks chunks_ok=$tot_ok chunks_mismatch=$tot_mism chunks_skip=$tot_skip (skip_ff=$skip_ff skip_me=$skip_me fail_files=$fail_files cross_ok=$cross_ok) ===" >&2
+echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files files_skip=$skip_files chunks_total=$total_chunks chunks_ok=$tot_ok chunks_mismatch=$tot_mism chunks_skip=$tot_skip (skip_ff=$skip_ff skip_me=$skip_me fail_files=$fail_files cross_ok=$cross_ok) ===" >&2
 
 # 保留诊断文件供 artifact(字节核对 sizes.tsv / lsjson.vv.log / 各片 rclone 日志 / result)
 # WORKDIR 默认保留分片本体供取证(chunks artifact);设 CLEANUP=1 时删除本体(含 diag 里的分片计划)。

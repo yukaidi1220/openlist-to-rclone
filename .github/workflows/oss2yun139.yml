@@ -79,10 +79,10 @@ jobs:
       # yun139 分片上传参数(对标 oss2wopan 分阶段并发;经 flag 覆盖 conf 内默认):
       #   stage1(≤1G 小文件)以文件数取胜,--transfers 高;>part_size 的文件才走分片,单文件并发取小
       #   stage2(全量)单文件分片并发取大
-      # 内存预算:part_size 100Mi × stage2并发8 × transfers4 ≈ 3.2GiB(runner 16GiB 够,盯 OOM)
+      # 内存预算:part_size 100Mi × stage2并发16 × transfers4 ≈ 6.4GiB(runner 16GiB 够,盯 OOM)
       # 调参顺序:单流极限 → 4 → 8 → 16,停在速度拐点
       YUN139_PART_SIZE: 100Mi
-      YUN139_UPLOAD_CONCURRENCY: '8'          # 阶段二(全量)单文件分片并发
+      YUN139_UPLOAD_CONCURRENCY: '16'         # 阶段二(全量)单文件分片并发
       YUN139_UPLOAD_CONCURRENCY_STAGE1: '4'   # 阶段一(≤1G)单文件分片并发
       YUN139_MT_CUTOFF: 256Mi                 # ≥此大小走 源端 Range 并行下载 + 139 分片上传
     steps:

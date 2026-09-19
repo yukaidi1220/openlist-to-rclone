@@ -539,6 +539,8 @@ jobs:
           name: oss2wopan-chunks-${{ github.run_number }}
           path: |
             /tmp/probe-artifact/chunks/
+          # 大体积本体只保留 3 天,避免仓库被 GB 级 artifact 堆满;取证请在此窗口内下载
+          retention-days: 3
           if-no-files-found: ignore
 
       - name: Writeback refreshed wopan token (best-effort)

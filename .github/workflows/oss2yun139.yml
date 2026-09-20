@@ -381,6 +381,7 @@ jobs:
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
+            --multi-thread-streams 24 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}
@@ -418,6 +419,7 @@ jobs:
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
+            --multi-thread-streams 24 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}

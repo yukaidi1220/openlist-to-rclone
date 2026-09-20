@@ -84,8 +84,9 @@ jobs:
 #     part100Mi/streams24/transfers4 → RSS 14.9G(爆,SIGTERM 143)
 #     part32Mi /streams48/transfers4 → RSS 14.4G(爆)
 #     part32Mi /streams24/transfers4 → RSS <5G(稳,高余量)
-#     part32Mi /streams32/transfers4 → RSS ~9G(稳高余量,当前档=32)
-# 结论:streams 上限≈32,内存极限≈14.4GiB;想再提速优先加磁盘/TMPDIR 缓解写盘,别再加 streams。
+#     part32Mi /streams32/transfers4 → RSS ~11G(实测最优,avg download 219MB/s,空档~7min) ← 当前档
+#     part32Mi /streams20/transfers10 → RSS 12.3G(10并行把CDN切碎,avg 59MB/s,空档39min — 负优化)↓
+# 结论:streams32×transfers4 为实测最优;别加 transfers(会碎并发降吞吐),也别再加 streams(顶内存墙)。
 # yun139 约束:part_size ≥5Mi 且 64 倍数。
       YUN139_PART_SIZE: 32Mi
       YUN139_UPLOAD_CONCURRENCY: '16'         # 阶段二(全量)单文件分片并发
@@ -393,13 +394,13 @@ jobs:
           SAMPLER_PID=$!
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --transfers 10 --checkers 2 \
+            --transfers 4 --checkers 2 \
             --max-size "$YUN139_MAX_FILE_SIZE" \
             --yun139-no-refresh \
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
-            --multi-thread-streams 20 \
+            --multi-thread-streams 32 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}
@@ -439,13 +440,13 @@ jobs:
           SAMPLER_PID=$!
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --transfers 10 --checkers 2 \
+            --transfers 4 --checkers 2 \
             --max-size "$YUN139_MAX_FILE_SIZE" \
             --yun139-no-refresh \
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
-            --multi-thread-streams 20 \
+            --multi-thread-streams 32 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}

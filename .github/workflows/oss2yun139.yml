@@ -382,7 +382,9 @@ jobs:
           # 后台资源采样:10s 一次记 rclone RSS + 系统内存 + /tmp 磁盘,实证大文件下载内存上限
           : > /tmp/resmon.log
           ( while :; do
-              { echo -n "$(date +%T) "; ps -C rclone -o rss= 2>/dev/null | awk '{s+=$1} END{if(s)printf "rclone_RSS=%dM ",int(s/1024)}'; free -m | awk '/Mem:/{printf "Mem_used=%dM Mem_avail=%dM ",$3,$7}'; df -B1 /tmp | awk 'NR==2{printf "tmp_avail=%dG\n",int($4/2^30)}'; } >> /tmp/resmon.log
+              L="$(printf '%s ' "$(date +%T)"; ps -C rclone -o rss= 2>/dev/null | awk '{s+=$1} END{if(s)printf "rclone_RSS=%dM ",int(s/1024)}'; free -m | awk '/Mem:/{printf "Mem_used=%dM Mem_avail=%dM ",$3,$7}'; df -B1 /tmp | awk 'NR==2{printf "tmp_avail=%dG",int($4/2^30)}')"
+              echo "$L" >> /tmp/resmon.log
+              echo "RESMON $L" >&2
               sleep 10
             done ) &
           SAMPLER_PID=$!
@@ -429,7 +431,9 @@ jobs:
           # 后台资源采样:10s 一次记 rclone RSS + 系统内存 + /tmp 磁盘,实证大文件下载内存上限
           : > /tmp/resmon.log
           ( while :; do
-              { echo -n "$(date +%T) "; ps -C rclone -o rss= 2>/dev/null | awk '{s+=$1} END{if(s)printf "rclone_RSS=%dM ",int(s/1024)}'; free -m | awk '/Mem:/{printf "Mem_used=%dM Mem_avail=%dM ",$3,$7}'; df -B1 /tmp | awk 'NR==2{printf "tmp_avail=%dG\n",int($4/2^30)}'; } >> /tmp/resmon.log
+              L="$(printf '%s ' "$(date +%T)"; ps -C rclone -o rss= 2>/dev/null | awk '{s+=$1} END{if(s)printf "rclone_RSS=%dM ",int(s/1024)}'; free -m | awk '/Mem:/{printf "Mem_used=%dM Mem_avail=%dM ",$3,$7}'; df -B1 /tmp | awk 'NR==2{printf "tmp_avail=%dG",int($4/2^30)}')"
+              echo "$L" >> /tmp/resmon.log
+              echo "RESMON $L" >&2
               sleep 10
             done ) &
           SAMPLER_PID=$!

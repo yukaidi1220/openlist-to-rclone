@@ -393,13 +393,13 @@ jobs:
           SAMPLER_PID=$!
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --transfers 4 --checkers 2 \
+            --transfers 10 --checkers 2 \
             --max-size "$YUN139_MAX_FILE_SIZE" \
             --yun139-no-refresh \
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
-            --multi-thread-streams 32 \
+            --multi-thread-streams 20 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}
@@ -439,13 +439,13 @@ jobs:
           SAMPLER_PID=$!
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --transfers 4 --checkers 2 \
+            --transfers 10 --checkers 2 \
             --max-size "$YUN139_MAX_FILE_SIZE" \
             --yun139-no-refresh \
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
-            --multi-thread-streams 32 \
+            --multi-thread-streams 20 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}

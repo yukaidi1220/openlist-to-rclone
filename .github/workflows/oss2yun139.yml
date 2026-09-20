@@ -53,10 +53,10 @@ on:
         required: false
         default: ""
       warp_mode:
-        description: "WARP 出口模式(仅 copy/sync 生效)。bare=不装 WARP(生产默认);v6-only=仅 v6 进隧道;v4-only=仅 v4 进隧道;dual=双栈都进隧道"
+        description: "WARP 出口模式(仅 copy/sync 生效)。v6-only=仅 v6 进隧道(默认);bare=不装 WARP;v4-only=仅 v4 进隧道;dual=双栈都进隧道"
         type: choice
         required: false
-        default: "bare"
+        default: "v6-only"
         options:
           - bare
           - v6-only

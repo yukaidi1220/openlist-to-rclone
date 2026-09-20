@@ -433,7 +433,19 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           set +e
+          # 预期跳过的文件(超会员单文件上限 04010319 权益不足 / wopan 敏感词等)会被
+          # copy 阶段在不进下载的情况下 SKIP。校验的是"已上传文件的完整性",而非"无遗漏",
+          # 故从 copy.log 提取 SKIP 路径生成 exclude,让 one-way check 不把这些"明确不传"
+          # 的文件报成 file not in dst。SKIP 日志被 --ignore-errors 数次追加,路径无冒号
+          # (139 拒绝冒号),用第一个冒号定界提取即可。
+          grep -a 'SKIP ' copy.log | sed -E 's/.*SKIP ([^:]+):.*/\1/' | sort -u > /tmp/skipped.txt \
+            || rm -f /tmp/skipped.txt
+          echo "已收集 $(wc -l < /tmp/skipped.txt 2>/dev/null || echo 0) 个预期跳过文件 → /tmp/skipped.txt"
+          if [ -s /tmp/skipped.txt ]; then sed 's/^/  /' /tmp/skipped.txt; fi
+          CHECK_ARGS=()
+          if [ -s /tmp/skipped.txt ]; then CHECK_ARGS=(--exclude-from /tmp/skipped.txt); fi
           rclone check "$SRC" "$DST" --one-way --size-only --ignore-errors \
+            "${CHECK_ARGS[@]}" \
             --yun139-no-refresh -v 2>&1 | tee check.log
           rc=${PIPESTATUS[0]}
           set -e

@@ -83,8 +83,9 @@ jobs:
 #   streams 是内存的支配变量,part_size 次要。实操(rss=每chunk入队缓冲→写盘,硬盘跟不上即堆积):
 #     part100Mi/streams24/transfers4 → RSS 14.9G(爆,SIGTERM 143)
 #     part32Mi /streams48/transfers4 → RSS 14.4G(爆)
-#     part32Mi /streams24/transfers4 → RSS <5G(稳) ← 当前档,余量大
-# 结论:保持 streams 24 为安全上限;想再提速优先加磁盘/TMPDIR 缓解写盘,别加 streams。
+#     part32Mi /streams24/transfers4 → RSS <5G(稳,高余量)
+#     part32Mi /streams40/transfers4 → RSS ~11G(高位但未爆,用户认可此档=当前) ← 当前档
+# 结论:streams 上限≈40,内存极限≈14.4GiB;想再提速优先加磁盘/TMPDIR 缓解写盘,别再加 streams。
 # yun139 约束:part_size ≥5Mi 且 64 倍数。
       YUN139_PART_SIZE: 32Mi
       YUN139_UPLOAD_CONCURRENCY: '16'         # 阶段二(全量)单文件分片并发
@@ -384,14 +385,10 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           set +e
-          # 后台资源采样:10s 一次记 rclone RSS + 系统内存 + /tmp 磁盘,实证大文件下载内存上限
+          # 后台采样(bin/resmon.sh):5s 一次 输出 rclone_RSS/系统内存//tmp磁盘 + 最近5s 上下行网络吞吐,
+          # WARP(wg0)单列;RESMON 行走 stderr 进 GH 日志(artifact 在 runner 级被杀时拿不到,靠日志留存)。
           : > /tmp/resmon.log
-          ( while :; do
-              L="$(printf '%s ' "$(date +%T)"; ps -C rclone -o rss= 2>/dev/null | awk '{s+=$1} END{if(s)printf "rclone_RSS=%dM ",int(s/1024)}'; free -m | awk '/Mem:/{printf "Mem_used=%dM Mem_avail=%dM ",$3,$7}'; df -B1 /tmp | awk 'NR==2{printf "tmp_avail=%dG",int($4/2^30)}')"
-              echo "$L" >> /tmp/resmon.log
-              echo "RESMON $L" >&2
-              sleep 10
-            done ) &
+          ./bin/resmon.sh &
           SAMPLER_PID=$!
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
@@ -401,7 +398,7 @@ jobs:
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
-            --multi-thread-streams 24 \
+            --multi-thread-streams 40 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}
@@ -433,14 +430,10 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           set +e
-          # 后台资源采样:10s 一次记 rclone RSS + 系统内存 + /tmp 磁盘,实证大文件下载内存上限
+          # 后台采样(bin/resmon.sh):5s 一次 输出 rclone_RSS/系统内存//tmp磁盘 + 最近5s 上下行网络吞吐,
+          # WARP(wg0)单列;RESMON 行走 stderr 进 GH 日志(artifact 在 runner 级被杀时拿不到,靠日志留存)。
           : > /tmp/resmon.log
-          ( while :; do
-              L="$(printf '%s ' "$(date +%T)"; ps -C rclone -o rss= 2>/dev/null | awk '{s+=$1} END{if(s)printf "rclone_RSS=%dM ",int(s/1024)}'; free -m | awk '/Mem:/{printf "Mem_used=%dM Mem_avail=%dM ",$3,$7}'; df -B1 /tmp | awk 'NR==2{printf "tmp_avail=%dG",int($4/2^30)}')"
-              echo "$L" >> /tmp/resmon.log
-              echo "RESMON $L" >&2
-              sleep 10
-            done ) &
+          ./bin/resmon.sh &
           SAMPLER_PID=$!
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
@@ -450,7 +443,7 @@ jobs:
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
-            --multi-thread-streams 24 \
+            --multi-thread-streams 40 \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}

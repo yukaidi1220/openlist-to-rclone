@@ -445,8 +445,24 @@ jobs:
           # 故从 copy.log 提取 SKIP 路径生成 exclude,让 one-way check 不把这些"明确不传"
           # 的文件报成 file not in dst。SKIP 日志被 --ignore-errors 数次追加,路径无冒号
           # (139 拒绝冒号),用第一个冒号定界提取即可。
-          grep -a 'SKIP ' copy.log | sed -E 's/.*SKIP ([^:]+):.*/\1/' | sort -u > /tmp/skipped.txt \
-            || rm -f /tmp/skipped.txt
+          # 独立 verify 模式无 copy 阶段(不生成 copy.log):改为由源端 lsjson 按同一上限
+          # (>YUN139_MAX_FILE_SIZE)反推超限文件,二者语义一致,不依赖残留 copy.log。
+          if [ -f copy.log ]; then
+            grep -a 'SKIP ' copy.log | sed -E 's/.*SKIP ([^:]+):.*/\1/' | sort -u > /tmp/skipped.txt \
+              || rm -f /tmp/skipped.txt
+          else
+            _S="${YUN139_MAX_FILE_SIZE:-8Gi}"
+            case "$_S" in
+              *g*|*G*) _B=$(( ${_S//[A-Za-z]/} * 1024 * 1024 * 1024 )) ;;
+              *m*|*M*) _B=$(( ${_S//[A-Za-z]/} * 1024 * 1024 )) ;;
+              *t*|*T*) _B=$(( ${_S//[A-Za-z]/} * 1024 * 1024 * 1024 * 1024 )) ;;
+              *k*|*K*) _B=$(( ${_S//[A-Za-z]/} * 1024 )) ;;
+              *) _B="${_S:-8589934592}" ;;
+            esac
+            rclone lsjson "$SRC" -R --files-only --no-mimetype --no-modtime -vv \
+              2>/dev/null | jq -r --argjson m "$_B" '.[] | select(.Size > $m) | .Path' \
+              | sort -u > /tmp/skipped.txt
+          fi
           echo "已收集 $(wc -l < /tmp/skipped.txt 2>/dev/null || echo 0) 个预期跳过文件 → /tmp/skipped.txt"
           if [ -s /tmp/skipped.txt ]; then sed 's/^/  /' /tmp/skipped.txt; fi
           CHECK_ARGS=()

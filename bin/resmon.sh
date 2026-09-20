@@ -21,7 +21,7 @@ WG=$(awk '$1=="wg0:"{print 1; exit}' /proc/net/dev 2>/dev/null || echo 0)
 PREV_T=$(date +%s); PREV_RX=0; PREV_TX=0; PREV_RG=0; PREV_TG=0
 while :; do
   # 每个非 lo 接口的 rx/tx 字节;wg0 单独计数
-  read -r rxb txb rg tg < <(awk 'NR>2{gsub(":","",$1); if($1!="lo"){r+=$2; t+=$10; if($1=="wg0"){wg_r+=$2; wg_t+=$10}}} END{printf "%d %d %d %d", r, t, wg_r, wg_t}' /proc/net/dev 2>/dev/null || printf '%s' '0 0 0 0')
+  read -r rxb txb rg tg < <(awk 'NR>2{gsub(":","",$1); if($1!="lo"){r+=$2; t+=$10; if($1=="wg0"){wg_r+=$2; wg_t+=$10}}} END{printf "%d %d %d %d\n", r, t, wg_r, wg_t}' /proc/net/dev 2>/dev/null || printf '%s\n' '0 0 0 0')
 
   now=$(date +%s); dt=$((now - PREV_T)); if [ "$dt" -lt 1 ]; then dt=1; fi
 

@@ -85,10 +85,11 @@ jobs:
       YUN139_UPLOAD_CONCURRENCY: '16'         # 阶段二(全量)单文件分片并发
       YUN139_UPLOAD_CONCURRENCY_STAGE1: '4'   # 阶段一(≤1G)单文件分片并发
       YUN139_MT_CUTOFF: 256Mi                 # ≥此大小走 源端 Range 并行下载 + 139 分片上传
-      # 单文件上传上限(对应会员等级;默认白银 8G=8589934592)。stage2 用 --max-size
+      # 单文件上传上限(对应会员等级;默认白银 8Gi=8589934592 字节)。stage2 用 --max-size
       # 在检查阶段就过滤超限文件(不进传输、不算错误、exit 0),避免 04010319 权益不足
-      # 在 create 才被拒产生 ERROR/warning。换更高会员等级时改这里。
-      YUN139_MAX_FILE_SIZE: 8589934592
+      # 在 create 才被拒产生 ERROR/warning。必须带 i 二进单位:裸数字会被 SizeSuffix
+      # 当作 Kibi(×1024)≈8TiB 致过滤失效;8Gi 才是 8GiB。换更高会员等级时改这里。
+      YUN139_MAX_FILE_SIZE: 8Gi
     steps:
       - name: 检出仓库(含 bin/chunk-probe.sh)
         uses: actions/checkout@v6

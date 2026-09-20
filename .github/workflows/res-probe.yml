@@ -1,0 +1,26 @@
+# Resource probe — 手动触发,在目标 runner(ubuntu-latest)上实测:
+#   1) 挂载点与大容量磁盘位置(用于把 TMPDIR 指过去摆脱 /tmp 14GiB 上限)
+#   2) 内存可用上限(逐块分配实测 RSS 峰值)
+#   3) 磁盘写吞吐
+# 触发后到 Actions → Resource probe → 看日志即可。
+name: Resource probe
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: res-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出仓库(含 bin/res-probe.sh)
+        uses: actions/checkout@v6
+
+      - name: Run resource probe
+        run: |
+          chmod +x bin/res-probe.sh
+          ./bin/res-probe.sh

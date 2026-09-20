@@ -102,6 +102,7 @@ FILES_JSON="$WORKDIR_DIAG/files.json"
 # 注意:set -e 下,简单命令非零返回立即自杀,LIST_RC=$? 永远到达不了;
 # 必须用 if 或 cmd || true 才能捕获退出码(此前 LIST_RC 检查是死代码,lsjson 失败直接 exit 1)。
 if "$RCLONE" lsjson "$SRC" -R --files-only --no-mimetype --no-modtime -vv \
+   ${PROBE_MAX_SIZE:+--max-size "$PROBE_MAX_SIZE"} \
    2>"$WORKDIR_DIAG/lsjson.vv.log" >"$FILES_JSON"; then
   LIST_RC=0
 else

@@ -470,6 +470,9 @@ jobs:
           DEL_MISMATCH: "1"             # 不一致 → 删除目标坏文件,重跑 sync 修复
           MIN_SIZE: "1048576"           # 只探 ≥1MiB 对象
           VERBOSE: "1"                  # 逐片打进度(实时日志可见)
+          PROBE_MAX_SIZE: "8Gi"         # 与 YUN139_MAX_FILE_SIZE 一致:探针只抽 ≤8Gi 文件
+                                        # (必须带 i 二进单位),避免抽到被 --max-size 过滤的超限
+                                        # 文件(目标端不存在)产生 DSTFAIL warning
         run: |
           . /tmp/paths.src
           set -o pipefail

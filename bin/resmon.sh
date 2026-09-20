@@ -23,11 +23,11 @@ while :; do
   # 每个非 lo 接口的 rx/tx 字节;wg0 单独计数
   read -r rxb txb rg tg < <(awk 'NR>2{gsub(":","",$1); if($1!="lo"){r+=$2; t+=$10; if($1=="wg0"){wg_r+=$2; wg_t+=$10}}} END{printf "%d %d %d %d", r, t, wg_r, wg_t}' /proc/net/dev 2>/dev/null || printf '%s' '0 0 0 0')
 
-  now=$(date +%s); dt=$((now - PREV_T)); [ "$dt" -lt 1 ] && dt=1
+  now=$(date +%s); dt=$((now - PREV_T)); if [ "$dt" -lt 1 ]; then dt=1; fi
 
-  rss=$(ps -C rclone -o rss= 2>/dev/null | awk '{s+=$1} END{if(s) printf "rclone_RSS=%dM ", int(s/1024)}')
-  mem=$(free -m | awk '/Mem:/{printf "Mem_used=%dM Mem_avail=%dM ", $3, $7}')
-  disk=$(df -B1 /tmp | awk 'NR==2{printf "tmp_avail=%dG ", int($4/2^30)}')
+  rss=$(ps -C rclone -o rss= 2>/dev/null | awk '{s+=$1} END{if(s) printf "rclone_RSS=%dM ", int(s/1024)}' || true)
+  mem=$(free -m | awk '/Mem:/{printf "Mem_used=%dM Mem_avail=%dM ", $3, $7}' || true)
+  disk=$(df -B1 /tmp | awk 'NR==2{printf "tmp_avail=%dG ", int($4/2^30)}' || true)
   dl=$(( (rxb - PREV_RX) / 1048576 / dt ))
   ul=$(( (txb - PREV_TX) / 1048576 / dt ))
   wgs=""

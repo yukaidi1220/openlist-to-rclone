@@ -388,6 +388,7 @@ jobs:
           # 后台采样(bin/resmon.sh):5s 一次 输出 rclone_RSS/系统内存//tmp磁盘 + 最近5s 上下行网络吞吐,
           # WARP(wg0)单列;RESMON 行走 stderr 进 GH 日志(artifact 在 runner 级被杀时拿不到,靠日志留存)。
           : > /tmp/resmon.log
+          chmod +x bin/resmon.sh
           ./bin/resmon.sh &
           SAMPLER_PID=$!
           rclone copy "$SRC" "$DST" \
@@ -433,6 +434,7 @@ jobs:
           # 后台采样(bin/resmon.sh):5s 一次 输出 rclone_RSS/系统内存//tmp磁盘 + 最近5s 上下行网络吞吐,
           # WARP(wg0)单列;RESMON 行走 stderr 进 GH 日志(artifact 在 runner 级被杀时拿不到,靠日志留存)。
           : > /tmp/resmon.log
+          chmod +x bin/resmon.sh
           ./bin/resmon.sh &
           SAMPLER_PID=$!
           rclone sync "$SRC" "$DST" \

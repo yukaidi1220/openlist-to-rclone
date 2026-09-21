@@ -394,6 +394,7 @@ jobs:
           SAMPLER_PID=$!
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --disable-http2 \
             --transfers 4 --checkers 2 \
             --max-size "$YUN139_MAX_FILE_SIZE" \
             --yun139-no-refresh \
@@ -440,6 +441,7 @@ jobs:
           SAMPLER_PID=$!
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --disable-http2 \
             --transfers 4 --checkers 2 \
             --max-size "$YUN139_MAX_FILE_SIZE" \
             --yun139-no-refresh \

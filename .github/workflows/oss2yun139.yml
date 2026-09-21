@@ -369,6 +369,7 @@ jobs:
           set +e
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --disable-http2 \
             --max-size 1G --transfers 15 --checkers 8 \
             --yun139-no-refresh \
             --yun139-part-size "$YUN139_PART_SIZE" \
@@ -417,6 +418,7 @@ jobs:
           set +e
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --disable-http2 \
             --max-size 1G --transfers 15 --checkers 8 \
             --yun139-no-refresh \
             --yun139-part-size "$YUN139_PART_SIZE" \

@@ -92,10 +92,11 @@ jobs:
       YUN139_UPLOAD_CONCURRENCY: '16'         # 阶段二(全量)单文件分片并发
       YUN139_UPLOAD_CONCURRENCY_STAGE1: '4'   # 阶段一(≤1G)单文件分片并发
       YUN139_MT_CUTOFF: 256Mi                 # ≥此大小走 源端 Range 并行下载 + 139 分片上传
-      # 单文件上传上限(对应会员等级;默认白银 8Gi=8589934592 字节)。stage2 用 --max-size
-      # 在检查阶段就过滤超限文件(不进传输、不算错误、exit 0),避免 04010319 权益不足
-      # 在 create 才被拒产生 ERROR/warning。必须带 i 二进单位:裸数字会被 SizeSuffix
-      # 当作 Kibi(×1024)≈8TiB 致过滤失效;8Gi 才是 8GiB。换更高会员等级时改这里。
+      # 超限文件处理:stage1/stage2【不用】--max-size 硬过滤;而是由 yun139 后端动态探测会员等级
+      # (queryMemberLevel → 真实单文件上限,如白银 8Gi/黄金 20Gi/钻石 500Gi),在 OpenChunkWriter
+      # 打开前拦截并 fs.Logf 记 "SKIP <path>: ... exceeds member single-file upload limit (tier ...)",
+      # 不进下载、不触发 04010319。SKIP 行随 -vv 进 copy.log → verify 从 copy.log 提取跳过清单 →
+      # check 不再把超限文件报成缺失。YUN139_MAX_FILE_SIZE 仅供 verify/probe 兜底反推源端超限文件。
       YUN139_MAX_FILE_SIZE: 8Gi
     steps:
       - name: 检出仓库(含 bin/chunk-probe.sh)
@@ -395,7 +396,6 @@ jobs:
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 4 --checkers 2 \
-            --max-size "$YUN139_MAX_FILE_SIZE" \
             --yun139-no-refresh \
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
@@ -441,7 +441,6 @@ jobs:
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 4 --checkers 2 \
-            --max-size "$YUN139_MAX_FILE_SIZE" \
             --yun139-no-refresh \
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
@@ -508,8 +507,7 @@ jobs:
           MIN_SIZE: "1048576"           # 只探 ≥1MiB 对象
           VERBOSE: "1"                  # 逐片打进度(实时日志可见)
           PROBE_MAX_SIZE: "8Gi"         # 与 YUN139_MAX_FILE_SIZE 一致:探针只抽 ≤8Gi 文件
-                                        # (必须带 i 二进单位),避免抽到被 --max-size 过滤的超限
-                                        # 文件(目标端不存在)产生 DSTFAIL warning
+                                        # (必须带 i 二进单位),避免抽到被后端动态会员 SKIP(目标端不存在)的超限文件产生 DSTFAIL warning
         run: |
           . /tmp/paths.src
           set -o pipefail

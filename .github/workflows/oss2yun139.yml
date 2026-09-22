@@ -488,6 +488,7 @@ jobs:
           CHECK_ARGS=()
           if [ -s /tmp/skipped.txt ]; then CHECK_ARGS=(--exclude-from /tmp/skipped.txt); fi
           rclone check "$SRC" "$DST" --one-way --size-only --ignore-errors \
+            --checkers 16 --transfers 4 \
             "${CHECK_ARGS[@]}" \
             --yun139-no-refresh -v 2>&1 | tee check.log
           rc=${PIPESTATUS[0]}

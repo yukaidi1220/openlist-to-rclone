@@ -395,7 +395,7 @@ jobs:
           SAMPLER_PID=$!
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --transfers 4 --checkers 2 \
+            --transfers 4 --checkers 4 \
             --yun139-no-refresh \
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
@@ -440,7 +440,7 @@ jobs:
           SAMPLER_PID=$!
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --transfers 4 --checkers 2 \
+            --transfers 4 --checkers 4 \
             --yun139-no-refresh \
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \

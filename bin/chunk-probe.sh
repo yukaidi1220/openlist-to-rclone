@@ -16,7 +16,8 @@
 # 相比串行版: 网络往返可满带宽、rclone 进程启动开销被并发摊薄、比对不重传数据。
 #
 # 用法:
-#   chunk-probe.sh <src:path> <dst:path> [选项]
+#   chunk-probe.sh [选项] <src:path> <dst:path>
+#   (选项必须在两个路径之前:解析器遇到第一个非选项参数即停止,后面的选项会被当成路径忽略)
 #
 # 选项 (优先级:命令行 > 环境变量 > 默认值):
 #   --limit N               top-N 大文件档位 (-1=全部,默认 -1;与 --random-pick 互斥)
@@ -184,6 +185,12 @@ tick "阶段2开始 并行拉取分片 jobs=$JOBS (共 $total_chunks 片)"
 # 双端并行: 源端与目标端同时拉取(此前串行,慢的一端独占时间)。
 # 取证设计: 不丢弃 rclone stderr(存 d_<seq>.src/.dst.log),落盘后 du -b 核对实际字节,
 #           与请求 len 对比:远大于 len → 疑似未走 Range、整文件下载(计入 sizes 供诊断)。
+# 源端读失败的形态分类。敏感词目录在服务端表现为 "directory not found"(读不到路径本身),
+# 与一般网络失败不是同一类缺口,混计会让桶级缺口统计不可用。
+src_fail_kind() {
+  if grep -qF 'directory not found' "$1" 2>/dev/null; then echo SRCNONAME; else echo SRCFAIL; fi
+}
+
 fetch_one() {
   local line="$1" #  Path<TAB>off<TAB>len<TAB>seq
   local path="${line%%$'\t'*}" rest="${line#*$'\t'}"
@@ -194,7 +201,7 @@ fetch_one() {
   # 双端并行拉取(后台 & 同时跑,完了 wait)
   ( "$RCLONE" cat "$SRC/$path" --offset "$off" --count "$len" --no-check-certificate \
       --retries 5 --low-level-retries 20 > "$srcf" 2>"$WORKDIR_DIAG/d_${seq}.src.log" \
-      || { rm -f "$srcf"; echo "SRCFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; \
+      || { rm -f "$srcf"; echo "$(src_fail_kind "$WORKDIR_DIAG/d_${seq}.src.log") $path" > "$WORKDIR_DIAG/d_${seq}.fail"; \
            echo "::warning:: SRCFAIL seq=$seq off=$off (源端 ${SRC}:范围读取失败) $path" >&2; } ) &
   local pidsrc=$!
   ( "$RCLONE" cat "$DST/$path" --offset "$off" --count "$len" --no-check-certificate \
@@ -215,8 +222,16 @@ fetch_one() {
   if [ "$ds" -gt $(( len + 1048576 )) ]; then
     echo "::warning::WARN 目标端疑似整文件下载 seq=$seq off=$off want=$len got=$ds $path" >&2
   fi
+  # 源端落 0 字节而请求 len>0:候选都已过 MIN_SIZE 且 off<=Size-len,合法 Range 读不可能为空,
+  # 只能是 CDN 对该范围回了 200-空(断供形态之一)。这不是内容不一致——把它标成失败片,
+  # 让本片走 SKIP 而不是 MISMATCH;否则 DEL_MISMATCH 会因源端断供删掉目标端的好文件
+  # (2026-10-03 silver-de-04 实测:4 个 MISMATCH 全是源端 got=0/目标端读满,却已发出 delete)。
+  if [ "$len" -gt 0 ] && [ "$ss" -eq 0 ] && [ ! -e "$WORKDIR_DIAG/d_${seq}.fail" ]; then
+    echo "SRCEMPTY $path" > "$WORKDIR_DIAG/d_${seq}.fail"
+    echo "::warning:: SRCEMPTY seq=$seq off=$off want=$len (源端 ${SRC} 返回 0 字节=CDN 断供,按不可用计) $path" >&2
+  fi
 }
-export -f fetch_one
+export -f fetch_one src_fail_kind
 export RCLONE SRC DST WORKDIR WORKDIR_DIAG WORKDIR_CHUNKS VERBOSE
 
 # 滑动窗口作业池: 不整批 wait,窗口满即等一个结束并补位,消灭"整批等最慢"的黑洞
@@ -281,8 +296,13 @@ compare_one() {
   local seq="${rest3#*$'\t'}"
   local srcf="$WORKDIR_CHUNKS/d_${seq}.src" dstf="$WORKDIR_CHUNKS/d_${seq}.dst"
   if [ -f "$WORKDIR_DIAG/d_${seq}.fail" ]; then
-    echo "SKIP(file_fail) $path"
-    echo "SKIP(file_fail) $path" >&2
+    # 按拉取失败的形态分别计数,聚合口径见阶段3末尾。
+    local kind; kind=$(head -1 "$WORKDIR_DIAG/d_${seq}.fail" 2>/dev/null)
+    case "$kind" in
+      SRCEMPTY*)  echo "SKIP(src_empty) $path";  echo "SKIP(src_empty) $path" >&2 ;;
+      SRCNONAME*) echo "SKIP(no_such_dir) $path"; echo "SKIP(no_such_dir) $path" >&2 ;;
+      *)          echo "SKIP(file_fail) $path";  echo "SKIP(file_fail) $path" >&2 ;;
+    esac
     return 0
   fi
   local a b
@@ -313,7 +333,7 @@ done < "$CHUNKS_FILE"
 wait
 
 # ---- 聚合到文件级 ----
-tot_mism=0; tot_ok=0; tot_skip=0; skip_ff=0; skip_me=0
+tot_mism=0; tot_ok=0; tot_skip=0; skip_ff=0; skip_me=0; skip_se=0; skip_nm=0
 declare -A filestat
 : > "$WORKDIR_DIAG/mismatch_files.txt"
 # 用第一个空格做分割点——path 可能含空格(如"英特尔® XTU/xxx.iso"),IFS= 只读第一个空格会截断
@@ -325,15 +345,19 @@ while IFS= read -r line; do
     MISMATCH)          tot_mism=$((tot_mism+1)); filestat["$path"]="MISMATCH"; echo "$path" >> "$WORKDIR_DIAG/mismatch_files.txt" ;;
     SKIP\(file_fail\)) tot_skip=$((tot_skip+1)); skip_ff=$((skip_ff+1)); [ -z "${filestat[$path]+x}" ] && filestat["$path"]="SKIP" ;;
     SKIP\(md5_empty\)) tot_skip=$((tot_skip+1)); skip_me=$((skip_me+1)); [ -z "${filestat[$path]+x}" ] && filestat["$path"]="SKIP" ;;
+    SKIP\(src_empty\))   tot_skip=$((tot_skip+1)); skip_se=$((skip_se+1)); [ -z "${filestat[$path]+x}" ] && filestat["$path"]="SKIP" ;;
+    SKIP\(no_such_dir\)) tot_skip=$((tot_skip+1)); skip_nm=$((skip_nm+1)); [ -z "${filestat[$path]+x}" ] && filestat["$path"]="SKIP" ;;
     SKIP*)             tot_skip=$((tot_skip+1)); [ -z "${filestat[$path]+x}" ] && filestat["$path"]="SKIP" ;;  # 兜底:裸 SKIP 兼容
     *)                 tot_ok=$((tot_ok+1)) ;;
   esac
 done < "$RESULT"
 
-# 交叉验证:阶段2统计的 .fail 文件数 vs 阶段3 result.txt 里的 SKIP(file_fail) 行数
+# 交叉验证:阶段2统计的 .fail 文件数 vs 阶段3里所有"该片不可用"的 SKIP 行数
+# (file_fail 拉取失败 / src_empty 源端断供 / no_such_dir 敏感词目录,三类都会落 .fail 标记)
+unusable=$((skip_ff + skip_se + skip_nm))
 cross_ok=1
-if [ "$skip_ff" -ne "$fail_files" ]; then
-  echo "::warning::计数不一致:阶段2有 $fail_files 个 .fail 文件,但阶段3只看到 $skip_ff 个 SKIP(file_fail)" >&2
+if [ "$unusable" -ne "$fail_files" ]; then
+  echo "::warning::计数不一致:阶段2有 $fail_files 个 .fail 文件,但阶段3只看到 $unusable 个不可用分片(file_fail=$skip_ff src_empty=$skip_se no_such_dir=$skip_nm)" >&2
   cross_ok=0
 fi
 
@@ -351,6 +375,8 @@ ok_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) - mism_files - skip_fil
 
 # DEL_MISMATCH:迁移 verify 自治——把不一致的目标文件删掉,重跑 sync 即重传修复。
 # 串行逐个删(失败不影响其他),删除走 rclone deletefile(幂等,文件不存在也成功)。
+# 到这里的不一致必然是"两端都读到非空且内容不同":源端 0 字节(CDN 断供)已在阶段2
+# 标成 src_empty 走 SKIP,不会触发删除——断供时删目标端等于把好数据交给一个取不到源的地方重建。
 # 注:SRC/DST/RCLONE 已在 fetch 段 export,此处(主进程)直接可见。
 if [ -n "$DEL_MISMATCH" ] && [ "$mism_files" -gt 0 ]; then
   echo "== DEL_MISMATCH 已开启,删除 $mism_files 个不一致目标文件 ==" >&2
@@ -366,7 +392,16 @@ if [ -n "$DEL_MISMATCH" ] && [ "$mism_files" -gt 0 ]; then
 fi
 
 tick "阶段3完成"
-echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files files_skip=$skip_files chunks_total=$total_chunks chunks_ok=$tot_ok chunks_mismatch=$tot_mism chunks_skip=$tot_skip (skip_ff=$skip_ff skip_me=$skip_me fail_files=$fail_files cross_ok=$cross_ok) ===" >&2
+echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files files_skip=$skip_files chunks_total=$total_chunks chunks_ok=$tot_ok chunks_mismatch=$tot_mism chunks_skip=$tot_skip (skip_ff=$skip_ff skip_me=$skip_me skip_src_empty=$skip_se skip_no_such_dir=$skip_nm fail_files=$fail_files cross_ok=$cross_ok) ===" >&2
+
+# 可验证比例:两端都拿到非空内容并真正比过的文件占比。比例过低时结论只是"没验证到",
+# 不能当成"内容一致"——源端断供(CDN 200-空)会让整桶都落到 skip 里。
+verified_files=$((probed_files - mism_files - skip_files))
+if [ "$probed_files" -gt 0 ] && [ $(( verified_files * 100 )) -lt $(( probed_files * 50 )) ]; then
+  echo "::warning::verdict=INCONCLUSIVE 可验证文件仅 $verified_files/$probed_files (<50%),源端不可用 src_empty=$skip_se 敏感词目录=$skip_nm;本结论不代表内容一致" >&2
+else
+  echo "verdict=OK verified=$verified_files/$probed_files" >&2
+fi
 
 # 保留诊断文件供 artifact(字节核对 sizes.tsv / lsjson.vv.log / 各片 rclone 日志 / result)
 # WORKDIR 默认保留分片本体供取证(chunks artifact);设 CLEANUP=1 时删除本体(含 diag 里的分片计划)。

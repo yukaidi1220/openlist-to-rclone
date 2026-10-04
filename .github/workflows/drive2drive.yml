@@ -271,12 +271,14 @@ jobs:
             w6=$(curl -6 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^warp=(on|plus)' || true)
             case "$w6" in "warp=on"|"warp=plus") ;; *) echo "::error::WARP v6 未接管,终止"; exit 1 ;; esac
           fi
-          # wopan 控制面:v6 出口可达(硬校验);v4 出口已知被屏蔽(软校验)
+          # wopan 控制面经 v6 只做软校验:2026-10-04 实测 panservice.mail.wo.cn 用裸 curl -6 拿不到
+          # 响应,但 WARP 本身 warp=on。真正的可达性判据放在下一步的 `rclone about`(走网盘真实 API),
+          # 不让一个裸 GET 的门禁卡掉整条 CI。
           if [ "$V6_WANT" = "1" ]; then
-            echo ">>> [硬校验] wopan 控制面经 WARP v6(panservice.mail.wo.cn)"
+            echo ">>> [软校验] wopan 控制面经 WARP v6(panservice.mail.wo.cn)"
             code=$(curl -6 -sS --max-time 15 -o /dev/null -w "%{http_code}" https://panservice.mail.wo.cn) \
-              || { echo "::error::wopan 控制面经 WARP v6 不通,终止"; exit 1; }
-            echo "wopan v6 HTTP $code"
+              || echo "::warning::wopan 控制面裸 curl 经 WARP v6 无响应(继续,由 rclone about 定论)"
+            echo "wopan v6 HTTP ${code:-N/A}"
           fi
           if [ "$V4_WANT" = "1" ]; then
             echo ">>> [软校验] wopan 控制面经 WARP v4(已知可能被屏蔽,由 proof test 定论)"

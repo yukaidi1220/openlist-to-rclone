@@ -269,6 +269,22 @@ jobs:
           sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version | head -2
 
+      - name: 探测会员单文件上限(不写死 8Gi)
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          # 后端 NewFs 会探账号会员等级并打一行 `max single-file upload N bytes`。
+          # 这个数随等级变(2026-09-20 实测白银 8G,2026-10-04 已是黄金 20G),写死两处都会出错:
+          #   - verify 的"预期跳过"名单按它反推 → 8~20 GiB 的文件其实能传,却被当成合理缺失 exclude 掉,检查会假绿;
+          #   - 抽样探针的候选池按它过滤 → 那一档文件永远进不了随机池,不是"抽不到"而是"压根没放进池子"。
+          CAP=$(rclone lsf "$DST" -vv --no-check-certificate 2>&1 \
+                  | sed -n 's/.*max single-file upload \([0-9]\{6,\}\) bytes.*/\1/p' | tail -1) || true
+          if [ -z "$CAP" ]; then
+            echo "::warning::没探到会员单文件上限(后端探测失败时按无限制处理),本轮不设大小上限"
+          fi
+          echo "YUN139_CAP_BYTES=$CAP" >> "$GITHUB_ENV"
+          echo "本轮单文件上限 = ${CAP:-无限制} 字节"
+
       # ---- 预检 ----
       - name: Preflight - source bucket scoped
         if: inputs.mode != 'cleanup'
@@ -471,7 +487,7 @@ jobs:
             grep -a 'SKIP ' copy.log | sed -E 's/.*SKIP ([^:]+):.*/\1/' | sort -u > /tmp/skipped.txt \
               || rm -f /tmp/skipped.txt
           else
-            _S="${YUN139_MAX_FILE_SIZE:-8Gi}"
+            _S="${YUN139_CAP_BYTES:-${YUN139_MAX_FILE_SIZE:-8Gi}}"   # 优先用上面探测到的实时上限
             case "$_S" in
               *g*|*G*) _B=$(( ${_S//[A-Za-z]/} * 1024 * 1024 * 1024 )) ;;
               *m*|*M*) _B=$(( ${_S//[A-Za-z]/} * 1024 * 1024 )) ;;
@@ -507,7 +523,7 @@ jobs:
           DEL_MISMATCH: "1"             # 不一致 → 删除目标坏文件,重跑 sync 修复
           MIN_SIZE: "1048576"           # 只探 ≥1MiB 对象
           VERBOSE: "1"                  # 逐片打进度(实时日志可见)
-          PROBE_MAX_SIZE: "8Gi"         # 与 YUN139_MAX_FILE_SIZE 一致:探针只抽 ≤8Gi 文件
+          PROBE_MAX_SIZE: ${{ env.YUN139_CAP_BYTES }}   # 跟随探测到的会员单文件上限;探不到就留空=不设上限,全量入池
                                         # (必须带 i 二进单位),避免抽到被后端动态会员 SKIP(目标端不存在)的超限文件产生 DSTFAIL warning
           PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件(固定种子会让多轮只验同 50 个)
         run: |

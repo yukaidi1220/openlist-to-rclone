@@ -383,6 +383,7 @@ jobs:
         run: |
           set -o pipefail
           . /tmp/paths.src
+          chmod +x bin/chunk-probe.sh
           export RCLONE_CONFIG PYTHON
           # 这里**不设 DEL_MISMATCH**:网盘之间的删除不可回滚,§13.7 那 291 个文件就是
           # 被"判坏即删"清掉的。抽样不一致只报告,由人决定。

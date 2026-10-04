@@ -28,7 +28,8 @@ run-name: drive2drive ${{ inputs.direction }} ${{ inputs.src_bucket }} (${{ inpu
 # 已知必然传不上/被跳过的类别(见 MIGRATION-HANDOVER.md §7 与 §13.6),都不算失败,
 # 由 verify 步把数量报出来即可:
 #   - 源端真 0 字节对象:两盘都拒收
-#   - >8 GiB 单文件:移动盘当前会员等级永久拒收(wopan->yun139 方向必然留一批)
+#   - 超过移动盘会员上限的单文件(按 NewFs 实时探测,2026-10-04 实测为黄金 20 GiB;
+#     这个数会随账号等级变,别按 8 GiB 的老读数判断) —— 上限判定由后端自己做,本 CI 不写死
 #   - 名字 >100 rune / 含非 BMP:联通盘拒收、移动盘接受(反方向搬运正好补这个缺口)
 #   - 敏感词目录(4444):按目录整体拒建
 # 两盘的文件名编码集合不同,但 rclone 列目录时解码、写入时再编码,所以暴露给上层的
@@ -365,7 +366,7 @@ jobs:
           grep -aE 'files missing|differences found|matching files|errors while checking' check.log \
             | tee -a "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "缺失里 0 字节 / >8 GiB(移动盘会员上限)/ 敏感词目录 属已知不可达,不是丢数据;" >> "$GITHUB_STEP_SUMMARY"
+          echo "缺失里 0 字节 / 超过移动盘实时会员上限 / 敏感词目录 属已知不可达,不是丢数据;" >> "$GITHUB_STEP_SUMMARY"
           echo "真正要盯的是 \`differences found\`(两边都有但大小不同)。" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify - 分片抽样双端内容比对(只报不删)
@@ -377,7 +378,6 @@ jobs:
           RANDOM_PICK: "50"
           CHUNKS_PER_FILE: "10"
           MIN_SIZE: "1048576"
-          PROBE_MAX_SIZE: "8Gi"        # 超过移动盘单文件上限的对象两端不该都有,避免 DSTFAIL 噪声
           VERBOSE: "1"
           PROBE_SEED: "${{ github.run_id }}"
         run: |

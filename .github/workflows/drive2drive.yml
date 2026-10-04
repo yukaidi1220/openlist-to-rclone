@@ -1,0 +1,415 @@
+name: drive2drive migrate
+run-name: drive2drive ${{ inputs.direction }} ${{ inputs.src_bucket }} (${{ inputs.mode }})
+
+# 联通盘(wopan) <-> 移动盘(yun139) 之间互传,一次一个桶。
+#
+# 与 oss2* 系列的区别:不碰阿里云 OSS、不碰自建 CDN —— 所以这条 CI 没有任何
+# AK/SK 出现在 dispatch 输入里,conf 由执行器自己从私有仓根目录取现成的两份。
+#
+# 令牌:两侧都是**纯消费**。本 CI 永不刷新、永不回写任何 token,并在组装运行时
+# conf 时主动剥掉 [wopan] 的 refresh_token(后端拿不到 refresh_token 就物理上刷不了)。
+# 令牌过期就失败,去跑对应的 oss2*-launcher 续期后再重触发。
+#
+# 配置:只用私有仓根目录的 oss2wopan.conf 与 oss2yun139.conf(不新增任何配置文件)。
+# 两份在 runner 的 /tmp 里合成运行时 conf,只取 [wopan] 与 [yun139] 两个 section,
+# [src](OSS 凭据)整段丢弃,作业结束即 shred。
+#
+# 路径布局:两盘都是 s3-bak/<桶名>/<rc4hex(桶名)>/<原 key>,同桶互传是恒等映射,
+# 因此不需要 wopan2oss 那套跨桶 RC4 前缀重映射。
+#
+# 增量语义:--size-only 比对(两盘 mtime 都不可靠),目标端已存在且同大小的文件自动
+# 跳过,所以"整桶"跑法本身就是增量的;要缩小范围用 path 前缀。
+#
+# 常年关闭 HTTP/2(RCLONE_DISABLE_HTTP2 + 运行时 conf 两侧 disable_http2=true):
+# H2 单连接被断会批量波及并发请求。
+# WARP:默认 v6-only(常年走 v6),bare/v4-only/dual 仅供诊断;安装步骤与
+# oss2wopan/oss2yun139/wopan2oss 共用同一套实现(实测 WARP v4 出口到 wopan 控制面不通)。
+#
+# 已知必然传不上/被跳过的类别(见 MIGRATION-HANDOVER.md §7 与 §13.6),都不算失败,
+# 由 verify 步把数量报出来即可:
+#   - 源端真 0 字节对象:两盘都拒收
+#   - >8 GiB 单文件:移动盘当前会员等级永久拒收(wopan->yun139 方向必然留一批)
+#   - 名字 >100 rune / 含非 BMP:联通盘拒收、移动盘接受(反方向搬运正好补这个缺口)
+#   - 敏感词目录(4444):按目录整体拒建
+# 两盘的文件名编码集合不同,但 rclone 列目录时解码、写入时再编码,所以暴露给上层的
+# "标准名"两边一致(2026-10-04 实测 sg-04/kr-03 名字零差异),不会产生二次编码的近重复。
+
+on:
+  workflow_dispatch:
+    inputs:
+      direction:
+        description: "迁移方向。联通盘只剩几百 GiB,反方向基本塞不下,默认 wopan2yun139"
+        type: choice
+        required: true
+        default: "wopan2yun139"
+        options:
+          - wopan2yun139
+          - yun1392wopan
+      src_bucket:
+        description: "桶名(两盘同构布局,源与目标用同一个桶名)"
+        required: true
+      path:
+        description: "桶内相对前缀(留空=整桶;整桶即增量,只补缺的)"
+        required: false
+        default: ""
+      mode:
+        description: "copy=只增不删(默认) / sync=会删除目标端多余对象,跨盘删除请三思"
+        type: choice
+        required: false
+        default: "copy"
+        options:
+          - copy
+          - sync
+      warp_mode:
+        description: "出口模式,本 CI 常年 v6-only;其余仅供诊断"
+        type: choice
+        required: false
+        default: "v6-only"
+        options:
+          - v6-only
+          - bare
+          - v4-only
+          - dual
+
+concurrency:
+  group: drive2drive-${{ inputs.direction }}-${{ inputs.src_bucket }}-${{ inputs.path }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      RCLONE_CONFIG: /tmp/drive2drive.conf
+      RCLONE_DISABLE_HTTP2: 'true'
+      BUCKET: ${{ inputs.src_bucket }}
+      PATH_PREFIX: ${{ inputs.path }}
+    steps:
+      - name: 检出仓库(含 bin/chunk-probe.sh 与 bin/resmon.sh)
+        uses: actions/checkout@v6
+
+      - name: 组装运行时 conf(取两份现成 conf,剥掉 refresh_token)
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          umask 077
+          : > "$RCLONE_CONFIG"
+          # 只取 [wopan] 与 [yun139] 两段;[src] 里的 OSS AK/SK 一概不复制进来。
+          for spec in "wopan=oss2wopan.conf" "yun139=oss2yun139.conf"; do
+            sec="${spec%%=*}"; file="${spec#*=}"
+            raw="/tmp/$sec.rawconf"
+            ok=0
+            for i in 1 2 3; do
+              if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+                 -H "Authorization: token $RCLONE_PAT" \
+                 -H "Accept: application/vnd.github.v3.raw" \
+                 "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/$file" -o "$raw"; then ok=1; break; fi
+              echo "取 $file 失败,重试 $i/3"; sleep $((i * 5))
+            done
+            [ "$ok" = 1 ] && [ -s "$raw" ] || { echo "::error::无法从私有仓取现成配置 $file"; exit 1; }
+            awk -v s="[$sec]" '
+              index($0, s) == 1 { f = 1 }
+              f && /^\[/ && index($0, s) != 1 { f = 0 }
+              # refresh_token 一律丢弃:后端取不到它就物理上无法轮换令牌,
+              # 并发迁移作业就不会被这个 run 踢下线。
+              f && $0 !~ /^[ \t]*refresh_token[ \t]*=/ { print }
+            ' "$raw" >> "$RCLONE_CONFIG"
+            # 紧跟刚写入的那段末尾,仍属同一段
+            printf 'no_refresh = true\ndisable_http2 = true\n' >> "$RCLONE_CONFIG"
+            rm -f "$raw"
+          done
+          for sec in wopan yun139; do
+            awk -v s="[$sec]" 'index($0,s)==1{f=1;next} f&&/^\[/{f=0} f' "$RCLONE_CONFIG" \
+              | grep -qE '^no_refresh[ \t]*=[ \t]*true' \
+              || { echo "::error::运行时 conf 的 [$sec] 没有 no_refresh=true,拒绝执行(本 CI 绝不允许刷新)"; exit 1; }
+          done
+          grep -qE '^[ \t]*refresh_token[ \t]*=' "$RCLONE_CONFIG" \
+            && { echo "::error::refresh_token 未剥净"; exit 1; } || true
+          grep -qE '^[ \t]*\[src\]' "$RCLONE_CONFIG" \
+            && { echo "::error::运行时 conf 混进了 OSS [src] 段"; exit 1; } || true
+          echo "=== 运行时 conf(值全部隐去,只给键名与段名) ==="
+          sed -E 's/^([ \t]*[a-z_]+)[ \t]*=.*/\1 = <hidden>/' "$RCLONE_CONFIG"
+          echo "=== 段名 ==="; grep -c '^\[' "$RCLONE_CONFIG"; grep -o '^\[[a-z0-9]*\]' "$RCLONE_CONFIG" | tr '\n' ' '
+
+      - name: 解析方向与路径
+        run: |
+          set -euo pipefail
+          B="$BUCKET"
+          P="${PATH_PREFIX#/}"; P="${P%/}"
+          case "${{ inputs.direction }}" in
+            wopan2yun139) SRCR=wopan;  DSTR=yun139 ;;
+            yun1392wopan) SRCR=yun139; DSTR=wopan  ;;
+            *) echo "::error::未知 direction: ${{ inputs.direction }}"; exit 1 ;;
+          esac
+          # 两盘同构布局 s3-bak/<桶>/<rc4hex(桶)>/<key>,同桶互传=恒等映射,不重映射。
+          # 注意:path 是相对 s3-bak/<桶> 的前缀,和 oss2* 系列一样要包含那层 24 位 rc4 目录。
+          if [ -n "$P" ]; then
+            SRC="$SRCR:s3-bak/$B/$P"; DST="$DSTR:s3-bak/$B/$P"
+          else
+            SRC="$SRCR:s3-bak/$B";    DST="$DSTR:s3-bak/$B"
+          fi
+          { echo "set -a"
+            echo "SRC=$SRC"; echo "DST=$DST"; echo "SRCR=$SRCR"; echo "DSTR=$DSTR"
+            echo "set +a"; } > /tmp/paths.src
+          echo "== paths.src =="; cat /tmp/paths.src
+
+      - name: Setup Cloudflare WARP
+        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync') && inputs.warp_mode != 'bare' }}
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -e
+          MODE="${{ inputs.warp_mode }}"
+          case "$MODE" in
+            v6-only|v4-only|dual) ;;
+            "") echo "warp_mode 未指定,按 bare 跳过(兼容旧 launcher)"; exit 0 ;;
+            *) echo "::error::未知 warp_mode: $MODE"; exit 1 ;;
+          esac
+          V4_WANT=0; V6_WANT=0
+          case "$MODE" in
+            v6-only) V6_WANT=1 ;;
+            v4-only) V4_WANT=1 ;;
+            dual)    V4_WANT=1; V6_WANT=1 ;;
+          esac
+          echo ">>> WARP 模式: $MODE (V4_WANT=$V4_WANT V6_WANT=$V6_WANT)"
+          sudo apt-get update -qq
+          # tcpdump:proof test 抓包用(不预装);不用 wg-quick,无需 resolvconf
+          sudo apt-get install -y -qq wireguard-tools tcpdump
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o /tmp/wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
+          chmod +x /tmp/wgcf && sudo mv /tmp/wgcf /usr/local/bin/wgcf
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -H "Authorization: token $RCLONE_PAT" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
+            -o wgcf-account.toml || { echo "::error::拉取 wgcf-account.toml 失败"; exit 1; }
+          wgcf generate
+          # PrivateKey 打码后输出(公开仓 run 日志,私钥不能见)
+          echo "===== wgcf-profile.conf(PrivateKey 已打码)====="
+          sed 's/^PrivateKey.*/PrivateKey = ***REDACTED***/' wgcf-profile.conf
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          # profile 的 Address 是单行逗号分隔(如 "172.16.0.2/32, 2606:.../128"),必须按逗号拆
+          ADDR_V4=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep -v ':' | head -1)
+          ADDR_V6=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep ':' | head -1)
+          PEER_KEY=$(grep 'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep 'Endpoint' wgcf-profile.conf | awk '{print $NF}')
+          DEV=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+          GW=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -1)
+          echo "ADDR_V4=$ADDR_V4 ADDR_V6=$ADDR_V6 DEV=$DEV GW=$GW"
+          # 需要的地址必须齐全
+          [ "$V4_WANT" = "1" ] && [ -z "$ADDR_V4" ] && { echo "::error::WARP 未分配 IPv4 地址"; exit 1; }
+          [ "$V6_WANT" = "1" ] && [ -z "$ADDR_V6" ] && { echo "::error::WARP 未分配 IPv6 地址"; exit 1; }
+          # ---- 钉扎(在任何路由劫持之前执行)----
+          # endpoint /32 与 Azure 平台服务 168.63.129.16 无条件钉回原网关:
+          # v4 被劫持的模式(v4-only/dual)是生死线;v6-only 时 v4 未劫持,加了也无害
+          ENDPOINT_HOST=${ENDPOINT%%:*}
+          EP_PORT=${ENDPOINT##*:}
+          EP_IP=$(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null | head -1)
+          [ -n "$EP_IP" ] || { echo "::error::无法解析 WARP 端点,按要求终止"; exit 1; }
+          echo ">>> 钉扎:endpoint $EP_IP/32、Azure 平台服务 168.63.129.16/32 via $GW ($DEV)"
+          sudo ip route add "$EP_IP/32" via "$GW" dev "$DEV" 2>/dev/null || true
+          sudo ip route add 168.63.129.16/32 via "$GW" dev "$DEV" 2>/dev/null || true
+          if [ "$V4_WANT" = "1" ]; then
+            # 私有/保留 + 微软/Azure(20/8 13/8 52/8 168/8) + GitHub(140/8 185.199/16)
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 \
+                       20.0.0.0/8 13.0.0.0/8 52.0.0.0/8 168.0.0.0/8 \
+                       140.0.0.0/8 185.199.0.0/16; do
+              sudo ip route add "$NET" via "$GW" dev "$DEV" 2>/dev/null || \
+                sudo ip route add "$NET" via "$GW" 2>/dev/null || true
+            done
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            # v6:仅私有 ULA 走原始网卡(过宽的大区段不钉,避免 on-link 路由把有 AAAA 的目标弄不可达)
+            sudo ip -6 route add fc00::/7 dev "$DEV" 2>/dev/null || true
+          fi
+          # ---- 拉起接口与路由(按模式)----
+          sudo ip link add wgcf type wireguard
+          echo "$PRIVATE_KEY" | sudo wg set wgcf private-key /dev/stdin
+          # wg endpoint 用钉扎过的 IP,杜绝 wg 内部二次解析与 dig 结果不一致导致钉扎失效
+          WG_ENDPOINT="${EP_IP}:${EP_PORT}"
+          if [ "$V4_WANT" = "1" ] && [ "$V6_WANT" = "1" ]; then
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "0.0.0.0/0, ::/0"
+          elif [ "$V4_WANT" = "1" ]; then
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "0.0.0.0/0"
+          else
+            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "::/0"
+          fi
+          sudo ip link set mtu 1280 up dev wgcf
+          [ "$V4_WANT" = "1" ] && sudo ip addr add "$ADDR_V4" dev wgcf
+          [ "$V6_WANT" = "1" ] && sudo ip addr add "$ADDR_V6" dev wgcf
+          [ "$V4_WANT" = "1" ] && sudo ip -4 route replace 0.0.0.0/0 dev wgcf
+          [ "$V6_WANT" = "1" ] && sudo ip -6 route replace ::/0 dev wgcf
+          # MSS 钳制:WARP MTU=1280,防 PMTUD 黑洞
+          if [ "$V4_WANT" = "1" ]; then
+            sudo iptables -t mangle -A OUTPUT -o wgcf -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            sudo ip6tables -t mangle -A OUTPUT -o wgcf -p tcp \
+              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+          fi
+          # ---- 出口探测与校验 ----
+          echo "===== IP 出口探测 ====="
+          if [ "$V4_WANT" = "1" ]; then
+            echo "--- dash.cloudflare trace (v4) ---"
+            curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v4 不通)"
+            w4=$(curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^warp=(on|plus)' || true)
+            case "$w4" in "warp=on"|"warp=plus") ;; *) echo "::error::WARP v4 未接管,终止"; exit 1 ;; esac
+          else
+            echo "--- dash.cloudflare trace (v4,应保持 runner 原生出口) ---"
+            curl -4 -sS --max-time 10 "https://www.cloudflare-cn.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v4 不通)"
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            echo "--- dash.cloudflare trace (v6) ---"
+            curl -6 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v6 不通)"
+            w6=$(curl -6 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^warp=(on|plus)' || true)
+            case "$w6" in "warp=on"|"warp=plus") ;; *) echo "::error::WARP v6 未接管,终止"; exit 1 ;; esac
+          fi
+          # wopan 控制面:v6 出口可达(硬校验);v4 出口已知被屏蔽(软校验)
+          if [ "$V6_WANT" = "1" ]; then
+            echo ">>> [硬校验] wopan 控制面经 WARP v6(panservice.mail.wo.cn)"
+            code=$(curl -6 -sS --max-time 15 -o /dev/null -w "%{http_code}" https://panservice.mail.wo.cn) \
+              || { echo "::error::wopan 控制面经 WARP v6 不通,终止"; exit 1; }
+            echo "wopan v6 HTTP $code"
+          fi
+          if [ "$V4_WANT" = "1" ]; then
+            echo ">>> [软校验] wopan 控制面经 WARP v4(已知可能被屏蔽,由 proof test 定论)"
+            code=$(curl -4 -sS --max-time 15 -o /dev/null -w "%{http_code}" https://panservice.mail.wo.cn) \
+              || echo "::warning::wopan 控制面经 WARP v4 不通(继续)"
+            echo "wopan v4 HTTP ${code:-N/A}"
+          fi
+
+      - name: "Install rclone (custom build: s3 download_host + wopan)"
+        run: |
+          URL="https://github.com/yukaidi1220/rclone/releases/latest/download/rclone-cdn-linux-amd64"
+          curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 5 \
+            -o /tmp/rclone "$URL" || { echo "::error::无法下载 rclone release"; exit 1; }
+          chmod +x /tmp/rclone
+          sudo mv /tmp/rclone /usr/local/bin/rclone
+          rclone version | head -2
+
+      # ---- 预检 ----
+
+
+      - name: Preflight - 两侧容量与源端可读(只读,绝不写)
+        run: |
+          set -euo pipefail
+          . /tmp/paths.src
+          echo "=== 目标端($DSTR)还剩多少地方 ==="
+          rclone about "$DSTR:" --no-check-certificate 2>/tmp/ab.err \
+            || { sed -n '1,10p' /tmp/ab.err
+                 echo "::error::$DSTR 令牌或控制面不可用;续期请去跑对应的 oss2*-launcher,本 CI 永不刷新令牌"; exit 1; }
+          echo "=== 源端($SRCR)容量 ==="
+          rclone about "$SRCR:" --no-check-certificate 2>/dev/null || true
+          echo "=== 源端路径可读性 ==="
+          if ! rclone size "$SRC" --no-check-certificate 2>/tmp/pre.err > /tmp/pre.out; then
+            sed -n '1,20p' /tmp/pre.err
+            echo "::error::源端 $SRC 读不到。若是令牌失效,请跑对应 oss2*-launcher 续期后重触发 —— 本 CI 不会自行刷新"
+            exit 1
+          fi
+          cat /tmp/pre.out
+          grep -qE 'Count:[[:space:]]*(0|null)' /tmp/pre.out \
+            && { echo "::error::$SRC 下 0 个对象:path 前缀要相对 s3-bak/<桶> 并包含那层 24 位 rc4 目录"; exit 1; } || true
+
+      - name: Transfer(${{ inputs.mode }},只增不删为默认)
+        run: |
+          set -o pipefail
+          set -eu
+          . /tmp/paths.src
+          : > copy.log
+          chmod +x bin/resmon.sh
+          ./bin/resmon.sh &
+          SAMPLER_PID=$!
+          set +e
+          # 目标端分片参数按后端各自给;源端读取用多线程 Range 分段。
+          case "$DSTR" in
+            yun139) DST_FLAGS="--yun139-part-size 100Mi --yun139-upload-concurrency 8" ;;
+            wopan)  DST_FLAGS="--wopan-chunk-size 10Mi --wopan-upload-concurrency 8" ;;
+            *) echo "::error::内部错误:未知目标端 $DSTR"; kill "$SAMPLER_PID" 2>/dev/null; exit 1 ;;
+          esac
+          # --size-only:两盘 mtime 都不可靠,只能按大小比对(否则全量重传)。
+          # --ignore-checksum:网盘侧大文件 MD5 有分钟级沉降窗口,完整性交给结尾抽样兜底。
+          # --ignore-errors:个别文件被服务端拒(0 字节/敏感词/超长名/超单文件上限)不该中断整桶。
+          rclone "${{ inputs.mode }}" "$SRC" "$DST" \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors --fast-list \
+            --transfers 4 --checkers 4 \
+            --multi-thread-cutoff 1G --multi-thread-streams 8 \
+            $DST_FLAGS \
+            --retries 5 --low-level-retries 20 \
+            --stats 30s -vv 2>&1 | tee -a copy.log
+          rc=${PIPESTATUS[0]}
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::rclone ${{ inputs.mode }} 退出码 $rc(存在文件级错误,详见 copy.log)"
+          fi
+          echo "### Transfer(${{ inputs.direction }} · ${{ inputs.mode }})退出码 \`$rc\`" >> "$GITHUB_STEP_SUMMARY"
+          grep -aE 'Transferred:|Checks:|Errors:' copy.log | tail -6 >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Verify - one-way size check(只报数,不因已知不可达类别判失败)
+        run: |
+          set -o pipefail
+          . /tmp/paths.src
+          set +e
+          rclone check "$SRC" "$DST" --one-way --size-only --ignore-errors --no-check-certificate -v 2>&1 | tee check.log
+          set -e
+          echo "### Verify one-way(${{ inputs.direction }})" >> "$GITHUB_STEP_SUMMARY"
+          grep -aE 'files missing|differences found|matching files|errors while checking' check.log \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "缺失里 0 字节 / >8 GiB(移动盘会员上限)/ 敏感词目录 属已知不可达,不是丢数据;" >> "$GITHUB_STEP_SUMMARY"
+          echo "真正要盯的是 \`differences found\`(两边都有但大小不同)。" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify - 分片抽样双端内容比对(只报不删)
+        env:
+          RCLONE: rclone
+          PYTHON: python3
+          SLICE: "2097152"
+          JOBS: "100"
+          RANDOM_PICK: "50"
+          CHUNKS_PER_FILE: "10"
+          MIN_SIZE: "1048576"
+          PROBE_MAX_SIZE: "8Gi"        # 超过移动盘单文件上限的对象两端不该都有,避免 DSTFAIL 噪声
+          VERBOSE: "1"
+          PROBE_SEED: "${{ github.run_id }}"
+        run: |
+          set -o pipefail
+          . /tmp/paths.src
+          export RCLONE_CONFIG PYTHON
+          # 这里**不设 DEL_MISMATCH**:网盘之间的删除不可回滚,§13.7 那 291 个文件就是
+          # 被"判坏即删"清掉的。抽样不一致只报告,由人决定。
+          if bin/chunk-probe.sh "$SRC" "$DST" 2>&1 | tee sample.log; then
+            echo "random sample content PASSED" | tee -a sample.log
+            rc=0
+          else
+            rc=$?
+            echo "random sample content FAILED(chunk-probe exit=$rc)" | tee -a sample.log
+          fi
+          grep -aE 'probe done|verdict' sample.log | tail -4 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          exit $rc
+
+      - name: Upload logs (diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drive2drive-diag-${{ github.run_number }}
+          path: |
+            copy.log
+            check.log
+            sample.log
+            /tmp/resmon.log
+            /tmp/probe-artifact/diag
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Remove fetched config
+        if: always()
+        run: |
+          if [ -f "$RCLONE_CONFIG" ]; then shred -u "$RCLONE_CONFIG" || rm -f "$RCLONE_CONFIG"; fi
+          rm -f /tmp/wopan.rawconf /tmp/yun139.rawconf /tmp/paths.src /tmp/pre.err /tmp/pre.out /tmp/ab.err

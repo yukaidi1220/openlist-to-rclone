@@ -500,6 +500,7 @@ jobs:
           CHUNKS_PER_FILE: "10"         # 每文件 10 片
           DEL_MISMATCH: "1"             # 不一致 → 删除目标坏文件,重跑 sync 修复
           MIN_SIZE: "1048576"           # 只探 ≥1MiB 对象
+          PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件(固定种子会让多轮只验同 50 个)
           VERBOSE: "1"                  # 逐片打进度(实时日志可见)
         run: |
           . /tmp/paths.src

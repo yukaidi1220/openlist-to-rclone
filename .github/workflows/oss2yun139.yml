@@ -509,6 +509,7 @@ jobs:
           VERBOSE: "1"                  # 逐片打进度(实时日志可见)
           PROBE_MAX_SIZE: "8Gi"         # 与 YUN139_MAX_FILE_SIZE 一致:探针只抽 ≤8Gi 文件
                                         # (必须带 i 二进单位),避免抽到被后端动态会员 SKIP(目标端不存在)的超限文件产生 DSTFAIL warning
+          PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件(固定种子会让多轮只验同 50 个)
         run: |
           . /tmp/paths.src
           set -o pipefail

@@ -73,6 +73,7 @@ CHECKERS="${_CHECKERS:-${CHECKERS:-4}}"
 CHUNKS_PER_FILE="${_CHUNKS_PER_FILE:-${CHUNKS_PER_FILE:-10}}"
 DEL_MISMATCH="${_DEL_MISMATCH:-${DEL_MISMATCH:-}}"
 VERBOSE="${_VERBOSE:-${VERBOSE:-0}}"
+PROBE_SEED="${PROBE_SEED:-0x5EED}"   # 抽样种子(接受 0x.. 或十进制);执行器按 run id 传值,轮间换一批文件
 
 # 固定诊断目录名,便于 workflow 用 upload-artifact 稳定打包;探测只读且按桶分组串行,
 # 不同 bucket 各自 runner 独立 /tmp 无冲突。
@@ -132,15 +133,18 @@ else
   PICK_LABEL="top ${LIMIT} 大文件"
 fi
 tick "阶段1b 分片计划 ($PICK_LABEL, 每文件 ${CHUNKS_PER_FILE} 片)..."
-total_count=$("$PYTHON" - "$FILES_JSON" "$WORKDIR_DIAG/chunks.0" "$CHUNKS_PER_FILE" "$SLICE" "$LIMIT" "$MIN_SIZE" "$RANDOM_PICK" <<'PY')
+total_count=$("$PYTHON" - "$FILES_JSON" "$WORKDIR_DIAG/chunks.0" "$CHUNKS_PER_FILE" "$SLICE" "$LIMIT" "$MIN_SIZE" "$RANDOM_PICK" "$PROBE_SEED" <<'PY')
 import sys, math, random, json
-fj, out, cpf, sl, lim, minsz, rpick = sys.argv[1:]
+fj, out, cpf, sl, lim, minsz, rpick, seed = sys.argv[1:]
 cpf, sl, minsz, lim, rpick = int(cpf), int(sl), int(minsz), int(lim), int(rpick)
 with open(fj) as f:
     data = json.load(f)
 files = [(o["Path"], int(o["Size"])) for o in data if int(o["Size"]) >= minsz]
 total = len(files)
-random.seed(0x5EED)  # 固定种子,结果可复现(排查友好)
+# 抽样种子。默认仍是 0x5EED(单轮排查可复现);但固定种子会让每一轮抽到**同一批文件**,
+# 多轮迁移永远只验同样的 50 个。执行器把 PROBE_SEED 设成 run id,轮间就自动换一批,
+# 需要复刻某轮时按那轮的 run id 传回同一个值即可。
+random.seed(int(seed, 0))
 if rpick > 0:
     # 全桶随机抽 N 个(不按体积偏置;文件不足 N 则全取)
     random.shuffle(files)
@@ -380,15 +384,26 @@ ok_files=$(( $(cut -f1 "$CHUNKS_FILE" | sort -u | wc -l) - mism_files - skip_fil
 # 注:SRC/DST/RCLONE 已在 fetch 段 export,此处(主进程)直接可见。
 if [ -n "$DEL_MISMATCH" ] && [ "$mism_files" -gt 0 ]; then
   echo "== DEL_MISMATCH 已开启,删除 $mism_files 个不一致目标文件 ==" >&2
+  # mismatch_files.txt 是按**分片**写的,同一文件最多被写 CHUNKS_PER_FILE 次。不去重就会对同一个
+  # 对象连发 10 次 deletefile(2026-10-03 de-04 日志里 31 条删除告警就是这么来的)。
+  sort -u "$WORKDIR_DIAG/mismatch_files.txt" > "$WORKDIR_DIAG/mismatch_files.uniq"
+  d_gone=0; d_still=0; d_lie=0
   while IFS= read -r p; do
     [ -z "$p" ] && continue
     if "$RCLONE" deletefile --no-check-certificate "$DST/$p" --retries 5 \
-       2>"$WORKDIR_DIAG/del.err"; then
-      echo "  deleted: $p" >&2
+       2>"$WORKDIR_DIAG/del.err"; then drc=0; else drc=1; fi
+    # 回读确认:联通盘的删除是异步任务。deletefile 返回 0 而对象仍在原地、以及返回 not found
+    # 而对象其实早就不在了,两种都实测过——只看退出码会把这两件事都判反。
+    if [ -n "$("$RCLONE" lsf --files-only --no-check-certificate "$DST/$p" 2>/dev/null || true)" ]; then
+      d_still=$((d_still+1))
+      echo "::warning::删除后回读仍在目标端(deletefile rc=$drc): $p" >&2
     else
-      echo "::warning::删除失败(目标端): $p" >&2
+      d_gone=$((d_gone+1))
+      [ "$drc" -ne 0 ] && d_lie=$((d_lie+1))
+      echo "  deleted: $p (回读已消失, deletefile rc=$drc)" >&2
     fi
-  done < "$WORKDIR_DIAG/mismatch_files.txt"
+  done < "$WORKDIR_DIAG/mismatch_files.uniq"
+  echo "== DEL_MISMATCH 结果: 回读已消失=$d_gone 仍存在=$d_still (退出码与回读不一致=$d_lie) ==" >&2
 fi
 
 tick "阶段3完成"

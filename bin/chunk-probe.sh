@@ -121,6 +121,15 @@ else
 fi
 tick "阶段1a 完成 lsjson -> files.json ($(du -h "$FILES_JSON" | cut -f1))"
 
+# 列出 0 个对象也算失败,而且 -s 判不出来:2026-10-04 实测源端 403 UserDisable 时
+# lsjson 非零返回却写了一个 `[]`(2 字节),流程继续走到 python 的 json.load 才崩,
+# 日志里只剩一句 traceback,看着像脚本坏了而不是"源桶读不到"。这里直接把根因说清楚。
+if ! grep -q '"Path"' "$FILES_JSON"; then
+  echo "::error::lsjson 列出 0 个对象(rc=$LIST_RC),源桶不可读,原因见下 (lsjson.vv.log)" >&2
+  grep -aE 'NOTICE|ERROR' "$WORKDIR_DIAG/lsjson.vv.log" 2>/dev/null | tail -3 >&2
+  exit 1
+fi
+
 # python:从 files.json 取文件并生成平铺分片清单
 # 不在 bash 里建大数组; python json.load 一次性读 + 内存排序/随机, 比 bash mapfile 可靠。
 # 抽样: RANDOM_PICK>0 → 全桶随机抽 N 个文件(LIMIT 忽略);否则 top-LIMIT 大文件。

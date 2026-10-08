@@ -265,20 +265,35 @@ jobs:
           fi
           # ---- 出口探测与校验 ----
           echo "===== IP 出口探测 ====="
+          # 接管判定必须重试:WireGuard 首包握手经常超过 10s,单发一次会把已经建好的隧道
+          # 误判成"未接管"(2026-10-08 实测 18 桶里 4 次这种假失败,每次白丢一整趟 dispatch)。
+          # 4 次 x 10s + 3 次 5s 间隔 = 最坏 55s,相对 350min 的墙可忽略。
+          warp_takeover() {
+            local fam=$1 body w i
+            for i in 1 2 3 4; do
+              body=$(curl "-$fam" -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" || true)
+              w=$(printf '%s\n' "$body" | sed -n 's/^warp=//p')
+              case "$w" in
+                on|plus)
+                  printf '%s\n' "$body" | grep -E '^(ip|warp|colo|loc)=' || true
+                  echo "WARP v$fam 接管 OK (第 $i 次)"
+                  return 0 ;;
+              esac
+              echo "WARP v$fam 第 $i 次未接管(${w:-curl 无响应}),重试"
+              if [ "$i" -lt 4 ]; then sleep 5; fi
+            done
+            return 1
+          }
           if [ "$V4_WANT" = "1" ]; then
             echo "--- dash.cloudflare trace (v4) ---"
-            curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v4 不通)"
-            w4=$(curl -4 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^warp=(on|plus)' || true)
-            case "$w4" in "warp=on"|"warp=plus") ;; *) echo "::error::WARP v4 未接管,终止"; exit 1 ;; esac
+            warp_takeover 4 || { echo "::error::WARP v4 未接管,终止"; exit 1; }
           else
             echo "--- dash.cloudflare trace (v4,应保持 runner 原生出口) ---"
             curl -4 -sS --max-time 10 "https://www.cloudflare-cn.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v4 不通)"
           fi
           if [ "$V6_WANT" = "1" ]; then
             echo "--- dash.cloudflare trace (v6) ---"
-            curl -6 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v6 不通)"
-            w6=$(curl -6 -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" | grep -E '^warp=(on|plus)' || true)
-            case "$w6" in "warp=on"|"warp=plus") ;; *) echo "::error::WARP v6 未接管,终止"; exit 1 ;; esac
+            warp_takeover 6 || { echo "::error::WARP v6 未接管,终止"; exit 1; }
           fi
           # wopan 控制面:v6 出口可达(硬校验);v4 出口已知被屏蔽(软校验)
           if [ "$V6_WANT" = "1" ]; then

@@ -412,8 +412,16 @@ jobs:
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
           set -e
-          # yun139 端个别文件不可规避错误,重试后仍会使 rclone 非 0 退出;放行并留日志供核对
-          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段一存在文件级错误,已放行;详见 copy.log)"; fi
+          # 已知永久拒绝会在 copy.log 留 SKIP 行；有 SKIP 行时把判定交给后面的
+          # one-way check，否则 rclone 非 0 就是真实传输失败，直接让 run 红。
+          if [ "$rc" -ne 0 ]; then
+            if grep -aq 'SKIP ' copy.log; then
+              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
+            else
+              echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
+              exit "$rc"
+            fi
+          fi
       - name: Copy - 阶段二 全量(不限制大小,size-only 跳过已传)
         if: inputs.mode == 'copy'
         run: |
@@ -439,7 +447,14 @@ jobs:
           rc=${PIPESTATUS[0]}
           kill "$SAMPLER_PID" 2>/dev/null || true
           set -e
-          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段二存在文件级错误,已放行;详见 copy.log)"; fi
+          if [ "$rc" -ne 0 ]; then
+            if grep -aq 'SKIP ' copy.log; then
+              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
+            else
+              echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
+              exit "$rc"
+            fi
+          fi
 
       - name: Sync - 阶段一 小文件(≤1G)高并发
         if: inputs.mode == 'sync'
@@ -458,7 +473,15 @@ jobs:
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
           set -e
-          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段一存在文件级错误,已放行;详见 copy.log)"; fi
+          # 同上：只有 copy.log 里留了 SKIP 行才交给 verify 判定，否则非 0 直接让 run 红。
+          if [ "$rc" -ne 0 ]; then
+            if grep -aq 'SKIP ' copy.log; then
+              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
+            else
+              echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
+              exit "$rc"
+            fi
+          fi
       - name: Sync - 阶段二 全量(不限制大小,size-only 跳过已传)
         if: inputs.mode == 'sync'
         run: |
@@ -484,7 +507,14 @@ jobs:
           rc=${PIPESTATUS[0]}
           kill "$SAMPLER_PID" 2>/dev/null || true
           set -e
-          if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段二存在文件级错误,已放行;详见 copy.log)"; fi
+          if [ "$rc" -ne 0 ]; then
+            if grep -aq 'SKIP ' copy.log; then
+              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
+            else
+              echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
+              exit "$rc"
+            fi
+          fi
 
       # ---- 校验 ----
       - name: Verify - full one-way check (size, yun139 mtime 不可改→size-only)
@@ -526,8 +556,14 @@ jobs:
             --yun139-no-refresh -v 2>&1 | tee check.log
           rc=${PIPESTATUS[0]}
           set -e
-          if [ "$rc" -ne 0 ]; then echo "::warning::rclone check exit=$rc(存在目标缺失/错误,已放行;详见 check.log)"; fi
           echo "full one-way size check done (rc=$rc)" >> "$GITHUB_STEP_SUMMARY"
+          # 这一步是整条链路唯一的"目标到底齐不齐"判据，非 0 就红。
+          # 明确不传的超限/敏感词文件已经由上面的 SKIP 名单 exclude 掉，
+          # 所以这里报出来的缺失只可能是真实上传失败。
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::rclone check exit=$rc(目标存在缺失或不一致;详见 check.log)"
+            exit "$rc"
+          fi
 
       - name: Verify - random sample content (分片抽样,不再整文件下载)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}

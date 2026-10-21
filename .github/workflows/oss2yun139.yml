@@ -13,7 +13,8 @@
 #   - 个人云支持 SHA-256(可 check),家庭云无 hash → 统一按 size-only + 抽样 md5 兜底
 #   - 拒收 8 个保留 ASCII " * : < > ? \ | 与部分控制字符,上传时后端/encoder 已处理
 #
-# WARP 出口模式(warp_mode,仅 copy/sync 生效;bare=不装 WARP 为生产默认,v6-only/v4-only/dual 为诊断用途)。
+# WARP 出口模式(warp_mode,仅 copy/sync 生效)。v6-only=默认,从境外传移动只有走 v6 隧道才有速度;
+# bare=不装 WARP,只用于对照;v4-only/dual=诊断用。注意 wopan 那条线的默认是 bare,两者刻意不同。
 #
 # 配置:路径由 config_file 输入指定(launcher 每轮生成时间戳配置于私有仓 oss2yun139-configs/ 并随 dispatch
 #       传入,同名 .dstbase 存目标基路径;手动直触不填则用根目录 oss2yun139.conf + dstbase 缺省 s3-bak/<src_bucket>)。

@@ -407,6 +407,7 @@ jobs:
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY_STAGE1" \
+            --wopan-fatal-if-no-space \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee copy.log
@@ -435,6 +436,7 @@ jobs:
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
+            --wopan-fatal-if-no-space \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log
@@ -460,6 +462,7 @@ jobs:
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY_STAGE1" \
+            --wopan-fatal-if-no-space \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee copy.log
@@ -488,6 +491,7 @@ jobs:
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
+            --wopan-fatal-if-no-space \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 5 --low-level-retries 20 \
             --stats 30s -vv 2>&1 | tee -a copy.log

@@ -2,7 +2,9 @@
 # skipdiff.sh 的自测：每条臂都给"期望判定"，其中必须有一条会红。
 # 用途是防止这类静默变绿：名单为空时把全部缺失当成已覆盖、判定脚本自己挂掉、
 # 以及 check 非 0 却一条缺失都报不出来(那是整步故障，不是"明确不传")。
-# 老做法(--exclude-from + 首个冒号取词)在下面 a3/a4/a5/a6 四类名字上都会歪。
+# 老做法(--exclude-from + 首个冒号取词)的实测失真：a3/a5 两类名字取词就歪，
+# a4/a6 两类是 glob 与 --exclude-from 那侧的失真(前者让整个 check CRITICAL 起不来，
+# 后者把行当注释丢掉)。
 set -u
 cd "$(dirname "$0")/.." || exit 1
 S=bin/skipdiff.sh
@@ -41,6 +43,9 @@ mk a4_bracket      'bad[br/x.toml'                    'bad[br/'                 
 mk a5_inner        'logs/SKIP me/x.toml'              'logs/SKIP me/'                 绿
 # 名字以 # 开头：--exclude-from 会把这行当注释丢掉
 mk a6_hash         '#tag/x.toml'                      '#tag/'                         绿
+# 不以 / 结尾的条目是整串相等，不得顺带前缀覆盖同名兄弟文件：
+# 这一条专门守"把名单一律当目录前缀匹配"那类放宽
+mk a10_exact_only  'report.csv.bak'                   'report.csv'                    红
 # check 非 0 却一条缺失都没有：整步故障，不许读成"全部预期跳过"
 mk a7_no_missing   ''                                 ''                              红 1
 # check 报的不是缺失而是别的错误：必须数进"其它 ERROR"

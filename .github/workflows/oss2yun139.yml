@@ -523,17 +523,16 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           set +e
-          # 预期跳过的文件(超会员单文件上限 04010319 权益不足 / wopan 敏感词等)会被
-          # copy 阶段在不进下载的情况下 SKIP。校验的是"已上传文件的完整性",而非"无遗漏",
-          # 故从 copy.log 提取 SKIP 路径生成 exclude,让 one-way check 不把这些"明确不传"
-          # 的文件报成 file not in dst。SKIP 日志被 --ignore-errors 数次追加,路径无冒号
-          # (139 拒绝冒号),用第一个冒号定界提取即可。
-          # 独立 verify 模式无 copy 阶段(不生成 copy.log):改为由源端 lsjson 按同一上限
-          # (>YUN139_MAX_FILE_SIZE)反推超限文件,二者语义一致,不依赖残留 copy.log。
-          if [ -f copy.log ]; then
-            grep -a 'SKIP ' copy.log | sed -E 's/.*SKIP ([^:]+):.*/\1/' | sort -u > /tmp/skipped.txt \
-              || rm -f /tmp/skipped.txt
-          else
+          # 名单不再喂 --exclude-from。那是 glob 语义，实测四类失真：路径里的冒号被
+          # 早先的 sed 截成前半截、不配对的 [ ] { } 让整个 check 直接 CRITICAL 起不来、
+          # --exclude-from 丢掉 # 与 ; 开头的行并 TrimSpace、路径含字面量 "SKIP " 时取词
+          # 取到最后一个。歪掉的名单既能误排真文件(静默假绿)，也能把校验步本身弄挂。
+          # 改成 check 照常全跑，再由 bin/skipdiff.sh 把"目标缺失集合"与"明确不传集合"
+          # 做纯字符串相减，剩下的一律判红。
+          SKIP_SRC=copy.log
+          if [ ! -f copy.log ]; then
+            # 独立 verify 模式没有 copy 阶段(不生成 SKIP 行)：由源端 lsjson 按同一个
+            # 会员单文件上限反推"明确不传"的超限文件，语义与 copy 阶段一致。
             _S="${YUN139_CAP_BYTES:-${YUN139_MAX_FILE_SIZE:-8Gi}}"   # 优先用上面探测到的实时上限
             case "$_S" in
               *g*|*G*) _B=$(( ${_S//[A-Za-z]/} * 1024 * 1024 * 1024 )) ;;
@@ -544,26 +543,23 @@ jobs:
             esac
             rclone lsjson "$SRC" -R --files-only --no-mimetype --no-modtime -vv \
               2>/dev/null | jq -r --argjson m "$_B" '.[] | select(.Size > $m) | .Path' \
-              | sort -u > /tmp/skipped.txt
+              | sort -u > /tmp/expected-skip.txt
+            export EXPECTED_SKIP=/tmp/expected-skip.txt
+            SKIP_SRC=-
           fi
-          echo "已收集 $(wc -l < /tmp/skipped.txt 2>/dev/null || echo 0) 个预期跳过文件 → /tmp/skipped.txt"
-          if [ -s /tmp/skipped.txt ]; then sed 's/^/  /' /tmp/skipped.txt; fi
-          CHECK_ARGS=()
-          if [ -s /tmp/skipped.txt ]; then CHECK_ARGS=(--exclude-from /tmp/skipped.txt); fi
           rclone check "$SRC" "$DST" --one-way --size-only --ignore-errors \
             --checkers 16 --transfers 4 \
-            "${CHECK_ARGS[@]}" \
             --yun139-no-refresh -v 2>&1 | tee check.log
           rc=${PIPESTATUS[0]}
           set -e
           echo "full one-way size check done (rc=$rc)" >> "$GITHUB_STEP_SUMMARY"
-          # 这一步是整条链路唯一的"目标到底齐不齐"判据，非 0 就红。
-          # 明确不传的超限/敏感词文件已经由上面的 SKIP 名单 exclude 掉，
-          # 所以这里报出来的缺失只可能是真实上传失败。
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::rclone check exit=$rc(目标存在缺失或不一致;详见 check.log)"
-            exit "$rc"
-          fi
+          # 这一步是整条链路唯一的"目标到底齐不齐"判据。skipdiff 还会兜住两种
+          # "静默变绿"：判定脚本自己挂掉、以及 check 非 0 却一条缺失都报不出来(整步故障)。
+          chmod +x bin/skipdiff.sh
+          bash bin/skipdiff.sh "$SKIP_SRC" check.log "$rc" | tee -a /tmp/skipdiff.out
+          sdc=${PIPESTATUS[0]}
+          head -1 /tmp/skipdiff.out >> "$GITHUB_STEP_SUMMARY"
+          if [ "$sdc" -ne 0 ]; then exit "$sdc"; fi
 
       - name: Verify - random sample content (分片抽样,不再整文件下载)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}

@@ -385,7 +385,7 @@ jobs:
             --transfers 8 --checkers 8 \
             --multi-thread-streams 8 \
             --s3-chunk-size 64M --s3-upload-concurrency 8 \
-            --retries 5 --low-level-retries 20 \
+            --retries 3 --low-level-retries 3 \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -405,7 +405,7 @@ jobs:
             --transfers 8 --checkers 8 \
             --multi-thread-streams 8 \
             --s3-chunk-size 64M --s3-upload-concurrency 8 \
-            --retries 5 --low-level-retries 20 \
+            --retries 3 --low-level-retries 3 \
             --stats 30s -vv 2>&1 | tee sync.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -452,7 +452,7 @@ jobs:
             fi
             rm -rf /tmp/vsrc /tmp/vdst; mkdir -p /tmp/vsrc /tmp/vdst
             rclone copy "$SRC/$p" /tmp/vsrc --no-check-certificate \
-              --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
+              --transfers 1 --checkers 2 --retries 3 --low-level-retries 3 \
               --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
               --stats 0 -q 2>/tmp/src.err \
               || { echo "   SKIP: 源端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue; }
@@ -462,7 +462,7 @@ jobs:
               echo "   SKIP: 源端字节数不符,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/src.err | sed 's/^/   src: /' | tee -a sample.log; skip=$((skip+1)); continue
             fi
             rclone copy "$DST/$p" /tmp/vdst --no-check-certificate \
-              --transfers 1 --checkers 2 --retries 5 --low-level-retries 20 \
+              --transfers 1 --checkers 2 --retries 3 --low-level-retries 3 \
               --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
               --stats 0 -q 2>/tmp/dst.err \
               || { echo "   SKIP: 目标端读取失败,跳过(不删目标)" | tee -a sample.log; sed -n '1,3p' /tmp/dst.err | sed 's/^/   dst: /' | tee -a sample.log; skip=$((skip+1)); continue; }

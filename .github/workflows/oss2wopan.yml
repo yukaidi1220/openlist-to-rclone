@@ -80,6 +80,7 @@ jobs:
     env:
       TZ: Asia/Shanghai
       RCLONE_CONFIG: /tmp/oss2wopan.conf
+      RCLONE_CONNECT_FAMILY: prefer-v6   # cdn.11: 双栈时优先 v6，某族停滞 5 分钟内降另一族
       # wopan 并发分片上传参数(指引:wopan-review/20-单流下载并发上传实施指引.md §5)
       # 仅对新版 rclone(含 uploadPartsConcurrent 的 release)有效;旧 binary 会报 unknown flag
       # 内存预算:阶段一 ≤1G 小文件 32Mi×30×15 ≈ 14GiB;阶段二全量 32Mi×64×4 ≈ 8GiB(runner 16GiB;实测 72 并发峰值 RSS 14.8GiB/剩 56MiB,故再降)

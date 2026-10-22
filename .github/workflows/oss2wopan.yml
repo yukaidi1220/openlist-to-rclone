@@ -318,6 +318,7 @@ jobs:
           chmod +x /tmp/rclone
           sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version | head -2
+          echo "RCLONE_CONNECT_FAMILY=${RCLONE_CONNECT_FAMILY:-<unset>} (--connect-family 见 cdn.11+)"
 
       # ---- 预检 ----
       - name: Preflight - source bucket scoped

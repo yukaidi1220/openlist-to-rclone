@@ -77,6 +77,7 @@ jobs:
     env:
       TZ: Asia/Shanghai
       RCLONE_CONFIG: /tmp/oss2yun139.conf
+      RCLONE_CONNECT_FAMILY: prefer-v6   # cdn.11: 双栈时优先 v6，某族停滞 5 分钟内降另一族
       # yun139 分片上传参数(对标 oss2wopan 分阶段并发;经 flag 覆盖 conf 内默认):
       #   stage1(≤1G 小文件)以文件数取胜,--transfers 高;>part_size 的文件才走分片,单文件并发取小
       #   stage2(全量)单文件分片并发取大

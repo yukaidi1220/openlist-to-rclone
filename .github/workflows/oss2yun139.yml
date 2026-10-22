@@ -287,6 +287,7 @@ jobs:
           chmod +x /tmp/rclone
           sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version | head -2
+          echo "RCLONE_CONNECT_FAMILY=${RCLONE_CONNECT_FAMILY:-<unset>} (--connect-family 见 cdn.11+)"
 
       - name: 探测会员单文件上限(不写死 8Gi)
         run: |

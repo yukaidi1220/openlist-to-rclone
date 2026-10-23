@@ -524,6 +524,12 @@ jobs:
           if [ "$rc" -ne 0 ]; then echo "::warning::rclone exit=$rc(阶段二存在文件级错误,已放行;详见 copy.log)"; fi
 
       # ---- 校验 ----
+      # 判据本身也要能被证伪：这步跑 wopandiff 的夹具，任何一条红都说明
+      # 后面的集合相减不可信，直接让本轮红，而不是带着坏判据去判别人。
+      - name: Verify - wopandiff 自检（判据自己能失败吗）
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
+        run: bash bin/test-wopandiff.sh
+
       - name: Verify - full one-way check (size, wopan hash 沉降不适用)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         run: |

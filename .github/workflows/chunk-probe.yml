@@ -147,6 +147,11 @@ jobs:
             -o /tmp/aria2c "$URL" || { echo "::error::无法下载 aria2 release"; exit 1; }
           chmod +x /tmp/aria2c
           sudo mv /tmp/aria2c /usr/local/bin/aria2c
+          # 这份 release 是 ASAN 构建(build.yml 全平台加 -fsanitize=address)。
+          # ubuntu-24.04 的内核默认 vm.mmap_rnd_bits=32, 会让 ASAN 进程起步即
+          # SIGSEGV(run 39958193652 实测 rc=139, 连日志都没写)。降到 28 是社区
+          # 通行解; 若哪天 release 改成非 ASAN 构建, 这行可以删。
+          sudo sysctl -w vm.mmap_rnd_bits=28 || echo "::warning::无法调整 mmap_rnd_bits, aria2 可能段错误"
           aria2c --version | head -1
 
       - name: 运行分片抽检探针

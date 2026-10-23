@@ -147,7 +147,7 @@ jobs:
             -o /tmp/aria2c "$URL" || { echo "::error::无法下载 aria2 release"; exit 1; }
           chmod +x /tmp/aria2c
           # 发布件 digest 钉死, 先排除下载损坏
-          echo "a298778a4c05d413f6e8817a08f2e2a314853f3143edf3a87a2589f32c1b1111  /tmp/aria2c" | sha256sum -c - \
+          echo "d4cdab4d79e63332db867243c833ef935a180c041bdde62be273d6b8c15d3b19  /tmp/aria2c" | sha256sum -c - \
             || { echo "::error::aria2c sha256 不符"; exit 1; }
           # 这份 release 是 ASAN 构建(build.yml 全平台加 -fsanitize=address)。
           # ubuntu-24.04 的内核默认 vm.mmap_rnd_bits=32, 会让 ASAN 进程起步即

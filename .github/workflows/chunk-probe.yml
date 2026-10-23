@@ -158,8 +158,15 @@ jobs:
           # 这些只打在日志里, 供 aria2 仓库那边定位; 2026-10-23 实测 28 仍崩。
           file /tmp/aria2c || true
           (ldd /tmp/aria2c 2>&1 || true) | head -5
+          uname -a; head -2 /etc/os-release
           /tmp/aria2c --version; echo "aria2c --version rc=$?"
           (sudo dmesg 2>/dev/null | tail -400 | grep -iE "segfault|traps" | tail -3) || true
+          # strace 取最后一屏系统调用, 定位崩在哪个调用上
+          sudo apt-get install -y -qq strace >/dev/null 2>&1 || true
+          if command -v strace >/dev/null; then
+            strace -f -o /tmp/strace.log /tmp/aria2c --version >/dev/null 2>&1; echo "strace rc=$?"
+            tail -25 /tmp/strace.log
+          fi
           sudo mv /tmp/aria2c /usr/local/bin/aria2c
           aria2c --version | head -1
 

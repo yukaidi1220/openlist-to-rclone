@@ -540,6 +540,25 @@ jobs:
             echo "::warning::check 未在目标找到 $missing 个条目(明细见 check.log)"
             { echo ""; echo "### 目标缺失 $missing 项"; echo ""; echo "若 copy.log 里有空间已满，这批就是没传完的；否则见 check.log。"; } >> "$GITHUB_STEP_SUMMARY"
           fi
+          # 这一步是这条链"目标到底齐不齐"的判据。以前只 warn，于是 rclone 报
+          # Failed to sync 而步骤与 run 仍记 success（run 39896762445 就是这样）。
+          # 现在把 check 的缺失集合与 copy.log 里**明确不可传**的集合相减：4444/1009
+          # 被拒目录按尾斜杠前缀、空文件按精确路径；剩下无法解释的才判红。
+          if [ -f copy.log ]; then
+            if bash bin/wopandiff.sh copy.log check.log "$rc" > /tmp/wopandiff.out 2>&1; then
+              diff_rc=0
+            else
+              diff_rc=$?
+            fi
+            cat /tmp/wopandiff.out
+            head -1 /tmp/wopandiff.out >> "$GITHUB_STEP_SUMMARY"
+            if [ "$diff_rc" -ne 0 ]; then
+              echo "::error::目标端存在无法用『被拒目录/空文件』解释的缺失，详见 check.log"
+              exit 1
+            fi
+          else
+            echo "::warning::没有 copy.log（独立 verify 模式），拿不到『明确不可传』集合，check rc=$rc 只告警不判红"
+          fi
           echo "full one-way size check done (rc=$rc)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify - random sample content (分片抽样,不再整文件下载)

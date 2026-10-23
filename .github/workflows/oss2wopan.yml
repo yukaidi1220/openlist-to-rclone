@@ -430,6 +430,7 @@ jobs:
             --wopan-fatal-if-no-space \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 3 --low-level-retries 3 \
+            --timeout 45s --contimeout 10s \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -459,6 +460,7 @@ jobs:
             --wopan-fatal-if-no-space \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 3 --low-level-retries 3 \
+            --timeout 45s --contimeout 10s \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}
           kill "$SAMPLER_PID" 2>/dev/null || true
@@ -485,6 +487,7 @@ jobs:
             --wopan-fatal-if-no-space \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 3 --low-level-retries 3 \
+            --timeout 45s --contimeout 10s \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -514,6 +517,7 @@ jobs:
             --wopan-fatal-if-no-space \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
             --retries 3 --low-level-retries 3 \
+            --timeout 45s --contimeout 10s \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}
           kill "$SAMPLER_PID" 2>/dev/null || true

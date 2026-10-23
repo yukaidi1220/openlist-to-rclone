@@ -63,6 +63,14 @@ on:
           - v6-only
           - v4-only
           - dual
+      fetch_mode:
+        description: "抽样取数方式。rclone=每片一个 rclone cat(默认,现网行为);aria2=每文件签一次直链再并行拉。仅 verify 抽样步生效"
+        type: choice
+        required: false
+        default: "rclone"
+        options:
+          - rclone
+          - aria2
 
 concurrency:
   # 公开仓永不刷新 yun139 token(launcher 续期后 token 已新鲜),不存在 token 互踢,
@@ -288,6 +296,20 @@ jobs:
           sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version | head -2
           echo "RCLONE_CONNECT_FAMILY=${RCLONE_CONNECT_FAMILY:-<unset>} (--connect-family 见 cdn.11+)"
+
+      - name: 安装 aria2c(仅 fetch_mode=aria2)
+        if: ${{ inputs.fetch_mode == 'aria2' }}
+        run: |
+          URL="https://github.com/yukaidi1220/aria2/releases/latest/download/aria2c-x86_64-linux"
+          curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 5 \
+            -o /tmp/aria2c "$URL" || { echo "::error::无法下载 aria2 release"; exit 1; }
+          chmod +x /tmp/aria2c
+          # 发布件 digest 钉死, 先排除下载损坏(musl 静态件; glibc 静态版在 24.04 上
+          # 会 dlopen 宿主 OpenSSL legacy.so 而起步即崩, 见 chunk-probe 的同类注释)
+          echo "d4cdab4d79e63332db867243c833ef935a180c041bdde62be273d6b8c15d3b19  /tmp/aria2c" | sha256sum -c - \
+            || { echo "::error::aria2c sha256 不符"; exit 1; }
+          sudo mv /tmp/aria2c /usr/local/bin/aria2c
+          aria2c --version | head -1
 
       - name: 探测会员单文件上限(不写死 8Gi)
         run: |
@@ -578,6 +600,7 @@ jobs:
           PROBE_MAX_SIZE: ${{ env.YUN139_CAP_BYTES }}   # 跟随探测到的会员单文件上限;探不到就留空=不设上限,全量入池
                                         # (必须带 i 二进单位),避免抽到被后端动态会员 SKIP(目标端不存在)的超限文件产生 DSTFAIL warning
           PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件(固定种子会让多轮只验同 50 个)
+          FETCH_MODE: ${{ inputs.fetch_mode }}  # rclone|aria2, 见 bin/chunk-probe.sh 的阶段2
         run: |
           . /tmp/paths.src
           set -o pipefail

@@ -73,6 +73,16 @@ CHECKERS="${_CHECKERS:-${CHECKERS:-4}}"
 CHUNKS_PER_FILE="${_CHUNKS_PER_FILE:-${CHUNKS_PER_FILE:-10}}"
 DEL_MISMATCH="${_DEL_MISMATCH:-${DEL_MISMATCH:-}}"
 VERBOSE="${_VERBOSE:-${VERBOSE:-0}}"
+# 取数方式: rclone=每片一个 rclone cat(默认, 现有生产路径); aria2=每文件签一次直链再并行拉
+FETCH_MODE="${FETCH_MODE:-rclone}"
+ARIA2="${ARIA2:-aria2c}"
+RCD_ADDR="${RCD_ADDR:-127.0.0.1:5579}"
+SIGN_JOBS="${SIGN_JOBS:-8}"
+ARIA2_TRIES="${ARIA2_TRIES:-2}"
+CHUNK_TIMEOUT="${CHUNK_TIMEOUT:-20}"          # aria2 单连接静默超时(秒)
+CHUNK_CONNECT_TIMEOUT="${CHUNK_CONNECT_TIMEOUT:-10}"
+STAGE2_DEADLINE="${STAGE2_DEADLINE:-900}"     # 整个取数阶段的墙钟上限(秒)
+ARIA2_LOG="${ARIA2_LOG:-/tmp/aria2-probe.log}"  # 原始 aria2 日志(含签名 URL, 不入 artifact)
 PROBE_SEED="${PROBE_SEED:-0x5EED}"   # 抽样种子(接受 0x.. 或十进制);执行器按 run id 传值,轮间换一批文件
 
 # 固定诊断目录名,便于 workflow 用 upload-artifact 稳定打包;探测只读且按桶分组串行,
@@ -87,6 +97,16 @@ rm -rf "$WORKDIR"; mkdir -p "$WORKDIR_DIAG" "$WORKDIR_CHUNKS"
 
 SRC="${1:?src:path required}"
 DST="${2:?dst:path required}"
+
+# 源端 CDN 下载域: 从 conf 的 [<remote>] 段读 download_host, 供 aria2 模式改写 host;
+# 读不到就留空(不改写, 直连源站), 不影响 rclone 模式。
+SRC_DOWNLOAD_HOST=""
+if [ -n "${RCLONE_CONFIG:-}" ] && [ -r "${RCLONE_CONFIG}" ]; then
+  SRC_DOWNLOAD_HOST=$(awk -v s="[${SRC%%:*}]" '
+    /^\[/ { insec = ($0 == s); next }
+    insec && /^[ \t]*download_host[ \t]*=/ { sub(/^[^=]*=[ \t]*/, ""); sub(/[ \t\r]+$/, ""); print; exit }
+  ' "$RCLONE_CONFIG" 2>/dev/null || true)
+fi
 
 # 打点器: 输出 mm:ss 相对运行开始的时间戳 (便于定位卡点)
 START_TS=$SECONDS
@@ -146,7 +166,7 @@ total_count=$("$PYTHON" - "$FILES_JSON" "$WORKDIR_DIAG/chunks.0" "$CHUNKS_PER_FI
 import sys, math, random, json
 fj, out, cpf, sl, lim, minsz, rpick, seed = sys.argv[1:]
 cpf, sl, minsz, lim, rpick = int(cpf), int(sl), int(minsz), int(lim), int(rpick)
-with open(fj) as f:
+with open(fj, encoding="utf-8") as f:
     data = json.load(f)
 files = [(o["Path"], int(o["Size"])) for o in data if int(o["Size"]) >= minsz]
 total = len(files)
@@ -164,7 +184,7 @@ elif lim >= 0:
     files = files[:lim]
 gseq = 0  # 全局唯一分片序号! 过去误用每文件片内索引 i(0..9),5 文件×10 片全冲突,
           # d_<seq>.src/.dst/.fail 互相覆盖 → compare 读错文件、SKIP 全挂。
-with open(out, "w") as o:
+with open(out, "w", encoding="utf-8", newline="\n") as o:
     for path, size in files:
         # 文件均分 cpf 段,每段取一个 1MiB 对齐偏移;文件过小(<cpf 倍片长)则退化整文件取首片
         n = max(1, min(cpf, size // sl if size >= sl else 1))
@@ -247,6 +267,161 @@ fetch_one() {
 export -f fetch_one src_fail_kind
 export RCLONE SRC DST WORKDIR WORKDIR_DIAG WORKDIR_CHUNKS VERBOSE
 
+# ---- 阶段 2 备选: 签直链 + aria2c (FETCH_MODE=aria2) ----
+# 动机: 每片起一个 rclone 进程要付三笔固定开销 —— 进程启动、NewFs 的会员等级探测、
+# 以及每片重做的"逐级列目录找 ID"(群盘一页 100/200 条,3071 条的目录一次解析要翻十几页)。
+# 改成每文件签一次直链(rc 端点 operations/publiclink), 每片只发一个带 Range 的 GET。
+# 群盘取链接口只收单个 contentID(2026-10-23 实测: 传数组回"数据格式有误"), 所以签名次数
+# 是一轮 50 次/侧的下限, 不会更少。
+rcd_start() {
+  "$RCLONE" rcd --rc-no-auth --rc-addr "$RCD_ADDR" --config "$RCLONE_CONFIG" \
+      --log-file "$WORKDIR_DIAG/rcd.log" --log-level NOTICE &
+  RCD_PID=$!
+  local i
+  for i in $(seq 1 100); do
+    if curl -sS -m 2 -o /dev/null "$RCD_ADDR/core/version" 2>/dev/null; then return 0; fi
+    if ! kill -0 "$RCD_PID" 2>/dev/null; then
+      echo "::error::rcd 进程已退出,签链不可用(见 rcd.log)" >&2
+      return 1
+    fi
+    sleep 0.2
+  done
+  echo "::error::rcd 20 秒内未就绪(见 rcd.log)" >&2
+  return 1
+}
+
+# 参数 "SIDE<TAB>path"; 输出 "path<TAB>side<TAB>url|-"
+sign_side() {
+  local spec="$1" side path url body remote resp i
+  side="${spec%%$'\t'*}"
+  path="${spec#*$'\t'}"
+  if [ "$side" = SRC ]; then remote="$SRC"; else remote="$DST"; fi
+  # 路径经 stdin 喂给 jq 做 JSON 转义, 不走 --arg: Windows 上 jq 的 argv 会被
+  # 按本地码页转码, 中文路径会变成乱码(2026-10-23 实测, 两端都签不出)。
+  # 组好的 body 也必须走文件: curl 的 -d 是 argv, 同样会转码, 同一轮里手工
+  # 用 --data-binary @文件 签同一个路径就能成功, 差别只有这一处。
+  body=$(printf '{"fs":%s,"remote":%s}' \
+    "$(printf '%s' "$remote" | jq -Rs .)" "$(printf '%s' "$path" | jq -Rs .)")
+  local bfile
+  bfile=$(mktemp "$WORKDIR_DIAG/req.XXXXXX")
+  printf '%s' "$body" > "$bfile"
+  for i in 1 2; do
+    resp=$(curl -sS -m 30 -H 'Content-Type: application/json' --data-binary @"$bfile" \
+           "$RCD_ADDR/operations/publiclink" 2>/dev/null || true)
+    url=$(printf '%s' "$resp" | jq -r '.url // empty' 2>/dev/null) || url=""
+    [ -n "$url" ] && break
+    sleep 1
+  done
+  rm -f "$bfile"
+  if [ -z "$url" ]; then
+    # 签不出来要留证据: 记下服务端的应答(URL 若出现则只留 host), 否则只有一句"少了条链"
+    printf '%s\t%s\t%s\n' "$side" "$path" \
+      "$(printf '%s' "$resp" | sed -E 's#(https?://)[^"]+#\1<redacted>#g' | tr '\n' ' ' | cut -c1-200)" \
+      >> "$WORKDIR_DIAG/sign.err"
+    printf '%s\t%s\t-\n' "$path" "$side"
+    return 0
+  fi
+  # 源端 s3 的 publiclink 签的是源站 host; 内容实际要从 CDN 取, 与 Open 路径同样的 host 改写
+  if [ "$side" = SRC ] && [ -n "$SRC_DOWNLOAD_HOST" ] && [ -n "$url" ]; then
+    url=$(printf '%s' "$url" | sed -E "s#^(https?://)[^/]+#\1${SRC_DOWNLOAD_HOST}#")
+  fi
+  printf '%s\t%s\t%s\n' "$path" "$side" "$url"
+}
+export -f sign_side
+export RCD_ADDR SRC_DOWNLOAD_HOST
+
+aria2_fetch() {
+  local urls="$WORKDIR_DIAG/urls.tsv" plan_sizes="$WORKDIR_DIAG/plan-sizes.tsv"
+  local ain="$WORKDIR_DIAG/aria2.in" path off len seq side suffix url want avail sz got f
+  : > "$urls"; : > "$WORKDIR_DIAG/sign.err"; : > "$ARIA2_LOG"
+  rcd_start || return 1
+  jq -r '.[] | [.Path, (.Size|tostring)] | @tsv' "$FILES_JSON" > "$plan_sizes" 2>/dev/null || : > "$plan_sizes"
+
+  tick "阶段2a 签直链 files=$probed_files sign_jobs=$SIGN_JOBS ..."
+  while IFS= read -r p; do printf 'SRC\t%s\nDST\t%s\n' "$p" "$p"; done \
+    < <(cut -f1 "$CHUNKS_FILE" | sort -u) \
+    | xargs -d '\n' -P "$SIGN_JOBS" -I{} bash -c 'sign_side "$1"' _ {} >> "$urls" 2>/dev/null || true
+  tick "阶段2a 完成 签出 $(awk -F'\t' '$3!="-"' "$urls" | wc -l)/$(( probed_files * 2 )) 条, 失败见 sign.err"
+
+  : > "$ain"
+  while IFS=$'\t' read -r path off len seq; do
+    for side in SRC DST; do
+      suffix=$(printf '%s' "$side" | tr 'A-Z' 'a-z')
+      url=$(awk -F'\t' -v p="$path" -v s="$side" '$1==p && $2==s {print $3; exit}' "$urls")
+      if [ -z "$url" ] || [ "$url" = "-" ]; then
+        # 签不出来就是这一端读不到(文件不在/服务端拒), 与 rclone 模式的 SRCFAIL/DSTFAIL 同义
+        if [ ! -e "$WORKDIR_DIAG/d_${seq}.fail" ]; then
+          if [ "$suffix" = dst ]; then echo "DSTFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"
+          else echo "SRCFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; fi
+        fi
+        continue
+      fi
+      { printf '%s\n' "$url"
+        printf '  out=d_%s.%s\n' "$seq" "$suffix"
+        printf '  header=Range: bytes=%s-%s\n' "$off" "$(( off + len - 1 ))"
+        printf '\n'
+      } >> "$ain"
+    done
+  done < "$CHUNKS_FILE"
+
+  local nreq; nreq=$(grep -c '^https' "$ain" 2>/dev/null || echo 0)
+  tick "阶段2b aria2 开始 请求=$nreq jobs=$JOBS deadline=${STAGE2_DEADLINE}s"
+  local rc=0
+  if [ "$nreq" -gt 0 ]; then
+    # aria2 会用 Content-Range 里的总长校验响应区间, 我们对整文件只要一段, 它必判
+    # "Invalid range header" 并以 errorCode=8 结束(2026-10-23 实测: 4/4 次, 每片内容
+    # 仍正确)。所以这里的成败判据是落盘字节与内容, 不是 aria2 的退出码。
+    timeout -k 10 "$STAGE2_DEADLINE" "$ARIA2" -i "$ain" -j "$JOBS" -x1 -s1 -k1M \
+      --dir "$WORKDIR_CHUNKS" --max-tries="$ARIA2_TRIES" --retry-wait=2 \
+      --timeout="$CHUNK_TIMEOUT" --connect-timeout="$CHUNK_CONNECT_TIMEOUT" \
+      --auto-file-renaming=false --allow-overwrite=true --file-allocation=none \
+      --console-log-level=warn --summary-interval=0 --download-result=hide \
+      --log="$ARIA2_LOG" --log-level=warn >"$WORKDIR_DIAG/aria2.out" 2>&1 || rc=$?
+  fi
+  kill "$RCD_PID" 2>/dev/null || true
+  tick "阶段2b 结束 rc=$rc (0=全部成功, 124=撞墙钟; 8=range 校验,按字节判成败)"
+
+  # 逐片核对落盘字节: 期望值是 min(len, 文件大小-off)。aria2 中途断流可能留下半截文件,
+  # 半截若不判失败就会被阶段3当成 MISMATCH, 再经 DEL_MISMATCH 删掉目标端的好文件。
+  local nbad=0
+  while IFS=$'\t' read -r path off len seq; do
+    for side in SRC DST; do
+      suffix=$(printf '%s' "$side" | tr 'A-Z' 'a-z')
+      f="$WORKDIR_CHUNKS/d_${seq}.${suffix}"
+      got=$(( $(du -b "$f" 2>/dev/null | cut -f1) + 0 ))
+      sz=$(awk -F'\t' -v p="$path" '$1==p {print $2; exit}' "$plan_sizes")
+      want="$len"
+      if [ -n "$sz" ]; then
+        avail=$(( sz - off ))
+        if [ "$avail" -lt "$want" ]; then want="$avail"; fi
+      fi
+      if [ "$got" -ne "$want" ]; then
+        rm -f "$f" "${f}.aria2"
+        nbad=$((nbad+1))
+        if [ ! -e "$WORKDIR_DIAG/d_${seq}.fail" ]; then
+          if [ "$suffix" = dst ]; then echo "DSTFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"
+          else echo "SRCFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; fi
+        fi
+      else
+        # aria2 因 range 总长校验失败会留下 .aria2 边车, 但这一段字节已经齐了;
+        # 边车清掉, 不据此判失败(真正的半截文件由上面的字节比对兜住)。
+        rm -f "${f}.aria2"
+        if [ "$got" -gt $(( len + 1048576 )) ]; then
+          echo "::warning::WARN ${side} 疑似整文件下载 seq=$seq want=$len got=$got $path" >&2
+        fi
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\n' "$seq" "$side" "$got" "$len" "$path" >> "$WORKDIR_DIAG/sizes.tsv"
+    done
+  done < "$CHUNKS_FILE"
+  tick "阶段2c 字节核对完成 不合格片=$nbad"
+  # aria2 的日志里带完整预签名 URL(含签名参数), 直接进 artifact 就是泄凭据;
+  # 只把查询串剥掉的版本放进 diag 供诊断。
+  if [ -f "$ARIA2_LOG" ]; then
+    sed -E 's#(https?://[^ /]+)[^ ]*#\1<query stripped>#g' "$ARIA2_LOG" > "$WORKDIR_DIAG/aria2.log" 2>/dev/null || true
+  fi
+}
+
+
 # 滑动窗口作业池: 不整批 wait,窗口满即等一个结束并补位,消灭"整批等最慢"的黑洞
 run_pool() {
   local f="$1" j="$2"
@@ -284,7 +459,16 @@ run_pool() {
   done=$total
   tick "阶段2 拉片全部结束(共 ${done})"
 }
-run_pool "$CHUNKS_FILE" "$JOBS"
+case "$FETCH_MODE" in
+  rclone) run_pool "$CHUNKS_FILE" "$JOBS" ;;
+  aria2)
+    if ! aria2_fetch; then
+      echo "::error::aria2 取数层不可用(见上方告警与 rcd.log/aria2.log)" >&2
+      exit 1
+    fi
+    ;;
+  *) echo "::error::未知 FETCH_MODE: $FETCH_MODE (只支持 rclone|aria2)" >&2; exit 2 ;;
+esac
 tick "阶段2完成 全部 ${total_chunks} 片已双端拉取"
 
 # 检查拉取失败的分片

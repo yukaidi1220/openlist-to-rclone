@@ -45,6 +45,14 @@ on:
         description: "每个文件固定抽多少片(默认 10,替代按体积切,控制总片数)"
         required: false
         default: "10"
+      fetch_mode:
+        description: "取数方式: rclone=每片一个 rclone cat; aria2=每文件签直链后并行拉(需 aria2 release)"
+        type: choice
+        required: false
+        default: "rclone"
+        options:
+          - rclone
+          - aria2
       no_refresh:
         description: "剥离 refresh_token,永不刷新(安全只读)"
         type: boolean
@@ -125,6 +133,16 @@ jobs:
           sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version | head -2
 
+      - name: 安装 aria2c(仅 fetch_mode=aria2)
+        if: ${{ inputs.fetch_mode == 'aria2' }}
+        run: |
+          URL="https://github.com/yukaidi1220/aria2/releases/latest/download/aria2c-x86_64-linux"
+          curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 5 \
+            -o /tmp/aria2c "$URL" || { echo "::error::无法下载 aria2 release"; exit 1; }
+          chmod +x /tmp/aria2c
+          sudo mv /tmp/aria2c /usr/local/bin/aria2c
+          aria2c --version | head -1
+
       - name: 运行分片抽检探针
         env:
           RCLONE: rclone
@@ -133,6 +151,7 @@ jobs:
           MIN_SIZE: ${{ inputs.min_size }}
           JOBS: ${{ inputs.jobs }}
           CHUNKS_PER_FILE: ${{ inputs.chunks_per_file }}
+          FETCH_MODE: ${{ inputs.fetch_mode }}
         run: |
           chmod +x bin/chunk-probe.sh
           # 探针脚本直接读 $RCLONE_CONFIG 环境,上游已 export;这里显式注入
@@ -142,7 +161,8 @@ jobs:
             LIMIT=1
             echo "::warning::limit=0 已归一为 1(只探测最大文件);评估结果后可放宽"
           fi
-          bin/chunk-probe.sh "$SRC" "$DST" --limit "$LIMIT"
+          # 选项必须放在两个路径之前:解析器遇到第一个非选项参数就停
+          bin/chunk-probe.sh --limit "$LIMIT" "$SRC" "$DST"
           rc=$?
           # 捕获脚本输出 WORKDIR_ARTIFACT 供 artifact 步骤
           echo "last_rc=$rc"

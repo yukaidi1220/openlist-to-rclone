@@ -305,12 +305,13 @@ jobs:
             echo "--- dash.cloudflare trace (v6) ---"
             warp_takeover 6 || { echo "::error::WARP v6 未接管,终止"; exit 1; }
           fi
-          # wopan 控制面:v6 出口可达(硬校验);v4 出口已知被屏蔽(软校验)
+          # wopan 控制面两支都是软校验:panservice.mail.wo.cn 只有 A 记录(实测 type=AAAA 无应答),
+          # curl -6 连名字都解不出来,拿它当硬闸等于每次必红。隧道本身的硬闸是上面的 warp_takeover。
           if [ "$V6_WANT" = "1" ]; then
-            echo ">>> [硬校验] wopan 控制面经 WARP v6(panservice.mail.wo.cn)"
+            echo ">>> [软校验] wopan 控制面经 WARP v6(panservice.mail.wo.cn 无 AAAA,预期解析失败)"
             code=$(curl -6 -sS --max-time 15 -o /dev/null -w "%{http_code}" https://panservice.mail.wo.cn) \
-              || { echo "::error::wopan 控制面经 WARP v6 不通,终止"; exit 1; }
-            echo "wopan v6 HTTP $code"
+              || echo "::warning::wopan 控制面经 WARP v6 不通(继续,隧道健康以接管判定为准)"
+            echo "wopan v6 HTTP ${code:-N/A}"
           fi
           if [ "$V4_WANT" = "1" ]; then
             echo ">>> [软校验] wopan 控制面经 WARP v4(已知可能被屏蔽,由 proof test 定论)"

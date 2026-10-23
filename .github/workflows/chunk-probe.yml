@@ -113,13 +113,19 @@ jobs:
           SRC_BUCKET=$(grep '^bucket' "$RCLONE_CONFIG" | tr -s ' ' | cut -d' ' -f3 | head -1)
           [ -n "$SRC_BUCKET" ] || { echo "::error::conf 缺少 src.bucket"; exit 1; }
           DST_BASE=$(cat /tmp/dstbase)
+          # 目标端 remote 前缀跟 conf 走: [yun139] 段就是 yun139, 其余按 wopan。
+          # 写死 wopan 会让 yun139 的探针对着联通盘找对象, 全部 DSTFAIL 还报 success。
+          DST_PREFIX="wopan"
+          if grep -qE '^\[yun139\]' "$RCLONE_CONFIG"; then
+            DST_PREFIX="yun139"
+          fi
           PARAM_PREFIX="$PATH_PREFIX"
           if [ -n "$PARAM_PREFIX" ]; then
             SRC="src:$SRC_BUCKET/$PARAM_PREFIX"
-            DST="wopan:$DST_BASE/$PARAM_PREFIX"
+            DST="$DST_PREFIX:$DST_BASE/$PARAM_PREFIX"
           else
             SRC="src:$SRC_BUCKET"
-            DST="wopan:$DST_BASE"
+            DST="$DST_PREFIX:$DST_BASE"
           fi
           echo "SRC=$SRC" >> "$GITHUB_ENV"
           echo "DST=$DST" >> "$GITHUB_ENV"

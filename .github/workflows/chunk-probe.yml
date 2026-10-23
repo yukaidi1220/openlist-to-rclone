@@ -146,28 +146,13 @@ jobs:
           curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 5 \
             -o /tmp/aria2c "$URL" || { echo "::error::无法下载 aria2 release"; exit 1; }
           chmod +x /tmp/aria2c
-          # 发布件 digest 钉死, 先排除下载损坏
+          # 发布件 digest 钉死, 先排除下载损坏(musl 静态件, 2026-10-23 版)
           echo "d4cdab4d79e63332db867243c833ef935a180c041bdde62be273d6b8c15d3b19  /tmp/aria2c" | sha256sum -c - \
             || { echo "::error::aria2c sha256 不符"; exit 1; }
-          # 这份 release 是 ASAN 构建(build.yml 全平台加 -fsanitize=address)。
-          # ubuntu-24.04 的内核默认 vm.mmap_rnd_bits=32, 会让 ASAN 进程起步即
-          # SIGSEGV(run 39958193652 实测 rc=139, 连日志都没写)。降到 28 是社区
-          # 通行解; 若哪天 release 改成非 ASAN 构建, 这行可以删。
-          sudo sysctl -w vm.mmap_rnd_bits=28 || echo "::warning::无法调整 mmap_rnd_bits, aria2 可能段错误"
-          # 诊断区: --version 是否能活、二进制形态、动态依赖、内核有无记段错误。
-          # 这些只打在日志里, 供 aria2 仓库那边定位; 2026-10-23 实测 28 仍崩。
-          file /tmp/aria2c || true
-          (ldd /tmp/aria2c 2>&1 || true) | head -5
-          uname -a; head -2 /etc/os-release
-          # bash -e 会掐死非零命令, 这两行必须自己接住退出码
-          rc=0; /tmp/aria2c --version || rc=$?; echo "aria2c --version rc=$rc"
-          (sudo dmesg 2>/dev/null | tail -400 | grep -iE "segfault|traps" | tail -3) || true
-          # strace 取最后一屏系统调用, 定位崩在哪个调用上
-          sudo apt-get install -y -qq strace >/dev/null 2>&1 || true
-          if command -v strace >/dev/null; then
-            src=0; strace -f -o /tmp/strace.log /tmp/aria2c --version >/dev/null 2>&1 || src=$?; echo "strace rc=$src"
-            tail -25 /tmp/strace.log
-          fi
+          # 上一版(glibc 全静态)在 ubuntu-24.04 起步即段错误: 静态 glibc 会 dlopen
+          # 宿主模块, 把宿主那份 OpenSSL legacy.so 拉进来跨版本 ABI 崩。musl 版不
+          # dlopen, 已实测 24.04 上 --version rc=0、探针 2/2 片全对, 不再需要
+          # mmap_rnd_bits 之类的绕过; 若换回 glibc 静态件要重新评估。
           sudo mv /tmp/aria2c /usr/local/bin/aria2c
           aria2c --version | head -1
 

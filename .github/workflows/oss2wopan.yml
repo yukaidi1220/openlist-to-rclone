@@ -48,10 +48,10 @@ on:
         required: false
         default: false
       warp_mode:
-        description: "WARP 出口模式(仅 copy/sync 生效)。bare=不装 WARP(生产默认);v6-only=仅 v6 进隧道;v4-only=仅 v4 进隧道;dual=双栈都进隧道"
+        description: "WARP 出口模式(仅 copy/sync 生效)。v6-only=仅 v6 进隧道(默认:与 RCLONE_CONNECT_FAMILY=prefer-v4 配对,原生 v4 优先出网,v4 不通才借 WARP 的 v6);bare=不装 WARP(旧默认);v4-only=仅 v4 进隧道;dual=双栈都进隧道"
         type: choice
         required: false
-        default: "bare"
+        default: "v6-only"
         options:
           - bare
           - v6-only
@@ -162,14 +162,18 @@ jobs:
           grep -c '^SRC=src' /tmp/paths.src
 
       # ---- WARP(四条线,由 warp_mode 输入切换;bare 不执行本步骤)----
-      #   线4 bare    : 不装 WARP,全部流量走 runner 原生网络(生产迁移默认)
+      #   线4 bare    : 不装 WARP,全部流量走 runner 原生网络(2026-10-23 之前的默认)
       #   线1 v6-only : 仅 v6 进隧道,v4 保持原生直连
       #   线3 v4-only : 仅 v4 进隧道,v6 不拉起
       #   线2 dual    : v4+v6 都进隧道
       # 实测备忘(2026-08-30):
       #   - WARP v4 出口(104.28.x)到 wopan 控制面与上传端点均不通(run 33326950520 抓包证实)
       #   - WARP v6 出口可达(上传走 v6 实锤),但速度不理想
-      #   → 生产迁移用 bare;其余三种模式仅作诊断用途
+      #   → 2026-10-23 起默认改成 v6-only,与 RCLONE_CONNECT_FAMILY=prefer-v4 配对:
+      #     v4 走原生直连(快),v4 不通才降级借 WARP 的 v6(可达但慢)——即 v6 只做兜底,
+      #     不再像 prefer-v6 那样当主路。代价与后果:本步骤现在默认会跑,其中
+      #     WARP 注册、endpoint 解析、"wopan 控制面经 WARP v6" 硬校验任一失败会直接终止整轮,
+      #     而这些在旧 bare 默认下根本不执行;要回到旧行为就在 dispatch/launcher 里显式选 bare。
       # 生死细节:v4 进隧道的模式(v4-only/dual)必须把 wireguard endpoint /32、
       #   Azure 平台服务 168.63.129.16、私有/微软/GitHub 网段钉回原网关,
       #   否则隧道封包进自己(路由循环)或 runner 失联。

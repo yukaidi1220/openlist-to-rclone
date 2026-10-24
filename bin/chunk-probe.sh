@@ -73,9 +73,12 @@ CHECKERS="${_CHECKERS:-${CHECKERS:-4}}"
 CHUNKS_PER_FILE="${_CHUNKS_PER_FILE:-${CHUNKS_PER_FILE:-10}}"
 DEL_MISMATCH="${_DEL_MISMATCH:-${DEL_MISMATCH:-}}"
 VERBOSE="${_VERBOSE:-${VERBOSE:-0}}"
-# 取数方式: rclone=每片一个 rclone cat(默认, 现有生产路径); aria2=每文件签一次直链再并行拉
+# 取数方式: rclone=每片一个 rclone cat(默认, 现有生产路径); aria2=每文件签一次直链再并行拉;
+# curl=同 aria2 的签链结果, 但每片恰好一条请求, 不会自作主张补取(成败仍只按落盘字节判)
 FETCH_MODE="${FETCH_MODE:-rclone}"
 ARIA2="${ARIA2:-aria2c}"
+CURL_BIN="${CURL:-curl}"
+CURL_MAX_TIME="${CURL_MAX_TIME:-60}"          # curl 单片总时长上限(秒), 不是空闲钟
 RCD_ADDR="${RCD_ADDR:-127.0.0.1:5579}"
 SIGN_JOBS="${SIGN_JOBS:-8}"
 ARIA2_TRIES="${ARIA2_TRIES:-2}"
@@ -267,7 +270,7 @@ fetch_one() {
 export -f fetch_one src_fail_kind
 export RCLONE SRC DST WORKDIR WORKDIR_DIAG WORKDIR_CHUNKS VERBOSE
 
-# ---- 阶段 2 备选: 签直链 + aria2c (FETCH_MODE=aria2) ----
+# ---- 阶段 2 备选: 签直链 + 并行取片 (FETCH_MODE=aria2 或 curl) ----
 # 动机: 每片起一个 rclone 进程要付三笔固定开销 —— 进程启动、NewFs 的会员等级探测、
 # 以及每片重做的"逐级列目录找 ID"(群盘一页 100/200 条,3071 条的目录一次解析要翻十几页)。
 # 改成每文件签一次直链(rc 端点 operations/publiclink), 每片只发一个带 Range 的 GET。
@@ -330,33 +333,79 @@ sign_side() {
 export -f sign_side
 export RCD_ADDR SRC_DOWNLOAD_HOST
 
-aria2_fetch() {
-  local urls="$WORKDIR_DIAG/urls.tsv" plan_sizes="$WORKDIR_DIAG/plan-sizes.tsv"
-  local ain="$WORKDIR_DIAG/aria2.in" path off len seq side suffix url want avail sz got f
-  : > "$urls"; : > "$WORKDIR_DIAG/sign.err"; : > "$ARIA2_LOG"
+# aria2 与 curl 两种取数方式共用这两段: 签直链(两侧各自计时)与落盘字节核对。
+# 字节核对是安全闸, 只允许有一份实现: 半截文件若不判失败, 阶段3 会把它当 MISMATCH,
+# 再经 DEL_MISMATCH 删掉目标端的好文件(2026-10-03 silver-de-04 就是这么丢的)。
+URLS_TSV=""
+PLAN_SIZES=""
+
+sign_all() {
+  URLS_TSV="$WORKDIR_DIAG/urls.tsv"
+  PLAN_SIZES="$WORKDIR_DIAG/plan-sizes.tsv"
+  : > "$URLS_TSV"; : > "$WORKDIR_DIAG/sign.err"; : > "$ARIA2_LOG"
   rcd_start || return 1
-  jq -r '.[] | [.Path, (.Size|tostring)] | @tsv' "$FILES_JSON" > "$plan_sizes" 2>/dev/null || : > "$plan_sizes"
+  jq -r '.[] | [.Path, (.Size|tostring)] | @tsv' "$FILES_JSON" > "$PLAN_SIZES" 2>/dev/null || : > "$PLAN_SIZES"
 
   tick "阶段2a 签直链 files=$probed_files sign_jobs=$SIGN_JOBS ..."
   # 两侧分开计时。源端签名本该是纯本地计算(不碰网络),目标端是每文件一次取链 API。
   # 混在一起就量不出"源端有没有偷偷发请求"。这是 2026-10-24 版本控制改动的判据。
-  local side_list="$WORKDIR_DIAG/sign-list"
+  local side_list="$WORKDIR_DIAG/sign-list" path
   cut -f1 "$CHUNKS_FILE" | sort -u | sed 's/^/SRC\t/' > "${side_list}.src"
   cut -f1 "$CHUNKS_FILE" | sort -u | sed 's/^/DST\t/' > "${side_list}.dst"
   local t0 t_src t_dst
   t0=$SECONDS
-  xargs -d '\n' -a "${side_list}.src" -P "$SIGN_JOBS" -I{} bash -c 'sign_side "$1"' _ {} >> "$urls" 2>/dev/null || true
+  xargs -d '\n' -a "${side_list}.src" -P "$SIGN_JOBS" -I{} bash -c 'sign_side "$1"' _ {} >> "$URLS_TSV" 2>/dev/null || true
   t_src=$(( SECONDS - t0 ))
   t0=$SECONDS
-  xargs -d '\n' -a "${side_list}.dst" -P "$SIGN_JOBS" -I{} bash -c 'sign_side "$1"' _ {} >> "$urls" 2>/dev/null || true
+  xargs -d '\n' -a "${side_list}.dst" -P "$SIGN_JOBS" -I{} bash -c 'sign_side "$1"' _ {} >> "$URLS_TSV" 2>/dev/null || true
   t_dst=$(( SECONDS - t0 ))
-  tick "阶段2a 完成 签出 $(awk -F'\t' '$3!="-"' "$urls" | wc -l)/$(( probed_files * 2 )) 条 src=${t_src}s dst=${t_dst}s 签失败 src=$(grep -c '^SRC' "$WORKDIR_DIAG/sign.err" 2>/dev/null || true) dst=$(grep -c '^DST' "$WORKDIR_DIAG/sign.err" 2>/dev/null || true)"
+  tick "阶段2a 完成 签出 $(awk -F'\t' '$3!="-"' "$URLS_TSV" | wc -l)/$(( probed_files * 2 )) 条 src=${t_src}s dst=${t_dst}s 签失败 src=$(grep -c '^SRC' "$WORKDIR_DIAG/sign.err" 2>/dev/null || true) dst=$(grep -c '^DST' "$WORKDIR_DIAG/sign.err" 2>/dev/null || true)"
+}
+
+# 期望字节数是 min(len, 文件大小-off), 不是 len: 尾片必须按剩余长度比。
+verify_bytes() {
+  local path off len seq side suffix f got sz want avail nbad=0
+  while IFS=$'\t' read -r path off len seq; do
+    for side in SRC DST; do
+      suffix=$(printf '%s' "$side" | tr 'A-Z' 'a-z')
+      f="$WORKDIR_CHUNKS/d_${seq}.${suffix}"
+      got=$(( $(du -b "$f" 2>/dev/null | cut -f1) + 0 ))
+      sz=$(awk -F'\t' -v p="$path" '$1==p {print $2; exit}' "$PLAN_SIZES")
+      want="$len"
+      if [ -n "$sz" ]; then
+        avail=$(( sz - off ))
+        if [ "$avail" -lt "$want" ]; then want="$avail"; fi
+      fi
+      if [ "$got" -ne "$want" ]; then
+        rm -f "$f" "${f}.aria2"
+        nbad=$((nbad+1))
+        if [ ! -e "$WORKDIR_DIAG/d_${seq}.fail" ]; then
+          if [ "$suffix" = dst ]; then echo "DSTFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"
+          else echo "SRCFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; fi
+        fi
+      else
+        # aria2 因 range 总长校验失败会留下 .aria2 边车, 但这一段字节已经齐了;
+        # 边车清掉, 不据此判失败(真正的半截文件由上面的字节比对兜住)。
+        rm -f "${f}.aria2"
+        if [ "$got" -gt $(( len + 1048576 )) ]; then
+          echo "::warning::WARN ${side} 疑似整文件下载 seq=$seq want=$len got=$got $path" >&2
+        fi
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\n' "$seq" "$side" "$got" "$len" "$path" >> "$WORKDIR_DIAG/sizes.tsv"
+    done
+  done < "$CHUNKS_FILE"
+  tick "阶段2c 字节核对完成 不合格片=$nbad"
+}
+
+aria2_fetch() {
+  local ain="$WORKDIR_DIAG/aria2.in" path off len seq side suffix url
+  sign_all || return 1
 
   : > "$ain"
   while IFS=$'\t' read -r path off len seq; do
     for side in SRC DST; do
       suffix=$(printf '%s' "$side" | tr 'A-Z' 'a-z')
-      url=$(awk -F'\t' -v p="$path" -v s="$side" '$1==p && $2==s {print $3; exit}' "$urls")
+      url=$(awk -F'\t' -v p="$path" -v s="$side" '$1==p && $2==s {print $3; exit}' "$URLS_TSV")
       if [ -z "$url" ] || [ "$url" = "-" ]; then
         # 签不出来就是这一端读不到(文件不在/服务端拒), 与 rclone 模式的 SRCFAIL/DSTFAIL 同义
         if [ ! -e "$WORKDIR_DIAG/d_${seq}.fail" ]; then
@@ -390,44 +439,81 @@ aria2_fetch() {
   kill "$RCD_PID" 2>/dev/null || true
   tick "阶段2b 结束 rc=$rc (0=全部成功, 124=撞墙钟; 8=range 校验,按字节判成败)"
 
-  # 逐片核对落盘字节: 期望值是 min(len, 文件大小-off)。aria2 中途断流可能留下半截文件,
-  # 半截若不判失败就会被阶段3当成 MISMATCH, 再经 DEL_MISMATCH 删掉目标端的好文件。
-  local nbad=0
-  while IFS=$'\t' read -r path off len seq; do
-    for side in SRC DST; do
-      suffix=$(printf '%s' "$side" | tr 'A-Z' 'a-z')
-      f="$WORKDIR_CHUNKS/d_${seq}.${suffix}"
-      got=$(( $(du -b "$f" 2>/dev/null | cut -f1) + 0 ))
-      sz=$(awk -F'\t' -v p="$path" '$1==p {print $2; exit}' "$plan_sizes")
-      want="$len"
-      if [ -n "$sz" ]; then
-        avail=$(( sz - off ))
-        if [ "$avail" -lt "$want" ]; then want="$avail"; fi
-      fi
-      if [ "$got" -ne "$want" ]; then
-        rm -f "$f" "${f}.aria2"
-        nbad=$((nbad+1))
-        if [ ! -e "$WORKDIR_DIAG/d_${seq}.fail" ]; then
-          if [ "$suffix" = dst ]; then echo "DSTFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"
-          else echo "SRCFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; fi
-        fi
-      else
-        # aria2 因 range 总长校验失败会留下 .aria2 边车, 但这一段字节已经齐了;
-        # 边车清掉, 不据此判失败(真正的半截文件由上面的字节比对兜住)。
-        rm -f "${f}.aria2"
-        if [ "$got" -gt $(( len + 1048576 )) ]; then
-          echo "::warning::WARN ${side} 疑似整文件下载 seq=$seq want=$len got=$got $path" >&2
-        fi
-      fi
-      printf '%s\t%s\t%s\t%s\t%s\n' "$seq" "$side" "$got" "$len" "$path" >> "$WORKDIR_DIAG/sizes.tsv"
-    done
-  done < "$CHUNKS_FILE"
-  tick "阶段2c 字节核对完成 不合格片=$nbad"
+  verify_bytes
   # aria2 的日志里带完整预签名 URL(含签名参数), 直接进 artifact 就是泄凭据;
   # 只把查询串剥掉的版本放进 diag 供诊断。
   if [ -f "$ARIA2_LOG" ]; then
     sed -E 's#(https?://[^ /]+)[^ ]*#\1<query stripped>#g' "$ARIA2_LOG" > "$WORKDIR_DIAG/aria2.log" 2>/dev/null || true
   fi
+}
+
+# curl 才是"取一片存成一个文件"的那个工具: 每片恰好一条请求, 也不会自作主张补取。
+# (2026-10-24 本机对照: aria2 每片 2 条请求且必回 errorCode=8; curl 1 条)
+# 但退出码不能当成败判据: 服务端回一个"合法的短 206"(Content-Length 比请求的窗口小)时
+# curl 照样退 0(本机实测 4/4 退 0 而其中 2 片是坏片)。判据仍然只有落盘字节。
+curl_one() {
+  local spec="$1" side seq start end url suffix f rc
+  side="${spec%%$'\t'*}"; spec="${spec#*$'\t'}"
+  seq="${spec%%$'\t'*}"; spec="${spec#*$'\t'}"
+  start="${spec%%$'\t'*}"; spec="${spec#*$'\t'}"
+  end="${spec%%$'\t'*}"; url="${spec#*$'\t'}"
+  suffix=$(printf '%s' "$side" | tr 'A-Z' 'a-z')
+  f="$WORKDIR_CHUNKS/d_${seq}.${suffix}"
+  rc=0
+  "$CURL_BIN" -sS -k -L --max-redirs 3 -o "$f" \
+    --connect-timeout "$CHUNK_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+    -r "${start}-${end}" "$url" 2>"$WORKDIR_DIAG/c_${seq}.${suffix}.err" || rc=$?
+  printf '%s\t%s\t%s\n' "$seq" "$side" "$rc" >> "$WORKDIR_DIAG/curl.rc.tsv"
+  return 0
+}
+export -f curl_one
+export CURL_BIN CURL_MAX_TIME CHUNK_CONNECT_TIMEOUT WORKDIR_DIAG WORKDIR_CHUNKS
+
+curl_fetch() {
+  local list="$WORKDIR_DIAG/curl-jobs.tsv" path off len seq side suffix url sz want avail n rc rcwall t0 f
+  sign_all || return 1
+
+  : > "$list"; : > "$WORKDIR_DIAG/curl.rc.tsv"
+  while IFS=$'\t' read -r path off len seq; do
+    sz=$(awk -F'\t' -v p="$path" '$1==p {print $2; exit}' "$PLAN_SIZES")
+    for side in SRC DST; do
+      suffix=$(printf '%s' "$side" | tr 'A-Z' 'a-z')
+      url=$(awk -F'\t' -v p="$path" -v s="$side" '$1==p && $2==s {print $3; exit}' "$URLS_TSV")
+      if [ -z "$url" ] || [ "$url" = "-" ]; then
+        if [ ! -e "$WORKDIR_DIAG/d_${seq}.fail" ]; then
+          if [ "$suffix" = dst ]; then echo "DSTFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"
+          else echo "SRCFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; fi
+        fi
+        continue
+      fi
+      # 请求区间就按剩余长度收口, 不去要一个越过 EOF 的窗口(那样服务端回 416)
+      want="$len"
+      if [ -n "$sz" ]; then
+        avail=$(( sz - off ))
+        if [ "$avail" -lt "$want" ]; then want="$avail"; fi
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\n' "$side" "$seq" "$off" "$(( off + want - 1 ))" "$url" >> "$list"
+    done
+  done < "$CHUNKS_FILE"
+
+  n=$(wc -l < "$list")
+  tick "阶段2b curl 开始 请求=$n jobs=$JOBS maxtime=${CURL_MAX_TIME}s deadline=${STAGE2_DEADLINE}s"
+  t0=$SECONDS
+  rc=0
+  timeout -k 10 "$STAGE2_DEADLINE" xargs -d '\n' -a "$list" -P "$JOBS" -I{} bash -c 'curl_one "$1"' _ {} \
+    >"$WORKDIR_DIAG/curl.out" 2>&1 || rc=$?
+  rcwall=$(( SECONDS - t0 ))
+  kill "$RCD_PID" 2>/dev/null || true
+  # 退出码分布只当诊断信息汇总一行: 短 206 时 curl 退 0, 所以它不能当成败判据
+  tick "阶段2b 结束 rc=$rc (0=全部成功, 124=撞墙钟) 用时=${rcwall}s 退出码分布=$(cut -f3 "$WORKDIR_DIAG/curl.rc.tsv" 2>/dev/null | sort | uniq -c | tr '\n' ' ')"
+
+  verify_bytes
+  # 每片的 stderr 里可能出现带签名的 URL, 合成一份并剥掉查询串后删原件
+  for f in "$WORKDIR_DIAG"/c_*.err; do
+    [ -e "$f" ] || continue
+    sed -E 's#(https?://[^ /]+)[^ ]*#\1<query stripped>#g' "$f" >> "$WORKDIR_DIAG/curl.err"
+    rm -f "$f"
+  done
 }
 
 
@@ -471,12 +557,20 @@ run_pool() {
 case "$FETCH_MODE" in
   rclone) run_pool "$CHUNKS_FILE" "$JOBS" ;;
   aria2)
+    command -v "$ARIA2" >/dev/null 2>&1 || { echo "::error::FETCH_MODE=aria2 但找不到 $ARIA2 这个可执行件" >&2; exit 1; }
     if ! aria2_fetch; then
       echo "::error::aria2 取数层不可用(见上方告警与 rcd.log/aria2.log)" >&2
       exit 1
     fi
     ;;
-  *) echo "::error::未知 FETCH_MODE: $FETCH_MODE (只支持 rclone|aria2)" >&2; exit 2 ;;
+  curl)
+    command -v "$CURL_BIN" >/dev/null 2>&1 || { echo "::error::FETCH_MODE=curl 但找不到 $CURL_BIN" >&2; exit 1; }
+    if ! curl_fetch; then
+      echo "::error::curl 取数层不可用(见上方告警与 rcd.log/curl.err)" >&2
+      exit 1
+    fi
+    ;;
+  *) echo "::error::未知 FETCH_MODE: $FETCH_MODE (只支持 rclone|aria2|curl)" >&2; exit 2 ;;
 esac
 tick "阶段2完成 全部 ${total_chunks} 片已双端拉取"
 

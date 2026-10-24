@@ -27,9 +27,11 @@ function body(l,   t) { t = l; sub(/^.* ERROR : /, "", t); return t }
 BEGIN {
   ndir = 0; nfile = 0
   while ((getline l < CL) > 0) {
-    if (l ~ /Failed to copy: failed to make directory: .*RSP_CODE=(4444|1009)([^0-9]|$)/) {
+    # MT 路径会带 "multi-thread copy: failed to open chunk writer: " 前缀,所以不能要求
+    # "Failed to copy: failed to make directory" 紧邻,用 .* 吃掉中间那段。
+    if (l ~ /Failed to copy: .*failed to make directory: .*RSP_CODE=(4444|1009)([^0-9]|$)/) {
       s = body(l)
-      sub(/: Failed to copy: failed to make directory:.*$/, "", s)
+      sub(/: Failed to copy:.*failed to make directory:.*$/, "", s)
       d = s
       if (sub(/\/[^\/]*$/, "/", d)) {
         if (!(d in dirs)) { ndir++; dirs[d] = 1 }

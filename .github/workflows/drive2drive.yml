@@ -71,6 +71,11 @@ on:
           - bare
           - v4-only
           - dual
+      dump_trace:
+        description: "本轮给 rclone 加 --dump trace:打印每次请求的 DNS/拨号/TLS 与 GotConn 的本地->远端地址(reused 也打)。不打请求头故不会漏 token,但每请求约 8 行,只在复现那一轮勾"
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: drive2drive-${{ inputs.direction }}-${{ inputs.src_bucket }}-${{ inputs.path }}
@@ -311,6 +316,15 @@ jobs:
           chmod +x /tmp/rclone
           sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version | head -2
+          # --dump trace 只打连接级事件(DNS、拨号、TLS、GotConn 的本地->远端地址、是否复用),
+          # 不打请求头,所以不会把 Access-Token 写进日志。代价是每请求约 8 行,默认关。
+          # timeout awaiting response headers 这类超时文本本身不带地址,只有 trace 能看出打的是哪个 IP。
+          if [ "${{ inputs.dump_trace }}" = "true" ]; then
+            echo "RCLONE_DUMP=trace" >> "$GITHUB_ENV"
+            echo ">>> 本轮连接级 trace 已开:在 copy.log 里搜 \"Got connection\" 即见 local -> remote 与 reused"
+          else
+            echo ">>> 本轮连接级 trace 未开(dump_trace=false)"
+          fi
 
       # ---- 预检 ----
 

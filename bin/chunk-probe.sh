@@ -338,10 +338,19 @@ aria2_fetch() {
   jq -r '.[] | [.Path, (.Size|tostring)] | @tsv' "$FILES_JSON" > "$plan_sizes" 2>/dev/null || : > "$plan_sizes"
 
   tick "阶段2a 签直链 files=$probed_files sign_jobs=$SIGN_JOBS ..."
-  while IFS= read -r p; do printf 'SRC\t%s\nDST\t%s\n' "$p" "$p"; done \
-    < <(cut -f1 "$CHUNKS_FILE" | sort -u) \
-    | xargs -d '\n' -P "$SIGN_JOBS" -I{} bash -c 'sign_side "$1"' _ {} >> "$urls" 2>/dev/null || true
-  tick "阶段2a 完成 签出 $(awk -F'\t' '$3!="-"' "$urls" | wc -l)/$(( probed_files * 2 )) 条, 失败见 sign.err"
+  # 两侧分开计时。源端签名本该是纯本地计算(不碰网络),目标端是每文件一次取链 API。
+  # 混在一起就量不出"源端有没有偷偷发请求"。这是 2026-10-24 版本控制改动的判据。
+  local side_list="$WORKDIR_DIAG/sign-list"
+  cut -f1 "$CHUNKS_FILE" | sort -u | sed 's/^/SRC\t/' > "${side_list}.src"
+  cut -f1 "$CHUNKS_FILE" | sort -u | sed 's/^/DST\t/' > "${side_list}.dst"
+  local t0 t_src t_dst
+  t0=$SECONDS
+  xargs -d '\n' -a "${side_list}.src" -P "$SIGN_JOBS" -I{} bash -c 'sign_side "$1"' _ {} >> "$urls" 2>/dev/null || true
+  t_src=$(( SECONDS - t0 ))
+  t0=$SECONDS
+  xargs -d '\n' -a "${side_list}.dst" -P "$SIGN_JOBS" -I{} bash -c 'sign_side "$1"' _ {} >> "$urls" 2>/dev/null || true
+  t_dst=$(( SECONDS - t0 ))
+  tick "阶段2a 完成 签出 $(awk -F'\t' '$3!="-"' "$urls" | wc -l)/$(( probed_files * 2 )) 条 src=${t_src}s dst=${t_dst}s 签失败 src=$(grep -c '^SRC' "$WORKDIR_DIAG/sign.err" 2>/dev/null || true) dst=$(grep -c '^DST' "$WORKDIR_DIAG/sign.err" 2>/dev/null || true)"
 
   : > "$ain"
   while IFS=$'\t' read -r path off len seq; do

@@ -58,6 +58,10 @@ on:
         type: boolean
         required: false
         default: true
+      rclone_tag:
+        description: "钉死 rclone 的 release tag(如 v1.76.0-cdn.15);留空=装 latest。做改前/改后同名对照才填"
+        required: false
+        default: ""
 
 concurrency:
   # 探针只读,可与迁移并行,按 src_bucket 分组防同桶重复跑
@@ -131,13 +135,24 @@ jobs:
           echo "DST=$DST" >> "$GITHUB_ENV"
 
       - name: "Install rclone (custom build: s3 download_host + wopan)"
+        env:
+          RCLONE_TAG: ${{ inputs.rclone_tag }}
         run: |
-          URL="https://github.com/yukaidi1220/rclone/releases/latest/download/rclone-cdn-linux-amd64"
+          if [ -n "$RCLONE_TAG" ]; then
+            URL="https://github.com/yukaidi1220/rclone/releases/download/$RCLONE_TAG/rclone-cdn-linux-amd64"
+          else
+            URL="https://github.com/yukaidi1220/rclone/releases/latest/download/rclone-cdn-linux-amd64"
+          fi
           curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 5 \
             -o /tmp/rclone "$URL" || { echo "::error::无法下载 rclone release"; exit 1; }
           chmod +x /tmp/rclone
           sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version | head -2
+          # 钉了 tag 就必须真拿到那颗件,否则"改前/改后对照"量的不是同一件事
+          if [ -n "$RCLONE_TAG" ]; then
+            rclone version | head -1 | grep -q "$RCLONE_TAG" || {
+              echo "::error::要求 $RCLONE_TAG,实际装成 $(rclone version | head -1)"; exit 1; }
+          fi
 
       - name: 安装 aria2c(仅 fetch_mode=aria2)
         if: ${{ inputs.fetch_mode == 'aria2' }}

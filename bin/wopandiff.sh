@@ -8,6 +8,11 @@
 #      按**目录**吸收（去掉最后一段、补尾斜杠），尾斜杠前缀匹配，`a/b c/` 不会吸收 `a/b c2/x`。
 #   2) 空文件：`... ERROR : <file>: Failed to copy: can't upload empty files to this remote`
 #      按**精确路径**吸收（用目录前缀会误伤同目录的真文件）。
+#   3) 名字本身不可存（后端在上传前就判死，属确定性不可传）：
+#      `file name too long (wopan limit is 100 runes, ...)`、
+#      `file name contains an emoji character ...`、
+#      `file name contains a non-BMP character ...`
+#      按**精确路径**吸收。第 3 类在 MT 路径上会带 `failed to open chunk writer: ` 前缀，两种都要认。
 # 有意不吸收：9999（系统异常）、130007（名字被占用，瞬时冲突）、2001（空间满）。
 # 只把 check.log 的 `... ERROR : <path>: file not in wopan root '...'` 当缺失；别的错误行只报数。
 #
@@ -31,6 +36,14 @@ BEGIN {
       } else {
         if (!(s in files)) { nfile++; files[s] = 1 }
       }
+      continue
+    }
+    if (l ~ /Failed to copy: .*file name too long \(wopan limit is 100 runes/ ||
+        l ~ /Failed to copy: .*file name contains an emoji character/ ||
+        l ~ /Failed to copy: .*file name contains a non-BMP character/) {
+      s = body(l)
+      sub(/: Failed to copy:.*$/, "", s)
+      if (!(s in files)) { nfile++; files[s] = 1 }
       continue
     }
     if (l ~ /Failed to copy: can.t upload empty files to this remote/) {

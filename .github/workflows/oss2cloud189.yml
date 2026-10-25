@@ -56,10 +56,10 @@ on:
         required: false
         default: ""
       warp_mode:
-        description: "WARP 出口模式(仅 copy/sync 生效)。cloud189 目标在境内,默认 bare 不走隧道;v6-only/v4-only/dual=诊断用,与 yun139 同一实现"
+        description: "WARP 出口模式(仅 copy/sync 生效)。默认 v6-only(与 yun139 一致);bare=不装 WARP;v4-only/dual=诊断用"
         type: choice
         required: false
-        default: "bare"
+        default: "v6-only"
         options:
           - bare
           - v6-only
@@ -91,16 +91,17 @@ jobs:
     env:
       TZ: Asia/Shanghai
       RCLONE_CONFIG: /tmp/oss2cloud189.conf
+      RCLONE_CONNECT_FAMILY: prefer-v6   # 双栈时优先 v6，某族停滞时降另一族
       # 分片大小不是本端的自由参数:服务端按文件大小规定唯一一个 sliceSize,
       # chunkPlan 只是复述那条规则(chunk_size 是它的锚,默认 10Mi),所以这里不覆盖。
       # 能调的是"同时传几个文件"和"单文件内部同时传几片":
       #   stage1(≤1G 小文件)以文件数取胜;stage2(全量)单文件并发取大。
-      # 注意本后端上传前要把整个文件落到临时盘(/tmp)算摘要,并发传输数同时就是
-      # 临时盘占用的倍数,所以 stage2 的 transfers 保持小,别照搬 yun139 的分片流式模型。
-      CLOUD189_UPLOAD_CONCURRENCY: '8'         # 阶段二(全量)单文件分片并发
+      # 两个后端都是上传前把整个文件落到临时盘算摘要,所以这里直接对齐 yun139 的
+      # 并发档位(阶段的 --transfers/--checkers 也一样),不再另设一套。
+      CLOUD189_UPLOAD_CONCURRENCY: '16'        # 阶段二(全量)单文件分片并发
       CLOUD189_UPLOAD_CONCURRENCY_STAGE1: '4'  # 阶段一(≤1G)单文件分片并发
       CLOUD189_MT_CUTOFF: 256Mi                # ≥此大小走 源端 Range 并行下载 + 云端分片上传
-      CLOUD189_MT_STREAMS: '8'                 # 源端并行 Range 数(stage2)
+      CLOUD189_MT_STREAMS: '32'                # 源端并行 Range 数(stage2)
     steps:
       - name: 检出仓库(含 bin/skipdiff.sh、bin/resmon.sh、bin/chunk-probe.sh)
         uses: actions/checkout@v6
@@ -412,7 +413,7 @@ jobs:
           set +e
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --max-size 1G --transfers 6 --checkers 8 \
+            --max-size 1G --transfers 15 --checkers 8 \
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY_STAGE1" \
             --multi-thread-cutoff "$CLOUD189_MT_CUTOFF" \
             --retries 3 --low-level-retries 3 \
@@ -422,19 +423,21 @@ jobs:
           # 已知永久拒收会在 copy.log 留 SKIP 行；有 SKIP 行时把判定交给后面的 one-way check，
           # 否则 rclone 非 0 就是真实传输失败，直接让 run 红。
           if [ "$rc" -ne 0 ]; then
-            # 两类"明确不传"可以交给 verify 判定:SKIP 行(yun139 的记法,本后端若改用
-            # 它就生效)与空文件拒收(本后端当前的行为:它是一条 ERROR,文案里带
-            # "empty files")。其余一律是真实传输失败。
-            if grep -aq 'SKIP ' copy.log; then
-              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
-            elif [ -n "$(grep -a 'ERROR : ' copy.log | head -1)" ] \
-                 && [ -z "$(grep -a 'ERROR : ' copy.log | grep -av 'empty files' | head -1)" ]; then
-              echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
-            else
+            # 可吸收的只有一种:失败的每个文件都是空文件。判据取自 2026-10-26 的实测日志:
+            #   ERROR : empty.txt: Failed to copy: can't upload empty files to this remote
+            #   ERROR : Can't retry any of the errors - not attempting retries   <- 收尾行
+            # 收尾行不含 "empty files",按"存在非空文件错误"去判会把一轮正常的空文件
+            # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
+            # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
+            EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20)
+            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20)
+            if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
               echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
-              grep -a 'ERROR : ' copy.log | grep -av 'empty files' | head -20
+              printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20
               exit "$rc"
             fi
+            echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
           fi
 
       - name: Copy - 阶段二 全量(不限制大小,size-only 跳过已传)
@@ -462,19 +465,21 @@ jobs:
           kill "$SAMPLER_PID" 2>/dev/null || true
           set -e
           if [ "$rc" -ne 0 ]; then
-            # 两类"明确不传"可以交给 verify 判定:SKIP 行(yun139 的记法,本后端若改用
-            # 它就生效)与空文件拒收(本后端当前的行为:它是一条 ERROR,文案里带
-            # "empty files")。其余一律是真实传输失败。
-            if grep -aq 'SKIP ' copy.log; then
-              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
-            elif [ -n "$(grep -a 'ERROR : ' copy.log | head -1)" ] \
-                 && [ -z "$(grep -a 'ERROR : ' copy.log | grep -av 'empty files' | head -1)" ]; then
-              echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
-            else
+            # 可吸收的只有一种:失败的每个文件都是空文件。判据取自 2026-10-26 的实测日志:
+            #   ERROR : empty.txt: Failed to copy: can't upload empty files to this remote
+            #   ERROR : Can't retry any of the errors - not attempting retries   <- 收尾行
+            # 收尾行不含 "empty files",按"存在非空文件错误"去判会把一轮正常的空文件
+            # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
+            # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
+            EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20)
+            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20)
+            if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
               echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
-              grep -a 'ERROR : ' copy.log | grep -av 'empty files' | head -20
+              printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20
               exit "$rc"
             fi
+            echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
           fi
 
       - name: Sync - 阶段一 小文件(≤1G)高并发
@@ -485,7 +490,7 @@ jobs:
           set +e
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --max-size 1G --transfers 6 --checkers 8 \
+            --max-size 1G --transfers 15 --checkers 8 \
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY_STAGE1" \
             --multi-thread-cutoff "$CLOUD189_MT_CUTOFF" \
             --retries 3 --low-level-retries 3 \
@@ -493,19 +498,21 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           if [ "$rc" -ne 0 ]; then
-            # 两类"明确不传"可以交给 verify 判定:SKIP 行(yun139 的记法,本后端若改用
-            # 它就生效)与空文件拒收(本后端当前的行为:它是一条 ERROR,文案里带
-            # "empty files")。其余一律是真实传输失败。
-            if grep -aq 'SKIP ' copy.log; then
-              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
-            elif [ -n "$(grep -a 'ERROR : ' copy.log | head -1)" ] \
-                 && [ -z "$(grep -a 'ERROR : ' copy.log | grep -av 'empty files' | head -1)" ]; then
-              echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
-            else
+            # 可吸收的只有一种:失败的每个文件都是空文件。判据取自 2026-10-26 的实测日志:
+            #   ERROR : empty.txt: Failed to copy: can't upload empty files to this remote
+            #   ERROR : Can't retry any of the errors - not attempting retries   <- 收尾行
+            # 收尾行不含 "empty files",按"存在非空文件错误"去判会把一轮正常的空文件
+            # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
+            # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
+            EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20)
+            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20)
+            if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
               echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
-              grep -a 'ERROR : ' copy.log | grep -av 'empty files' | head -20
+              printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20
               exit "$rc"
             fi
+            echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
           fi
 
       - name: Sync - 阶段二 全量(不限制大小,size-only 跳过已传)
@@ -531,19 +538,21 @@ jobs:
           kill "$SAMPLER_PID" 2>/dev/null || true
           set -e
           if [ "$rc" -ne 0 ]; then
-            # 两类"明确不传"可以交给 verify 判定:SKIP 行(yun139 的记法,本后端若改用
-            # 它就生效)与空文件拒收(本后端当前的行为:它是一条 ERROR,文案里带
-            # "empty files")。其余一律是真实传输失败。
-            if grep -aq 'SKIP ' copy.log; then
-              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
-            elif [ -n "$(grep -a 'ERROR : ' copy.log | head -1)" ] \
-                 && [ -z "$(grep -a 'ERROR : ' copy.log | grep -av 'empty files' | head -1)" ]; then
-              echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
-            else
+            # 可吸收的只有一种:失败的每个文件都是空文件。判据取自 2026-10-26 的实测日志:
+            #   ERROR : empty.txt: Failed to copy: can't upload empty files to this remote
+            #   ERROR : Can't retry any of the errors - not attempting retries   <- 收尾行
+            # 收尾行不含 "empty files",按"存在非空文件错误"去判会把一轮正常的空文件
+            # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
+            # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
+            EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20)
+            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20)
+            if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
               echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
-              grep -a 'ERROR : ' copy.log | grep -av 'empty files' | head -20
+              printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20
               exit "$rc"
             fi
+            echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
           fi
 
       # ---- 校验 ----

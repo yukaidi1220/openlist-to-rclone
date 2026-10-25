@@ -194,6 +194,12 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           set +e
+          # 后台采样(bin/resmon.sh):5s 一次输出 rclone_RSS/系统内存/tmp 磁盘/CPU/磁盘/网络吞吐;
+          # RESMON 行走 stderr 进 GH 日志(runner 级被杀时 artifact 拿不到,靠日志留存)。
+          : > /tmp/resmon.log
+          chmod +x bin/resmon.sh
+          ./bin/resmon.sh &
+          SAMPLER_PID=$!
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 8 --checkers 8 \
@@ -201,6 +207,7 @@ jobs:
             --cloud189-fatal-if-no-space \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
+          kill "$SAMPLER_PID" 2>/dev/null || true
           set -e
           if [ "$rc" -ne 0 ]; then
             # 空文件是后端的硬拒收,不是传输故障:这类错误交给 verify 的预期跳过名单吸收。
@@ -221,6 +228,10 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           set +e
+          : > /tmp/resmon.log
+          chmod +x bin/resmon.sh
+          ./bin/resmon.sh &
+          SAMPLER_PID=$!
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 8 --checkers 8 \
@@ -228,6 +239,7 @@ jobs:
             --cloud189-fatal-if-no-space \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
+          kill "$SAMPLER_PID" 2>/dev/null || true
           set -e
           if [ "$rc" -ne 0 ]; then
             OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'empty files' | head -20)
@@ -282,6 +294,7 @@ jobs:
           path: |
             copy.log
             check.log
+            /tmp/resmon.log
             /tmp/skipdiff.out
             /tmp/expected-skip.txt
           if-no-files-found: ignore

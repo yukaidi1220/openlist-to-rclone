@@ -362,12 +362,13 @@ jobs:
           # --no-mimetype --no-modtime(注意拼写无连字符):ListV2 元数据够用,避免每对象 2 次经 CDN 的 Head
           probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi \
                     --no-mimetype --no-modtime \
-                    | jq -r 'sort_by(.Size) | .[0].Path // empty')
+                    | jq -r '[ .[] | select(.Size != null) ] | sort_by(.Size) | .[0].Path // empty')
           if [ -z "$probe" ]; then
             echo "::warning::范围内没有小文件,跳过 CDN 探测"
             exit 0
           fi
-          expect=$(rclone lsjson "$SRC/$probe" --no-mimetype --no-modtime | jq -r '.[0].Size')
+          expect=$(rclone lsjson "$SRC/$probe" --no-check-certificate --no-mimetype --no-modtime | jq -r '.[0].Size')
+          case "$expect" in ''|*[!0-9]*) echo "::warning::源端列表没给这个对象的字节数(Size=$expect),跳过 CDN 探测(内容由 copy/verify 校验)"; exit 0;; esac
           echo "probing: $probe ($expect bytes)"
           # copy 落盘再 stat,而非 cat|wc -c:cat 断流无重试且截断输出会被当作
           # 真实字节数;copy 自带重试,落盘后核对待测对象真实大小。

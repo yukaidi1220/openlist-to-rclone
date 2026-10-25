@@ -3,9 +3,10 @@
 # 与 oss2wopan.yml / oss2yun139.yml 同架构,目标端换成 cloud189 个人云:
 #   - 源端:列表/元数据走签名 API,内容经 CDN 预签名下载(download_host)
 #   - 目标端:cloud189(天翼云盘)直传;落盘 <dst_base>/<原 key>(launcher 默认 s3-bak/<源桶名>)
-#   - 令牌:conf 里的 access_token(32 字符)。后端用它换 sessionKey;刷新换掉的是
-#     sessionKey,旧 sessionKey 在自身过期前仍可用,所以并发 run 不会互踢:公开仓
-#     【不需要】no_refresh,也没有续期步骤(access_token 自身失效只能重新登录换)。
+#   - 令牌:conf 里的 access_token(32 字符)。后端用它换 sessionKey,刷新换的是 sessionKey。
+#     实测(2026-10-22):连做两次刷新后,第一次拿到的 key 仍应答,两台并发 session 并存,
+#     所以并发 run 不会互踢,这条链路不需要 no_refresh。旧 key 能活多久、最多能并存几个
+#     都没测;access_token 自身失效只能重新登录换。
 #
 # cloud189 的既有取舍(详见 rclone docs/content/cloud189.md):
 #   - mtime 不可改 → 必须 --size-only,否则每轮全量重传
@@ -197,7 +198,7 @@ jobs:
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 8 --checkers 8 \
             --retries 3 --low-level-retries 3 \
-            --cloud189-fatal_if_no_space \
+            --cloud189-fatal-if-no-space \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -224,7 +225,7 @@ jobs:
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 8 --checkers 8 \
             --retries 3 --low-level-retries 3 \
-            --cloud189-fatal_if_no_space \
+            --cloud189-fatal-if-no-space \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
           set -e

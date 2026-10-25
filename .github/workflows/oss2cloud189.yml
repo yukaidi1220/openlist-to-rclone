@@ -357,12 +357,13 @@ jobs:
             echo "::warning::SRC 为单文件,跳过 CDN presigned probe(内容由 copy/verify 校验)"
             exit 0
           fi
-          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi                     --no-mimetype --no-modtime                     | jq -r 'sort_by(.Size) | .[0].Path // empty')
+          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi                     --no-mimetype --no-modtime                     | jq -r '[ .[] | select(.Size != null) ] | sort_by(.Size) | .[0].Path // empty')
           if [ -z "$probe" ]; then
             echo "::warning::范围内没有小文件,跳过 CDN 探测"
             exit 0
           fi
-          expect=$(rclone lsjson "$SRC/$probe" --no-mimetype --no-modtime | jq -r '.[0].Size')
+          expect=$(rclone lsjson "$SRC/$probe" --no-check-certificate --no-mimetype --no-modtime | jq -r '.[0].Size')
+          case "$expect" in ''|*[!0-9]*) echo "::warning::源端列表没给这个对象的字节数(Size=$expect),跳过 CDN 探测(内容由 copy/verify 校验)"; exit 0;; esac
           echo "probing: $probe ($expect bytes)"
           rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
           got=$(rclone copy "$SRC/$probe" /tmp/vprobe --no-check-certificate             --transfers 1 --checkers 2 --retries 3 --low-level-retries 3             --multi-thread-cutoff 64Mi --multi-thread-streams 8             --stats 0 -q 2>/tmp/cat.err || true;             probe_file=$(find /tmp/vprobe -type f | head -1);             [ -n "$probe_file" ] && stat -c%s "$probe_file" || echo -1)

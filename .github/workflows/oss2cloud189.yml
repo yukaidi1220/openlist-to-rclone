@@ -203,7 +203,9 @@ jobs:
           set -e
           if [ "$rc" -ne 0 ]; then
             # 空文件是后端的硬拒收,不是传输故障:这类错误交给 verify 的预期跳过名单吸收。
-            OTHER=$(grep -a '^ERROR : ' copy.log | grep -av 'empty files' | head -20)
+            # 注意不能锚 ^ERROR : ——rclone 的日志行带时间戳前缀,锚住行首会静默命中 0 行,
+            # 这一整段 rc 传播就变成永真(2026-10-25 在本机复现)。
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'empty files' | head -20)
             if [ -n "$OTHER" ]; then
               echo "::error::rclone exit=$rc,且有不是空文件的错误:"
               echo "$OTHER"
@@ -226,7 +228,7 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           if [ "$rc" -ne 0 ]; then
-            OTHER=$(grep -a '^ERROR : ' copy.log | grep -av 'empty files' | head -20)
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'empty files' | head -20)
             if [ -n "$OTHER" ]; then
               echo "::error::rclone exit=$rc,且有不是空文件的错误:"
               echo "$OTHER"

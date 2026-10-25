@@ -411,6 +411,11 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           set +e
+          # 阶段一也采样:小文件阶段是"文件数取胜",RSS 与 /tmp 占用跟阶段二不是一回事。
+          : > /tmp/resmon.log
+          chmod +x bin/resmon.sh
+          ./bin/resmon.sh &
+          SAMPLER_PID=$!
           rclone copy "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --max-size 1G --transfers 15 --checkers 8 \
@@ -419,6 +424,7 @@ jobs:
             --retries 3 --low-level-retries 3 \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
+          kill "$SAMPLER_PID" 2>/dev/null || true
           set -e
           # 已知永久拒收会在 copy.log 留 SKIP 行；有 SKIP 行时把判定交给后面的 one-way check，
           # 否则 rclone 非 0 就是真实传输失败，直接让 run 红。
@@ -488,6 +494,11 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           set +e
+          # 阶段一也采样:小文件阶段是"文件数取胜",RSS 与 /tmp 占用跟阶段二不是一回事。
+          : > /tmp/resmon.log
+          chmod +x bin/resmon.sh
+          ./bin/resmon.sh &
+          SAMPLER_PID=$!
           rclone sync "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --max-size 1G --transfers 15 --checkers 8 \
@@ -496,6 +507,7 @@ jobs:
             --retries 3 --low-level-retries 3 \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
+          kill "$SAMPLER_PID" 2>/dev/null || true
           set -e
           if [ "$rc" -ne 0 ]; then
             # 可吸收的只有一种:失败的每个文件都是空文件。判据取自 2026-10-26 的实测日志:

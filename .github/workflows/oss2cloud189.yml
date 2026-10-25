@@ -436,8 +436,10 @@ jobs:
             # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
             # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
             EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
-            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20)
-            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20)
+            # || true: a grep that finds nothing exits 1, and under pipefail plus
+            # bash -e that would end the step before anything is printed.
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
+            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20 || true)
             if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
               echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20
@@ -478,8 +480,10 @@ jobs:
             # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
             # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
             EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
-            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20)
-            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20)
+            # || true: a grep that finds nothing exits 1, and under pipefail plus
+            # bash -e that would end the step before anything is printed.
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
+            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20 || true)
             if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
               echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20
@@ -517,8 +521,10 @@ jobs:
             # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
             # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
             EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
-            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20)
-            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20)
+            # || true: a grep that finds nothing exits 1, and under pipefail plus
+            # bash -e that would end the step before anything is printed.
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
+            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20 || true)
             if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
               echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20
@@ -557,8 +563,10 @@ jobs:
             # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
             # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
             EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
-            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20)
-            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20)
+            # || true: a grep that finds nothing exits 1, and under pipefail plus
+            # bash -e that would end the step before anything is printed.
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
+            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20 || true)
             if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
               echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20

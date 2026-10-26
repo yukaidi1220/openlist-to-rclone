@@ -357,7 +357,7 @@ jobs:
             echo "::warning::SRC 为单文件,跳过 CDN presigned probe(内容由 copy/verify 校验)"
             exit 0
           fi
-          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi                     --no-mimetype --no-modtime                     | jq -r '[ .[] | select(.Size != null) ] | sort_by(.Size) | .[0].Path // empty')
+          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1M --max-size 8Mi                     --no-mimetype --no-modtime                     | jq -r '[ .[] | select(.Size != null) ] | sort_by(.Size) | .[0].Path // empty')
           if [ -z "$probe" ]; then
             echo "::warning::范围内没有小文件,跳过 CDN 探测"
             exit 0

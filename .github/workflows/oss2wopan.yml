@@ -360,7 +360,7 @@ jobs:
           set -o pipefail
           # 注意:此构建裸数字 size 非 1 字节语义,必须写 1b,否则小文件全被过滤
           # --no-mimetype --no-modtime(注意拼写无连字符):ListV2 元数据够用,避免每对象 2 次经 CDN 的 Head
-          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1b --max-size 8Mi \
+          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1M --max-size 8Mi \
                     --no-mimetype --no-modtime \
                     | jq -r '[ .[] | select(.Size != null) ] | sort_by(.Size) | .[0].Path // empty')
           if [ -z "$probe" ]; then

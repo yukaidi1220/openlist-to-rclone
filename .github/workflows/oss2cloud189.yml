@@ -423,7 +423,7 @@ jobs:
             --max-size 1G --transfers 15 --checkers 8 \
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY_STAGE1" \
             --multi-thread-cutoff "$CLOUD189_MT_CUTOFF" \
-            --retries 3 --low-level-retries 3 \
+            --retries 2 --low-level-retries 3 \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
           kill "$SAMPLER_PID" 2>/dev/null || true
@@ -468,7 +468,7 @@ jobs:
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$CLOUD189_MT_CUTOFF" \
             --multi-thread-streams "$CLOUD189_MT_STREAMS" \
-            --retries 3 --low-level-retries 3 \
+            --retries 2 --low-level-retries 3 \
             --cloud189-fatal-if-no-space \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}
@@ -510,7 +510,7 @@ jobs:
             --max-size 1G --transfers 15 --checkers 8 \
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY_STAGE1" \
             --multi-thread-cutoff "$CLOUD189_MT_CUTOFF" \
-            --retries 3 --low-level-retries 3 \
+            --retries 2 --low-level-retries 3 \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
           kill "$SAMPLER_PID" 2>/dev/null || true
@@ -551,7 +551,7 @@ jobs:
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$CLOUD189_MT_CUTOFF" \
             --multi-thread-streams "$CLOUD189_MT_STREAMS" \
-            --retries 3 --low-level-retries 3 \
+            --retries 2 --low-level-retries 3 \
             --cloud189-fatal-if-no-space \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}

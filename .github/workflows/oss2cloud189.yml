@@ -432,23 +432,28 @@ jobs:
           # 已知永久拒收会在 copy.log 留 SKIP 行；有 SKIP 行时把判定交给后面的 one-way check，
           # 否则 rclone 非 0 就是真实传输失败，直接让 run 红。
           if [ "$rc" -ne 0 ]; then
-            # 可吸收的只有一种:失败的每个文件都是空文件。判据取自 2026-10-26 的实测日志:
-            #   ERROR : empty.txt: Failed to copy: can't upload empty files to this remote
-            #   ERROR : Can't retry any of the errors - not attempting retries   <- 收尾行
-            # 收尾行不含 "empty files",按"存在非空文件错误"去判会把一轮正常的空文件
-            # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
-            # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
-            EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            # 可吸收的错误只有两类,都不该把整轮判红:
+            #   空文件 —— 本盘拒收;
+            #   必拒名字 —— 名字含 BMP 之外的码位(emoji/生僻平面)。服务端是传完全部字节、
+            #     按日额度计费之后才回 403 EmojiArgumentError(2026-10-22 实测),所以后端
+            #     提前本地拦下并标 no-retry。这类重传一万次也不会成功。
+            # "继续传其他文件"不是这里做的:rclone 带 --ignore-errors,错误只计数不中断,
+            # 本步只做判红/判绿。2026-10-26 的教训:sg-02 一轮只有 1 条必拒名字错误,
+            # 却把阶段二和两个 verify 全 skip 掉了。
+            # 收尾行 "Can't retry any of the errors" 不含上面任何关键字,必须单独排除,
+            # 否则一轮正常的预期跳过会被它判成红(实测复现)。
+            SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
             OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
-            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20 || true)
-            if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
-              echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
-              printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20
+            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' | head -20 || true)
+            if [ -n "$OTHER" ] || [ -n "$REAL" ] || [ $(( SKIP_EMPTY + SKIP_NAME )) -eq 0 ]; then
+              echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
+              printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
               exit "$rc"
             fi
-            echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
+            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME,交给 verify 判定)"
           fi
 
       - name: Copy - 阶段二 全量(不限制大小,size-only 跳过已传)
@@ -476,23 +481,28 @@ jobs:
           kill "$SAMPLER_PID" 2>/dev/null || true
           set -e
           if [ "$rc" -ne 0 ]; then
-            # 可吸收的只有一种:失败的每个文件都是空文件。判据取自 2026-10-26 的实测日志:
-            #   ERROR : empty.txt: Failed to copy: can't upload empty files to this remote
-            #   ERROR : Can't retry any of the errors - not attempting retries   <- 收尾行
-            # 收尾行不含 "empty files",按"存在非空文件错误"去判会把一轮正常的空文件
-            # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
-            # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
-            EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            # 可吸收的错误只有两类,都不该把整轮判红:
+            #   空文件 —— 本盘拒收;
+            #   必拒名字 —— 名字含 BMP 之外的码位(emoji/生僻平面)。服务端是传完全部字节、
+            #     按日额度计费之后才回 403 EmojiArgumentError(2026-10-22 实测),所以后端
+            #     提前本地拦下并标 no-retry。这类重传一万次也不会成功。
+            # "继续传其他文件"不是这里做的:rclone 带 --ignore-errors,错误只计数不中断,
+            # 本步只做判红/判绿。2026-10-26 的教训:sg-02 一轮只有 1 条必拒名字错误,
+            # 却把阶段二和两个 verify 全 skip 掉了。
+            # 收尾行 "Can't retry any of the errors" 不含上面任何关键字,必须单独排除,
+            # 否则一轮正常的预期跳过会被它判成红(实测复现)。
+            SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
             OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
-            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20 || true)
-            if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
-              echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
-              printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20
+            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' | head -20 || true)
+            if [ -n "$OTHER" ] || [ -n "$REAL" ] || [ $(( SKIP_EMPTY + SKIP_NAME )) -eq 0 ]; then
+              echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
+              printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
               exit "$rc"
             fi
-            echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
+            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME,交给 verify 判定)"
           fi
 
       - name: Sync - 阶段一 小文件(≤1G)高并发
@@ -517,23 +527,28 @@ jobs:
           kill "$SAMPLER_PID" 2>/dev/null || true
           set -e
           if [ "$rc" -ne 0 ]; then
-            # 可吸收的只有一种:失败的每个文件都是空文件。判据取自 2026-10-26 的实测日志:
-            #   ERROR : empty.txt: Failed to copy: can't upload empty files to this remote
-            #   ERROR : Can't retry any of the errors - not attempting retries   <- 收尾行
-            # 收尾行不含 "empty files",按"存在非空文件错误"去判会把一轮正常的空文件
-            # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
-            # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
-            EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            # 可吸收的错误只有两类,都不该把整轮判红:
+            #   空文件 —— 本盘拒收;
+            #   必拒名字 —— 名字含 BMP 之外的码位(emoji/生僻平面)。服务端是传完全部字节、
+            #     按日额度计费之后才回 403 EmojiArgumentError(2026-10-22 实测),所以后端
+            #     提前本地拦下并标 no-retry。这类重传一万次也不会成功。
+            # "继续传其他文件"不是这里做的:rclone 带 --ignore-errors,错误只计数不中断,
+            # 本步只做判红/判绿。2026-10-26 的教训:sg-02 一轮只有 1 条必拒名字错误,
+            # 却把阶段二和两个 verify 全 skip 掉了。
+            # 收尾行 "Can't retry any of the errors" 不含上面任何关键字,必须单独排除,
+            # 否则一轮正常的预期跳过会被它判成红(实测复现)。
+            SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
             OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
-            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20 || true)
-            if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
-              echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
-              printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20
+            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' | head -20 || true)
+            if [ -n "$OTHER" ] || [ -n "$REAL" ] || [ $(( SKIP_EMPTY + SKIP_NAME )) -eq 0 ]; then
+              echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
+              printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
               exit "$rc"
             fi
-            echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
+            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME,交给 verify 判定)"
           fi
 
       - name: Sync - 阶段二 全量(不限制大小,size-only 跳过已传)
@@ -559,23 +574,28 @@ jobs:
           kill "$SAMPLER_PID" 2>/dev/null || true
           set -e
           if [ "$rc" -ne 0 ]; then
-            # 可吸收的只有一种:失败的每个文件都是空文件。判据取自 2026-10-26 的实测日志:
-            #   ERROR : empty.txt: Failed to copy: can't upload empty files to this remote
-            #   ERROR : Can't retry any of the errors - not attempting retries   <- 收尾行
-            # 收尾行不含 "empty files",按"存在非空文件错误"去判会把一轮正常的空文件
-            # 跳过判成红(实测复现)。所以规则是:除这两类之外还有任何 ERROR → 红;
-            # 一条空文件错误都没有 → 也红(说明 rclone 另有原因非 0)。
-            EMPTY_N=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            # 可吸收的错误只有两类,都不该把整轮判红:
+            #   空文件 —— 本盘拒收;
+            #   必拒名字 —— 名字含 BMP 之外的码位(emoji/生僻平面)。服务端是传完全部字节、
+            #     按日额度计费之后才回 403 EmojiArgumentError(2026-10-22 实测),所以后端
+            #     提前本地拦下并标 no-retry。这类重传一万次也不会成功。
+            # "继续传其他文件"不是这里做的:rclone 带 --ignore-errors,错误只计数不中断,
+            # 本步只做判红/判绿。2026-10-26 的教训:sg-02 一轮只有 1 条必拒名字错误,
+            # 却把阶段二和两个 verify 全 skip 掉了。
+            # 收尾行 "Can't retry any of the errors" 不含上面任何关键字,必须单独排除,
+            # 否则一轮正常的预期跳过会被它判成红(实测复现)。
+            SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
+            SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
             OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
-            NOT_EMPTY=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | head -20 || true)
-            if [ -n "$OTHER" ] || [ -n "$NOT_EMPTY" ] || [ "$EMPTY_N" -eq 0 ]; then
-              echo "::error::rclone exit=$rc(存在不是空文件的错误,这是真实传输失败):"
-              printf '%s\n%s\n' "$OTHER" "$NOT_EMPTY" | grep -v '^$' | head -20
+            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' | head -20 || true)
+            if [ -n "$OTHER" ] || [ -n "$REAL" ] || [ $(( SKIP_EMPTY + SKIP_NAME )) -eq 0 ]; then
+              echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
+              printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
               exit "$rc"
             fi
-            echo "::warning::rclone exit=$rc(错误仅涉及空文件,交给 verify 判定)"
+            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME,交给 verify 判定)"
           fi
 
       # ---- 校验 ----
@@ -596,10 +616,10 @@ jobs:
             echo "expected-skip(空文件)= $(wc -l < /tmp/expected-skip.txt)"
             SKIP_SRC=-
           else
-            grep -aoE 'ERROR : .*: Failed to copy: .*empty files' copy.log \
+            grep -aoE 'ERROR : .*: Failed to copy: .*(empty files|rename it locally)' copy.log \
               | sed -E 's/^ERROR : //; s/: Failed to copy: .*//' | sort -u > /tmp/expected-skip.txt
             export EXPECTED_SKIP=/tmp/expected-skip.txt
-            echo "expected-skip(空文件,来自 copy.log)= $(wc -l < /tmp/expected-skip.txt)"
+            echo "expected-skip(空文件+必拒名字,来自 copy.log)= $(wc -l < /tmp/expected-skip.txt)"
             SKIP_SRC=-
           fi
           rclone check "$SRC" "$DST" --one-way --size-only --ignore-errors \

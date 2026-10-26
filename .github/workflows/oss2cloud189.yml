@@ -73,6 +73,7 @@ on:
         options:
           - rclone
           - aria2
+          - curl
       dump_trace:
         description: "本轮给 rclone 加 --dump trace:打印每次请求的 DNS/拨号/TLS 与 GotConn 的本地->远端地址(reused 也打)。不打请求头故不会漏 token,但每请求约 8 行,只在复现那一轮勾"
         type: boolean

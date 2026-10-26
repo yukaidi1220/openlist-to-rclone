@@ -85,6 +85,13 @@ ARIA2_TRIES="${ARIA2_TRIES:-2}"
 CHUNK_TIMEOUT="${CHUNK_TIMEOUT:-20}"          # aria2 单连接静默超时(秒)
 CHUNK_CONNECT_TIMEOUT="${CHUNK_CONNECT_TIMEOUT:-10}"
 STAGE2_DEADLINE="${STAGE2_DEADLINE:-900}"     # 整个取数阶段的墙钟上限(秒)
+# rclone 取数臂的硬上限。2026-10-26 三次生产 run 实测:单个 Range 读挂死后 rclone 既不退出也不报错,
+# fetch_one 的 wait 与 run_pool 收尾的 wait 双双无限等,分别被拖 3403/3273/6280 秒只能人工取消。
+# aria2/curl 两个臂本来就有 timeout 包着,只有默认臂(rclone)漏了。
+RCLONE_CHUNK_MAX_TIME="${RCLONE_CHUNK_MAX_TIME:-300}"   # 单片(含其全部重试)墙钟上限
+RCLONE_STAGE_DEADLINE="${RCLONE_STAGE_DEADLINE:-1500}"  # 收尾等待的兜底上限
+RCLONE_READ_TIMEOUT="${RCLONE_READ_TIMEOUT:-45s}"       # 空闲读超时,与 sync 步一致
+RCLONE_CONNECT_TIMEOUT="${RCLONE_CONNECT_TIMEOUT:-10s}"
 ARIA2_LOG="${ARIA2_LOG:-/tmp/aria2-probe.log}"  # 原始 aria2 日志(含签名 URL, 不入 artifact)
 PROBE_SEED="${PROBE_SEED:-0x5EED}"   # 抽样种子(接受 0x.. 或十进制);执行器按 run id 传值,轮间换一批文件
 
@@ -235,12 +242,12 @@ fetch_one() {
   local seq="${rest2#*$'\t'}"
   local srcf="$WORKDIR_CHUNKS/d_${seq}.src" dstf="$WORKDIR_CHUNKS/d_${seq}.dst"
   # 双端并行拉取(后台 & 同时跑,完了 wait)
-  ( "$RCLONE" cat "$SRC/$path" --offset "$off" --count "$len" --no-check-certificate \
+  ( timeout -k 10 "$RCLONE_CHUNK_MAX_TIME" "$RCLONE" cat "$SRC/$path" --offset "$off" --count "$len" --no-check-certificate --timeout "$RCLONE_READ_TIMEOUT" --contimeout "$RCLONE_CONNECT_TIMEOUT" \
       --retries 5 --low-level-retries 20 > "$srcf" 2>"$WORKDIR_DIAG/d_${seq}.src.log" \
       || { rm -f "$srcf"; echo "$(src_fail_kind "$WORKDIR_DIAG/d_${seq}.src.log") $path" > "$WORKDIR_DIAG/d_${seq}.fail"; \
            echo "::warning:: SRCFAIL seq=$seq off=$off (源端 ${SRC}:范围读取失败) $path" >&2; } ) &
   local pidsrc=$!
-  ( "$RCLONE" cat "$DST/$path" --offset "$off" --count "$len" --no-check-certificate \
+  ( timeout -k 10 "$RCLONE_CHUNK_MAX_TIME" "$RCLONE" cat "$DST/$path" --offset "$off" --count "$len" --no-check-certificate --timeout "$RCLONE_READ_TIMEOUT" --contimeout "$RCLONE_CONNECT_TIMEOUT" \
       --retries 5 --low-level-retries 20 > "$dstf" 2>"$WORKDIR_DIAG/d_${seq}.dst.log" \
       || { rm -f "$dstf"; echo "DSTFAIL $path" > "$WORKDIR_DIAG/d_${seq}.fail"; \
            echo "::warning:: DSTFAIL seq=$seq off=$off (目标端 ${DST}:范围读取失败,文件/目录可能缺失) $path" >&2; } ) &
@@ -550,7 +557,23 @@ run_pool() {
       fi
     fi
   done < "$f"
-  wait
+  # 兜底:单片 timeout 已保证每个 rclone 必死,这里再兜住最后一个窗口的收尾等待
+  # (实测滑窗内的阻塞由单片 timeout 解,收尾那批若不兜就还是可能无限等)
+  local t_wait=$(date +%s) n_alive=0 p timed_out=0
+  while :; do
+    n_alive=0
+    for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && n_alive=$((n_alive + 1)); done
+    [ "$n_alive" -eq 0 ] && break
+    if [ $(( $(date +%s) - t_wait )) -ge "$RCLONE_STAGE_DEADLINE" ]; then
+      echo "::warning::阶段2 收尾等待超过 ${RCLONE_STAGE_DEADLINE}s(仍有 ${n_alive} 片未返回),不再等待,这些片按未取计" >&2
+      for p in "${pids[@]}"; do kill -TERM "$p" 2>/dev/null || true; done
+      timed_out=1
+      break
+    fi
+    sleep 5
+  done
+  if [ "$timed_out" -eq 0 ]; then wait 2>/dev/null || true; fi
+  done=$total
   done=$total
   tick "阶段2 拉片全部结束(共 ${done})"
 }

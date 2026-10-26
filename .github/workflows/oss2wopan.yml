@@ -70,6 +70,15 @@ on:
         type: boolean
         required: false
         default: false
+      fetch_mode:
+        description: "透传执行器:抽样校验步的取数方式。rclone=每片一个 rclone cat(默认);curl=每文件签一次直链、每片恰好一条 curl -r,单片有 --max-time 硬上限"
+        type: choice
+        required: false
+        default: "rclone"
+        options:
+          - rclone
+          - curl
+
 
 concurrency:
   # 动态分组:
@@ -586,6 +595,7 @@ jobs:
           MIN_SIZE: "1048576"           # 只探 ≥1MiB 对象
           PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件(固定种子会让多轮只验同 50 个)
           VERBOSE: "1"                  # 逐片打进度(实时日志可见)
+          FETCH_MODE: ${{ inputs.fetch_mode }}  # rclone|curl, 见 bin/chunk-probe.sh 的阶段2
         run: |
           . /tmp/paths.src
           set -o pipefail

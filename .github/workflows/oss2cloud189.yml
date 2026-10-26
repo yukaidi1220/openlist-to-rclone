@@ -265,7 +265,8 @@ jobs:
             warp_takeover 4 || { echo "::error::WARP v4 未接管,终止"; exit 1; }
           fi
           if [ "$V6_WANT" = "1" ]; then
-            warp_takeover 6 || { echo "::error::WARP v6 未接管,终止"; exit 1; }
+            echo ">>> 基线 eth0 直连(不进隧道)"; curl -4 -sS --max-time 10 "https://www.cloudflare.com/cdn-cgi/trace" 2>&1 | grep -E '^(ip|colo|loc|warp)=' || echo "(v4 直连靶不通)"
+            warp_takeover 6 || { echo "===== WARP v6 失败现场 ====="; sudo wg show wgcf 2>&1 || true; curl -6 -sS --max-time 8 https://ip.sb 2>&1 | head -3 || true; echo "::error::WARP v6 未接管,终止"; exit 1; }
           fi
           if [ "$V6_WANT" = "1" ]; then
             # 软校验,不像 yun139 那样硬失败:api.cloud.189.cn 是否发布 AAAA 没有实测过,

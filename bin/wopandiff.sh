@@ -26,11 +26,22 @@ exec awk -v CL="$copylog" -v KL="$checklog" -v RC="$rc" '
 function body(l,   t) { t = l; sub(/^.* ERROR : /, "", t); return t }
 BEGIN {
   ndir = 0; nfile = 0
+  nrej_lines = 0; nrej_f = 0; nlogid = 0
   while ((getline l < CL) > 0) {
     # MT 路径会带 "multi-thread copy: failed to open chunk writer: " 前缀,所以不能要求
     # "Failed to copy: failed to make directory" 紧邻,用 .* 吃掉中间那段。
     if (l ~ /Failed to copy: .*failed to make directory: .*RSP_CODE=(4444|1009)([^0-9]|$)/) {
       s = body(l)
+      # 目录被拒的统计: 错误行数 vs 去重文件数 vs 唯一 LOGID 数。
+      # 若 100+ 个文件共用同一个 LOGID, 说明是负缓存回放(本地直接失败, 没再打服务端)。
+      nrej_lines++
+      if (match(s, /LOGID=[A-Za-z0-9]+/)) {
+        lid = substr(s, RSTART + 6, RLENGTH - 6)
+        if (!(lid in logids)) { nlogid++; logids[lid] = 1 }
+      }
+      p2 = s
+      sub(/: Failed to copy:.*$/, "", p2)
+      if (!(p2 in rejf)) { nrej_f++; rejf[p2] = 1 }
       sub(/: Failed to copy:.*failed to make directory:.*$/, "", s)
       d = s
       if (sub(/\/[^\/]*$/, "/", d)) {
@@ -75,6 +86,9 @@ BEGIN {
   close(KL)
   printf "wopandiff: 可解释 目录=%d 空文件=%d / 目标缺失=%d / 无法解释=%d / 其它ERROR=%d (check rc=%s)\n", \
     ndir + 0, nfile + 0, total + 0, unexp + 0, other + 0, RC
+  if (nrej_lines > 0) {
+    printf "wopandiff: 目录被拒 目录=%d 文件=%d 错误行=%d 唯一LOGID=%d 平均每LOGID覆盖=%d 真打服务端=%d\n", ndir + 0, nrej_f + 0, nrej_lines + 0, nlogid + 0, (nlogid > 0 ? int((nrej_lines + nlogid - 1) / nlogid) : 0), nlogid + 0
+  }
   if (unexp > 0) {
     print "::group::无法用可解释集合吸收的缺失(前 20 条)"
     for (i = 1; i <= unexp && i <= 20; i++) print "  " bad[i]

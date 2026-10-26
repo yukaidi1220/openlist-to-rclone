@@ -449,7 +449,7 @@ jobs:
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY_STAGE1" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
-            --retries 3 --low-level-retries 3 \
+            --retries 2 --low-level-retries 3 \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -483,7 +483,7 @@ jobs:
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
             --multi-thread-streams 32 \
-            --retries 3 --low-level-retries 3 \
+            --retries 2 --low-level-retries 3 \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}
           kill "$SAMPLER_PID" 2>/dev/null || true
@@ -510,7 +510,7 @@ jobs:
             --yun139-part-size "$YUN139_PART_SIZE" \
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY_STAGE1" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
-            --retries 3 --low-level-retries 3 \
+            --retries 2 --low-level-retries 3 \
             --stats 30s -vv 2>&1 | tee copy.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -543,7 +543,7 @@ jobs:
             --yun139-upload-concurrency "$YUN139_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$YUN139_MT_CUTOFF" \
             --multi-thread-streams 32 \
-            --retries 3 --low-level-retries 3 \
+            --retries 2 --low-level-retries 3 \
             --stats 30s -vv 2>&1 | tee -a copy.log
           rc=${PIPESTATUS[0]}
           kill "$SAMPLER_PID" 2>/dev/null || true

@@ -303,7 +303,8 @@ jobs:
           fi
           if [ "$V6_WANT" = "1" ]; then
             echo "--- dash.cloudflare trace (v6) ---"
-            warp_takeover 6 || { echo "::error::WARP v6 未接管,终止"; exit 1; }
+            echo ">>> 基线 eth0 直连(不进隧道)"; curl -4 -sS --max-time 10 "https://www.cloudflare.com/cdn-cgi/trace" 2>&1 | grep -E '^(ip|colo|loc|warp)=' || echo "(v4 直连靶不通)"
+            warp_takeover 6 || { echo "===== WARP v6 失败现场 ====="; sudo wg show wgcf 2>&1 || true; curl -6 -sS --max-time 8 https://ip.sb 2>&1 | head -3 || true; echo "::error::WARP v6 未接管,终止"; exit 1; }
           fi
           # wopan 控制面两支都是软校验:panservice.mail.wo.cn 只有 A 记录(实测 type=AAAA 无应答),
           # curl -6 连名字都解不出来,拿它当硬闸等于每次必红。隧道本身的硬闸是上面的 warp_takeover。

@@ -107,7 +107,13 @@ jobs:
       # 调参顺序:单流极限 → 4 → 8 → 16 → 48 → 96,停在速度拐点(服务端可能对同会话并发限流)
       WOPAN_UPLOAD_CUTOFF: 64Mi
       WOPAN_CHUNK_SIZE: 32Mi
-      WOPAN_UPLOAD_CONCURRENCY: '64'          # 阶段二(全量)单文件分片并发(72 时实测峰值 RSS 14.8GiB/剩 56MiB 仍贴内存墙,降到 64)
+      WOPAN_UPLOAD_CONCURRENCY: '16'          # 阶段二(全量)单文件分片并发(72 时实测峰值 RSS 14.8GiB/剩 56MiB 仍贴内存墙,降到 64)
+      # 2026-10-27 再降到 16:阶段二 4 个文件 × 64 流 = 单文件 64 条 Range 读要一直吊着,
+      # 而 OSS2wopan run 953(联通 us-15 第 3 轮)那一轮里 `i/o timeout` 有 5537 行,5 个约 10.5GiB 的
+      # .iso 在 949/953 两轮里逐条同一批失败、单个对象被整体重开 6 次(1974=6×329 条 chunk starting)。
+      # 阶段一 15×30 却没事,差别是它只处理 ≤1G、几片就收尾,撑不起这么长时间的并发读窗。
+      # 16 是我按"把单文件并发读窗缩到能收尾"选的值,不是协议规定;下一手是 transfers 1。
+      # 验法:同时发 de-04 与 us-15,看那批 .iso 是否落地。
       WOPAN_UPLOAD_CONCURRENCY_STAGE1: '30'   # 阶段一(≤1G 小文件)单文件分片并发
       # 多线程复制触发阈值:≥此大小的文件走 源端 Range 并行下载 + OpenChunkWriter 并发上传
       # (源码核实:分片边界= wopan chunk_size,streams 取大逻辑自动用 backend concurrency,无需传 --multi-thread-streams)

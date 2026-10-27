@@ -81,6 +81,15 @@ CURL_BIN="${CURL:-curl}"
 CURL_MAX_TIME="${CURL_MAX_TIME:-60}"          # curl 单片总时长上限(秒), 不是空闲钟
 RCD_ADDR="${RCD_ADDR:-127.0.0.1:5579}"
 SIGN_JOBS="${SIGN_JOBS:-8}"
+# 单次签链调用的时长上限。2026-10-27 run 775 的 diag 实测:移动目标端 50 条链用了 240s
+# (=4.8s/条),而调用方是 -P 8 并发,队尾一次要等 8×4.8≈38s;
+# 原来的 30s 上限正好卡在每一波的队尾上,19/50 条签回来是空-body,
+# 空-body 连带让 153 片(占那轮 195 个未验片里的八成)根本没发请求。
+# 150s 是按那个队尾 38s 的约 4 倍留的余量,不是协议规定的数;真正的兜底是下面的墙钟。
+SIGN_TIMEOUT="${SIGN_TIMEOUT:-150}"
+# curl 取片的尝试次数。同一轮里目标端 238 条请求有 29 条 "SSL connection timeout"(28)
+# 和 1 条 recv 失败(56),curl 把这两个码都算瞬时可重试,给 2 次即同一片最多 3 试。
+CURL_RETRY="${CURL_RETRY:-2}"
 ARIA2_TRIES="${ARIA2_TRIES:-2}"
 CHUNK_TIMEOUT="${CHUNK_TIMEOUT:-20}"          # aria2 单连接静默超时(秒)
 CHUNK_CONNECT_TIMEOUT="${CHUNK_CONNECT_TIMEOUT:-10}"
@@ -316,7 +325,7 @@ sign_side() {
   bfile=$(mktemp "$WORKDIR_DIAG/req.XXXXXX")
   printf '%s' "$body" > "$bfile"
   for i in 1 2; do
-    resp=$(curl -sS -m 30 -H 'Content-Type: application/json' --data-binary @"$bfile" \
+    resp=$(curl -sS -m "$SIGN_TIMEOUT" -H 'Content-Type: application/json' --data-binary @"$bfile" \
            "$RCD_ADDR/operations/publiclink" 2>/dev/null || true)
     url=$(printf '%s' "$resp" | jq -r '.url // empty' 2>/dev/null) || url=""
     [ -n "$url" ] && break
@@ -338,7 +347,7 @@ sign_side() {
   printf '%s\t%s\t%s\n' "$path" "$side" "$url"
 }
 export -f sign_side
-export RCD_ADDR SRC_DOWNLOAD_HOST
+export RCD_ADDR SRC_DOWNLOAD_HOST SIGN_TIMEOUT
 
 # aria2 与 curl 两种取数方式共用这两段: 签直链(两侧各自计时)与落盘字节核对。
 # 字节核对是安全闸, 只允许有一份实现: 半截文件若不判失败, 阶段3 会把它当 MISMATCH,
@@ -469,12 +478,13 @@ curl_one() {
   rc=0
   "$CURL_BIN" -sS -k -L --max-redirs 3 -o "$f" \
     --connect-timeout "$CHUNK_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+    --retry "$CURL_RETRY" --retry-delay 1 --retry-connrefused \
     -r "${start}-${end}" "$url" 2>"$WORKDIR_DIAG/c_${seq}.${suffix}.err" || rc=$?
   printf '%s\t%s\t%s\n' "$seq" "$side" "$rc" >> "$WORKDIR_DIAG/curl.rc.tsv"
   return 0
 }
 export -f curl_one
-export CURL_BIN CURL_MAX_TIME CHUNK_CONNECT_TIMEOUT WORKDIR_DIAG WORKDIR_CHUNKS
+export CURL_BIN CURL_MAX_TIME CHUNK_CONNECT_TIMEOUT WORKDIR_DIAG WORKDIR_CHUNKS CURL_RETRY
 
 curl_fetch() {
   local list="$WORKDIR_DIAG/curl-jobs.tsv" path off len seq side suffix url sz want avail n rc rcwall t0 f
@@ -730,9 +740,13 @@ echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files files_skip=$
 
 # 可验证比例:两端都拿到非空内容并真正比过的文件占比。比例过低时结论只是"没验证到",
 # 不能当成"内容一致"——源端断供(CDN 200-空)会让整桶都落到 skip 里。
+# 2026-10-27 run 775 就是这一类:50 个文件只比成 8 个(目标端 19 条链签失败),
+# 而它整条 run 报的是绿。半验不当绿,所以下面把 INCONCLUSIVE 做成真判红。
 verified_files=$((probed_files - mism_files - skip_files))
+inconclusive=0
 if [ "$probed_files" -gt 0 ] && [ $(( verified_files * 100 )) -lt $(( probed_files * 50 )) ]; then
-  echo "::warning::verdict=INCONCLUSIVE 可验证文件仅 $verified_files/$probed_files (<50%),源端不可用 src_empty=$skip_se 敏感词目录=$skip_nm;本结论不代表内容一致" >&2
+  inconclusive=1
+  echo "::error::verdict=INCONCLUSIVE 可验证文件仅 $verified_files/$probed_files (<50%),源端不可用 src_empty=$skip_se 敏感词目录=$skip_nm 拉取失败片=$skip_ff;本结论不代表内容一致" >&2
 else
   echo "verdict=OK verified=$verified_files/$probed_files" >&2
 fi
@@ -745,6 +759,8 @@ if [ "${CLEANUP:-}" = "1" ]; then
 fi
 echo "WORKDIR_ARTIFACT=$WORKDIR" >&2
 
-# 退出语义: 仅发现不一致(MISMATCH,且已 DEL_MISMATCH 删除目标)才非 0;
-# 拉取失败(SKIP)不致命——目标端目录缺失等 read 失败由 sync 阶段 size-only 兜底。
-[ "$tot_mism" -eq 0 ]
+# 退出语义: 两种都判红 —— 发现不一致(MISMATCH,已 DEL_MISMATCH 删掉目标坏文件待重建),
+# 以及没验到足够比例的 INCONCLUSIVE。后者以前只是 warning,于是"绿但只验了一半"
+# 会一路读到绿(run 775 实测:8/50 比过,run 结论 success)。
+# 单纯拉取失败仍不致命的是分片粒度:它先落到 skip_ff,只要整体比例还够 50% 就交给 verify 判。
+[ "$tot_mism" -eq 0 ] && [ "$inconclusive" -eq 0 ]

@@ -374,8 +374,15 @@ jobs:
       - name: Preflight - cloud189 connectivity and space
         run: |
           # 连得上才有意义谈后面:这是一次真实的 API 往返(about),不是只解析 conf。
-          rclone about --json cloud189: > /tmp/about.json \
-            || { echo "::error::cloud189 不可达(access_token 失效或接口变更)"; exit 1; }
+          # 网关会偶发回 HTML 403/5xx, 那不代表票证失效 => 有界重试, 5 次都不通才算不可达。
+          ok=0
+          for i in 1 2 3 4 5; do
+            if ERRTXT=$(rclone about --json cloud189: 2>/tmp/about.err >/dev/null); then ok=1; break; fi
+            echo "cloud189 about 第 $i 次失败: $(printf '%s' "$ERRTXT" | tr -d '\n' | cut -c1-160 | sed -E 's/(session[_-]?[Kk]ey|access[_-]?token|refresh[_-]?token|authorization|cookie)([=: ]+)[^,;&\"]+/\1\2***/g')"
+            [ "$i" -lt 5 ] && sleep 15
+          done
+          [ "$ok" = "1" ] || { echo "::error::cloud189 不可达(access_token 失效或接口变更), 5 次重试均未通"; exit 1; }
+          rclone about --json cloud189: > /tmp/about.json
           TOTAL=$(jq -r '.total // 0' /tmp/about.json)
           FREE=$(jq -r '.free // 0' /tmp/about.json)
           jq -r '"target total=\(.total // "?") used=\(.used // "?") free=\(.free // "?")"' /tmp/about.json | tee -a "$GITHUB_STEP_SUMMARY"

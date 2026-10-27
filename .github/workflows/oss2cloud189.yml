@@ -80,6 +80,11 @@ on:
         type: boolean
         required: false
         default: false
+      warp_probe_bad_first:
+        description: "自检用: 往 WARP 端点候选表最前面塞一个必然不应答的地址(192.0.2.1, TEST-NET-1), 用来证明换端点这条支路真的会执行。默认 false 不塞, 正常路径行为不变; 勾上这一发在 WARP 步多花约 36 秒。"
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   # 目标端没有会话互踢的问题(access_token 不轮换),全部 run 按桶+路径分组即可并行。
@@ -164,6 +169,7 @@ jobs:
         env:
           RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
           REPO_OWNER: ${{ github.repository_owner }}
+          WARP_BAD_FIRST: ${{ inputs.warp_probe_bad_first }}
         run: |
           set -e
           MODE="${{ inputs.warp_mode }}"
@@ -284,6 +290,12 @@ jobs:
           for h in $EP_HOSTS; do
             for p in 2408 500 1701 4500; do CANDS="$CANDS $h:$p"; done
           done
+          # 自检开关: 默认空, 正常路径一个字节都不变。勾上后 192.0.2.1 排第一,
+          # 它不应答, 只有换到真端点才算接管 —— 这条支路否则永远跑不到。
+          if [ "${WARP_BAD_FIRST:-false}" = "true" ]; then
+            CANDS=" 192.0.2.1:2408$CANDS"
+            echo ">>> [自检] 已在候选表最前面塞入不应答地址 192.0.2.1:2408"
+          fi
           PROBES=""
           [ "$V4_WANT" = "1" ] && PROBES="$PROBES 4" || true
           [ "$V6_WANT" = "1" ] && PROBES="$PROBES 6" || true

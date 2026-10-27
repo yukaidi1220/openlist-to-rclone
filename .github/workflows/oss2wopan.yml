@@ -643,7 +643,9 @@ jobs:
             head -1 /tmp/wopandiff.out >> "$GITHUB_STEP_SUMMARY"
             if [ "$diff_rc" -ne 0 ]; then
               echo "::error::目标端存在无法用『被拒目录/空文件』解释的缺失，详见 check.log"
-              exit 1
+              # 只记账不 exit:下一步的分片抽样是另一条独立判据,中途掐断就只剩半个验证,
+              # 红由终局的 Gate 步统一判。
+              echo "one-way check rc=$diff_rc(缺失/无法解释的明细见本步 wopandiff 输出)" >> /tmp/verdict-red.txt
             fi
           else
             echo "::warning::没有 copy.log（独立 verify 模式），拿不到『明确不可传』集合，check rc=$rc 只告警不判红"
@@ -694,6 +696,19 @@ jobs:
           grep -a "probe done\|lsjson 失败\|阶段" sample.log 2>/dev/null | tail -20 | tee -a sample.log || true
           echo "WORKDIR artifact 路径: $WORKDIR" | tee -a sample.log
           exit $rc
+
+      # 终局判决。one-way check 的红只记账到这里,不再中途 exit,这样分片抽样能在同一轮里
+      # 也跑完(2026-10-27 的教训:中途 exit 会让后面的验证整段被 skip,读起来像"绿但只验了一半")。
+      # !cancelled() 是为了抽样步自己判红时,这里仍能把记账一起报出来。
+      - name: Gate - 终局判决(传输与校验记账汇总)
+        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify') && !cancelled() }}
+        run: |
+          if [ -s /tmp/verdict-red.txt ]; then
+            echo "::error::本轮有记账的红(每条对应它自己的步骤,明细在那一步的日志里):"
+            head -60 /tmp/verdict-red.txt
+            exit 1
+          fi
+          echo "终局判决:传输与 one-way check 没有记账红"
 
       - name: Upload logs (diagnostics)
         if: always()

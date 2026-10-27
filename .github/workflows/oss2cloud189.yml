@@ -67,7 +67,7 @@ on:
           - v4-only
           - dual
       fetch_mode:
-        description: "抽样取数方式。rclone=每片一个 rclone cat(默认,现网行为);aria2=每文件签一次直链再并行拉。仅 verify 抽样步生效"
+        description: "抽样取数方式。rclone=每片一个 rclone cat(默认,现网行为);aria2=每文件签一次直链再并行拉;curl=每文件签一次直链、每片恰好一条 curl -r,单片有 --max-time 硬上限。仅 verify 抽样步生效"
         type: choice
         required: false
         default: "rclone"
@@ -684,19 +684,14 @@ jobs:
           MIN_SIZE: "1048576"           # 只探 ≥1MiB 对象
           VERBOSE: "1"                  # 逐片打进度(实时日志可见)
           PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件(固定种子会让多轮只验同 50 个)
-          FETCH_MODE: ${{ inputs.fetch_mode }}  # rclone|aria2, 见 bin/chunk-probe.sh 的阶段2
+          FETCH_MODE: ${{ inputs.fetch_mode }}  # rclone|aria2|curl, 见 bin/chunk-probe.sh 的阶段2
         run: |
           . /tmp/paths.src
           set -o pipefail
           chmod +x bin/chunk-probe.sh
           export RCLONE_CONFIG PYTHON
           # chunk-probe 的 aria2/curl 模式靠 rc operations/publiclink 双侧签直链。
-          # cloud189 后端没有实现 PublicLink,目标端签不出来,选它只会得到一堆 DSTFAIL。
-          # 与其含糊地红,不如在这里说清楚。
-          if [ "$FETCH_MODE" != "rclone" ]; then
-            echo "::error::cloud189 后端未实现 PublicLink,fetch_mode=$FETCH_MODE 不可用;请用 rclone"
-            exit 1
-          fi
+          # cloud189 的 Fs.PublicLink 自 cdn.26(b13b58afc)起可用,目标端能签出直链。
           if bin/chunk-probe.sh "$SRC" "$DST" 2>&1 | sed -uE 's/(session[_-]?[Kk]ey=)[^,"[:space:]]+/\1***/g' | tee sample.log; then
             echo "random sample content PASSED" | tee -a sample.log
             rc=0

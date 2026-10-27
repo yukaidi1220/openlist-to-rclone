@@ -452,13 +452,16 @@ jobs:
             # 却把阶段二和两个 verify 全 skip 掉了。
             # 收尾行 "Can't retry any of the errors" 不含上面任何关键字,必须单独排除,
             # 否则一轮正常的预期跳过会被它判成红(实测复现)。
+            # 同理 "Attempt N/M failed with K errors and: <最后一条错因>" 也是重试汇总行:
+            # 2026-10-27 us-free 一轮 181 个错误全是可吸收类,却被这两行汇总判红(实测复现)。
             SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
             SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
-            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" \
+              | grep -av 'Attempt [0-9]*/[0-9]* failed with' | head -20 || true)
             REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))
@@ -509,13 +512,16 @@ jobs:
             # 却把阶段二和两个 verify 全 skip 掉了。
             # 收尾行 "Can't retry any of the errors" 不含上面任何关键字,必须单独排除,
             # 否则一轮正常的预期跳过会被它判成红(实测复现)。
+            # 同理 "Attempt N/M failed with K errors and: <最后一条错因>" 也是重试汇总行:
+            # 2026-10-27 us-free 一轮 181 个错误全是可吸收类,却被这两行汇总判红(实测复现)。
             SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
             SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
-            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" \
+              | grep -av 'Attempt [0-9]*/[0-9]* failed with' | head -20 || true)
             REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))
@@ -563,13 +569,16 @@ jobs:
             # 却把阶段二和两个 verify 全 skip 掉了。
             # 收尾行 "Can't retry any of the errors" 不含上面任何关键字,必须单独排除,
             # 否则一轮正常的预期跳过会被它判成红(实测复现)。
+            # 同理 "Attempt N/M failed with K errors and: <最后一条错因>" 也是重试汇总行:
+            # 2026-10-27 us-free 一轮 181 个错误全是可吸收类,却被这两行汇总判红(实测复现)。
             SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
             SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
-            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" \
+              | grep -av 'Attempt [0-9]*/[0-9]* failed with' | head -20 || true)
             REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))
@@ -618,13 +627,16 @@ jobs:
             # 却把阶段二和两个 verify 全 skip 掉了。
             # 收尾行 "Can't retry any of the errors" 不含上面任何关键字,必须单独排除,
             # 否则一轮正常的预期跳过会被它判成红(实测复现)。
+            # 同理 "Attempt N/M failed with K errors and: <最后一条错因>" 也是重试汇总行:
+            # 2026-10-27 us-free 一轮 181 个错误全是可吸收类,却被这两行汇总判红(实测复现)。
             SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
             SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
-            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" | head -20 || true)
+            OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" \
+              | grep -av 'Attempt [0-9]*/[0-9]* failed with' | head -20 || true)
             REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))

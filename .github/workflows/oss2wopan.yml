@@ -417,7 +417,17 @@ jobs:
       - name: Preflight - wopan connectivity
         if: inputs.mode != 'cleanup'
         run: |
-          rclone lsd wopan: > /dev/null 2>&1 || rclone lsf wopan: --max-depth 1 > /dev/null
+          # 边缘/WAF 会偶发回一个 HTML 403, 那是网关形状、不代表票证失效。一枪定生死会把整桶掐死在开工前。
+          # 2026-10-27 实测: 同批四发联通只有 silver-us-15 报 couldn't validate the token:
+          #   http 403 Forbidden: <!DOCTYPE html>..., 另外三发同凭据同刻通过 => 瞬时, 该重试而不是该红。
+          ok=0; ERRTXT=''
+          for i in 1 2 3 4 5; do
+            if ERRTXT=$(rclone lsd wopan: 2>&1 >/dev/null); then ok=1; break; fi
+            if ERRTXT=$(rclone lsf wopan: --max-depth 1 2>&1 >/dev/null); then ok=1; break; fi
+            echo "wopan 连通性第 $i 次失败: $(printf '%s' "$ERRTXT" | tr -d '\n' | cut -c1-160 | sed -E 's/(session[_-]?[Kk]ey|access[_-]?token|refresh[_-]?token|authorization|cookie)([=: ]+)[^,;&\"]+/\1\2***/g')"
+            [ "$i" -lt 5 ] && sleep 15
+          done
+          [ "$ok" = "1" ] || { echo "::error::wopan 不可达(5 次重试均未通, 最后一条见上)"; exit 1; }
           echo "wopan OK"
 
       - name: Preflight - CDN presigned GET probe

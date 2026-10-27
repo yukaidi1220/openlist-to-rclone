@@ -681,8 +681,13 @@ jobs:
           # 这一步是整条链路唯一的"目标到底齐不齐"判据。skipdiff 还会兜住两种
           # "静默变绿"：判定脚本自己挂掉、以及 check 非 0 却一条缺失都报不出来(整步故障)。
           chmod +x bin/skipdiff.sh
+          # skipdiff 的返回码必须在关着 -e 的地方取:开着 -e 加 pipefail 时,这条管道一非 0
+          # 整个步当场就退了,后面的记账分支根本走不到。
+          # 2026-10-27 run 40557346015 实测:判据行已经改了,18 仍是 failure、19 仍被 skip。
+          set +e
           bash bin/skipdiff.sh "$SKIP_SRC" check.log "$rc" | tee -a /tmp/skipdiff.out
           sdc=${PIPESTATUS[0]}
+          set -e
           head -1 /tmp/skipdiff.out >> "$GITHUB_STEP_SUMMARY"
           if [ "$sdc" -ne 0 ]; then
             # 只记账不 exit:下一步的分片抽样是另一条独立判据,中途掐断就只剩半个验证。

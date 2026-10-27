@@ -548,7 +548,15 @@ jobs:
             if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
               echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
-              exit "$rc"
+              if printf '%s\n%s\n' "$OTHER" "$REAL" | grep -aqE 'InsufficientStorageSpace|UserDayFlowOverLimited'; then
+                # 空间已满与当日流量耗尽是账号态,一次运行里不会自己松开,
+                # 继续跑只是让剩下每个文件再撞同一堵墙 —— 这两类仍然当场掐断。
+                exit "$rc"
+              fi
+              # 其余只记账,红由终局的 Gate 步统一判。中途 exit 会把后面的步全 skip 掉:
+              # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
+              # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
+              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
             fi
             echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
           fi
@@ -631,7 +639,15 @@ jobs:
             if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
               echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
-              exit "$rc"
+              if printf '%s\n%s\n' "$OTHER" "$REAL" | grep -aqE 'InsufficientStorageSpace|UserDayFlowOverLimited'; then
+                # 空间已满与当日流量耗尽是账号态,一次运行里不会自己松开,
+                # 继续跑只是让剩下每个文件再撞同一堵墙 —— 这两类仍然当场掐断。
+                exit "$rc"
+              fi
+              # 其余只记账,红由终局的 Gate 步统一判。中途 exit 会把后面的步全 skip 掉:
+              # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
+              # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
+              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
             fi
             echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
           fi
@@ -711,7 +727,15 @@ jobs:
             if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
               echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
-              exit "$rc"
+              if printf '%s\n%s\n' "$OTHER" "$REAL" | grep -aqE 'InsufficientStorageSpace|UserDayFlowOverLimited'; then
+                # 空间已满与当日流量耗尽是账号态,一次运行里不会自己松开,
+                # 继续跑只是让剩下每个文件再撞同一堵墙 —— 这两类仍然当场掐断。
+                exit "$rc"
+              fi
+              # 其余只记账,红由终局的 Gate 步统一判。中途 exit 会把后面的步全 skip 掉:
+              # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
+              # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
+              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
             fi
             echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
           fi
@@ -792,7 +816,15 @@ jobs:
             if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
               echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
-              exit "$rc"
+              if printf '%s\n%s\n' "$OTHER" "$REAL" | grep -aqE 'InsufficientStorageSpace|UserDayFlowOverLimited'; then
+                # 空间已满与当日流量耗尽是账号态,一次运行里不会自己松开,
+                # 继续跑只是让剩下每个文件再撞同一堵墙 —— 这两类仍然当场掐断。
+                exit "$rc"
+              fi
+              # 其余只记账,红由终局的 Gate 步统一判。中途 exit 会把后面的步全 skip 掉:
+              # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
+              # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
+              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
             fi
             echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
           fi
@@ -831,7 +863,10 @@ jobs:
           bash bin/skipdiff.sh "$SKIP_SRC" check.log "$rc" | tee -a /tmp/skipdiff.out
           sdc=${PIPESTATUS[0]}
           head -1 /tmp/skipdiff.out >> "$GITHUB_STEP_SUMMARY"
-          if [ "$sdc" -ne 0 ]; then exit "$sdc"; fi
+          if [ "$sdc" -ne 0 ]; then
+            # 只记账不 exit:下一步的分片抽样是另一条独立判据,中途掐断就只剩半个验证。
+            echo "one-way check rc=$sdc(缺失/无法解释的明细见本步 skipdiff 输出)" >> /tmp/verdict-red.txt
+          fi
 
       - name: Verify - random sample content (分片抽样,不再整文件下载)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
@@ -864,6 +899,20 @@ jobs:
           grep -a "probe done\|lsjson 失败\|阶段" sample.log 2>/dev/null | tail -20 | tee -a sample.log || true
           echo "WORKDIR artifact 路径: $WORKDIR" | tee -a sample.log
           exit $rc
+
+      # 终局判决。传输步与 one-way check 的红都只记账到这里,不再中途 exit,
+      # 这样阶段二和两个 verify 能在同一轮里全部跑完(2026-10-27 run 40540933692 的教训:
+      # 阶段一因为 3 个对象删除没自愈就 exit,阶段二+两个 verify 全被 skip)。
+      # !cancelled() 是为了抽样步自己判红时,这里仍能把传输记账一起报出来。
+      - name: Gate - 终局判决(传输与校验记账汇总)
+        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify') && !cancelled() }}
+        run: |
+          if [ -s /tmp/verdict-red.txt ]; then
+            echo "::error::本轮有记账的红(每条对应它自己的步骤,明细在那一步的日志里):"
+            head -60 /tmp/verdict-red.txt
+            exit 1
+          fi
+          echo "终局判决:传输与 one-way check 没有记账红"
 
       - name: Upload logs (diagnostics)
         if: always()

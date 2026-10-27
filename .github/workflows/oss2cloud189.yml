@@ -556,7 +556,7 @@ jobs:
               # 其余只记账,红由终局的 Gate 步统一判。中途 exit 会把后面的步全 skip 掉:
               # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
               # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
-              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
+              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | { grep -v '^$' || true; }; } >> /tmp/verdict-red.txt
               FLAGGED=1
             fi
             if [ "${FLAGGED:-0}" -eq 0 ]; then
@@ -652,7 +652,7 @@ jobs:
               # 其余只记账,红由终局的 Gate 步统一判。中途 exit 会把后面的步全 skip 掉:
               # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
               # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
-              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
+              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | { grep -v '^$' || true; }; } >> /tmp/verdict-red.txt
               FLAGGED=1
             fi
             if [ "${FLAGGED:-0}" -eq 0 ]; then
@@ -745,7 +745,7 @@ jobs:
               # 其余只记账,红由终局的 Gate 步统一判。中途 exit 会把后面的步全 skip 掉:
               # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
               # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
-              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
+              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | { grep -v '^$' || true; }; } >> /tmp/verdict-red.txt
               FLAGGED=1
             fi
             if [ "${FLAGGED:-0}" -eq 0 ]; then
@@ -839,7 +839,7 @@ jobs:
               # 其余只记账,红由终局的 Gate 步统一判。中途 exit 会把后面的步全 skip 掉:
               # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
               # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
-              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
+              { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | { grep -v '^$' || true; }; } >> /tmp/verdict-red.txt
               FLAGGED=1
             fi
             if [ "${FLAGGED:-0}" -eq 0 ]; then
@@ -880,8 +880,13 @@ jobs:
           set -e
           echo "full one-way size check done (rc=$rc)" >> "$GITHUB_STEP_SUMMARY"
           chmod +x bin/skipdiff.sh
+          # skipdiff 的返回码必须在关着 -e 的地方取:开着 -e 加 pipefail 时,这条管道一非 0
+          # 整个步当场就退了,后面的记账分支根本走不到。
+          # 2026-10-27 run 40557346015 实测:判据行已经改了,18 仍是 failure、19 仍被 skip。
+          set +e
           bash bin/skipdiff.sh "$SKIP_SRC" check.log "$rc" | tee -a /tmp/skipdiff.out
           sdc=${PIPESTATUS[0]}
+          set -e
           head -1 /tmp/skipdiff.out >> "$GITHUB_STEP_SUMMARY"
           if [ "$sdc" -ne 0 ]; then
             # 只记账不 exit:下一步的分片抽样是另一条独立判据,中途掐断就只剩半个验证。

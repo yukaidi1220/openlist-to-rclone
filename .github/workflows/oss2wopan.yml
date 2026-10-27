@@ -78,6 +78,11 @@ on:
         options:
           - rclone
           - curl
+      warp_probe_bad_first:
+        description: "自检用: 往 WARP 端点候选表最前面塞一个必然不应答的地址(192.0.2.1, TEST-NET-1), 用来证明换端点这条支路真的会执行。默认 false 不塞, 正常路径行为不变; 勾上这一发在 WARP 步多花约 36 秒。"
+        type: boolean
+        required: false
+        default: false
 
 
 concurrency:
@@ -191,6 +196,7 @@ jobs:
         env:
           RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
           REPO_OWNER: ${{ github.repository_owner }}
+          WARP_BAD_FIRST: ${{ inputs.warp_probe_bad_first }}
         run: |
           set -e
           MODE="${{ inputs.warp_mode }}"
@@ -257,44 +263,48 @@ jobs:
             sudo ip -6 route add fc00::/7 dev "$DEV" 2>/dev/null || true
           fi
           # ---- 拉起接口与路由(按模式)----
-          sudo ip link add wgcf type wireguard
-                    # ubuntu 26.04 (runner 镜像 ubuntu26,2026-10-27 起 ubuntu-latest 切过去) 上 wg 打不开
-          # stdin 那个设备节点,报 fopen: Permission denied 并 exit 1。改成 0600 临时文件,用完立刻删。
-          WG_KEY_TMP=$(mktemp)
-          ( umask 077; printf '%s\n' "$PRIVATE_KEY" > "$WG_KEY_TMP" )
-          sudo wg set wgcf private-key "$WG_KEY_TMP"
-          rm -f "$WG_KEY_TMP"
-          # wg endpoint 用钉扎过的 IP,杜绝 wg 内部二次解析与 dig 结果不一致导致钉扎失效
-          WG_ENDPOINT="${EP_IP}:${EP_PORT}"
-          if [ "$V4_WANT" = "1" ] && [ "$V6_WANT" = "1" ]; then
-            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "0.0.0.0/0, ::/0"
-          elif [ "$V4_WANT" = "1" ]; then
-            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "0.0.0.0/0"
-          else
-            sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "::/0"
-          fi
-          sudo ip link set mtu 1280 up dev wgcf
-          [ "$V4_WANT" = "1" ] && sudo ip addr add "$ADDR_V4" dev wgcf
-          [ "$V6_WANT" = "1" ] && sudo ip addr add "$ADDR_V6" dev wgcf
-          [ "$V4_WANT" = "1" ] && sudo ip -4 route replace 0.0.0.0/0 dev wgcf
-          [ "$V6_WANT" = "1" ] && sudo ip -6 route replace ::/0 dev wgcf
-          # MSS 钳制:WARP MTU=1280,防 PMTUD 黑洞
-          if [ "$V4_WANT" = "1" ]; then
-            sudo iptables -t mangle -A OUTPUT -o wgcf -p tcp \
-              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-          fi
-          if [ "$V6_WANT" = "1" ]; then
-            sudo ip6tables -t mangle -A OUTPUT -o wgcf -p tcp \
-              --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-          fi
-          # ---- 出口探测与校验 ----
-          echo "===== IP 出口探测 ====="
+          # ---- 建接口 + 探接管: 探不中就换端点, 不再原地重试同一个 ----
+          # 2026-10-27 实测: 挂在接管探针上的每一发, wg show 都是 "transfer: 0 B received,
+          # 1.59 KiB sent" —— 握手包出得去, 一个回包都没有。对同一个 162.159.192.1:2408
+          # 原样重试 4 次全是同一个形状, 所以要换的是重试对象, 不是重试次数。
+          # 端口取 WARP 认的 2408/500/1701/4500; 端点取 engage.cloudflareclient.com 解析到的
+          # 全部 A 记录(只要 v4, 与改动前一致); 每个候选重建一次接口, 顺带换新 socket 与源端口。
+          # 成功时打印用的是第几个候选 —— 跨 run 攒下来就能分清"某端点被丢"和"账号被限"。
+          warp_build() {  # $1 = ip:port
+            local ep="$1" eip keytmp
+            eip="${ep%%:*}"
+            sudo ip link del wgcf 2>/dev/null || true
+            sudo ip route add "$eip/32" via "$GW" dev "$DEV" 2>/dev/null || true
+            sudo ip link add wgcf type wireguard
+            keytmp=$(mktemp)
+            ( umask 077; printf '%s\n' "$PRIVATE_KEY" > "$keytmp" )
+            sudo wg set wgcf private-key "$keytmp"
+            rm -f "$keytmp"
+            # wg endpoint 用解析出的 IP,免得 wg 内部那次解析和 dig 拿到的不一致导致路由失效
+            if [ "$V4_WANT" = "1" ] && [ "$V6_WANT" = "1" ]; then
+              sudo wg set wgcf peer "$PEER_KEY" endpoint "$ep" allowed-ips "0.0.0.0/0, ::/0" persistent-keepalive 15
+            elif [ "$V4_WANT" = "1" ]; then
+              sudo wg set wgcf peer "$PEER_KEY" endpoint "$ep" allowed-ips "0.0.0.0/0" persistent-keepalive 15
+            else
+              sudo wg set wgcf peer "$PEER_KEY" endpoint "$ep" allowed-ips "::/0" persistent-keepalive 15
+            fi
+            sudo ip link set mtu 1280 up dev wgcf
+            [ "$V4_WANT" = "1" ] && sudo ip addr add "$ADDR_V4" dev wgcf  || true
+            [ "$V6_WANT" = "1" ] && sudo ip addr add "$ADDR_V6" dev wgcf  || true
+            [ "$V4_WANT" = "1" ] && sudo ip -4 route replace 0.0.0.0/0 dev wgcf  || true
+            [ "$V6_WANT" = "1" ] && sudo ip -6 route replace ::/0 dev wgcf  || true
+            # MSS 钳制:WARP MTU=1280,让 PMTUD 兜底
+            [ "$V4_WANT" = "1" ] && sudo iptables -t mangle -A OUTPUT -o wgcf -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+            [ "$V6_WANT" = "1" ] && sudo ip6tables -t mangle -A OUTPUT -o wgcf -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+            return 0
+          }
+
           # 接管判定必须重试:WireGuard 首包握手经常超过 10s,单发一次会把已经建好的隧道
-          # 误判成"未接管"(2026-10-08 实测 18 桶里 4 次这种假失败,每次白丢一整趟 dispatch)。
-          # 4 次 x 10s + 3 次 5s 间隔 = 最坏 55s,相对 350min 的墙可忽略。
+          # 误判成"未接管"(2026-10-08 实测 18 桶里 4 次这种假失败)。每个候选 3 次 x 10s,
+          # 上限由候选数决定,最坏 4 端点 x 3 次 = 约 2 分钟/族,相对 350min 的墙可忽略。
           warp_takeover() {
             local fam=$1 body w i
-            for i in 1 2 3 4; do
+            for i in 1 2 3; do
               body=$(curl "-$fam" -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" || true)
               w=$(printf '%s\n' "$body" | sed -n 's/^warp=//p')
               case "$w" in
@@ -304,21 +314,63 @@ jobs:
                   return 0 ;;
               esac
               echo "WARP v$fam 第 $i 次未接管(${w:-curl 无响应}),重试"
-              if [ "$i" -lt 4 ]; then sleep 5; fi
+              if [ "$i" -lt 3 ]; then sleep 3; fi
             done
             return 1
           }
+
+          EP_HOSTS=""
+          for h in $(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null; echo "$EP_IP"); do
+            case "$h" in ""|*[!0-9.]*) continue ;; esac
+            case " $EP_HOSTS " in *" $h "*) continue ;; esac
+            EP_HOSTS="$EP_HOSTS $h"
+          done
+          CANDS=""
+          for h in $EP_HOSTS; do
+            for p in 2408 500 1701 4500; do CANDS="$CANDS $h:$p"; done
+          done
+          # 自检开关: 默认空, 正常路径一个字节都不变。勾上后 192.0.2.1 排第一,
+          # 它不应答, 只有换到真端点才算接管 —— 这条支路否则永远跑不到。
+          if [ "${WARP_BAD_FIRST:-false}" = "true" ]; then
+            CANDS=" 192.0.2.1:2408$CANDS"
+            echo ">>> [自检] 已在候选表最前面塞入不应答地址 192.0.2.1:2408"
+          fi
+          PROBES=""
+          [ "$V4_WANT" = "1" ] && PROBES="$PROBES 4" || true
+          [ "$V6_WANT" = "1" ] && PROBES="$PROBES 6" || true
+          # ---- 出口探针与校验 ----
+          echo "===== IP 出口探测 候选端点:$CANDS 探针:$PROBES ====="
+          if [ "$V6_WANT" = "1" ]; then
+            echo ">>> 基线 eth0 直连(不进隧道)"; curl -4 -sS --max-time 10 "https://www.cloudflare.com/cdn-cgi/trace" 2>&1 | grep -E '^(ip|colo|loc|warp)=' || echo "(v4 直连靶不通)"
+          fi
+          NCAND=$(echo $CANDS | wc -w)
           if [ "$V4_WANT" = "1" ]; then
             echo "--- dash.cloudflare trace (v4) ---"
-            warp_takeover 4 || { echo "::error::WARP v4 未接管,终止"; exit 1; }
           else
-            echo "--- dash.cloudflare trace (v4,应保持 runner 原生出口) ---"
+            echo "--- dash.cloudflare trace (v4,应走的是 runner 原生出口) ---"
             curl -4 -sS --max-time 10 "https://www.cloudflare-cn.com/cdn-cgi/trace" | grep -E '^(ip|warp|colo|loc)=' || echo "(v4 不通)"
           fi
-          if [ "$V6_WANT" = "1" ]; then
-            echo "--- dash.cloudflare trace (v6) ---"
-            echo ">>> 基线 eth0 直连(不进隧道)"; curl -4 -sS --max-time 10 "https://www.cloudflare.com/cdn-cgi/trace" 2>&1 | grep -E '^(ip|colo|loc|warp)=' || echo "(v4 直连靶不通)"
-            warp_takeover 6 || { echo "===== WARP v6 失败现场 ====="; sudo wg show wgcf 2>&1 || true; curl -6 -sS --max-time 8 https://ip.sb 2>&1 | head -3 || true; echo "::error::WARP v6 未接管,终止"; exit 1; }
+          [ "$V6_WANT" = "1" ] && { echo "--- dash.cloudflare trace (v6) ---"; true; }
+          n=0; WARP_OK=0; LASTEP=""
+          for ep in $CANDS; do
+            n=$((n+1)); LASTEP="$ep"
+            warp_build "$ep" || echo "::warning::端点 $ep 建接口失败,换下一个"
+            all=1
+            for fam in $PROBES; do
+              warp_takeover "$fam" || all=0
+            done
+            if [ "$all" = "1" ]; then
+              echo "WARP 接管 OK endpoint=$ep (候选 $n/$NCAND)"
+              WARP_OK=1; break
+            fi
+            echo ">>> 候选 $n/$NCAND 端点 $ep 未接管, 重建接口换下一个"
+          done
+          if [ "$WARP_OK" -ne 1 ]; then
+            echo "===== WARP 未接管 失败现场(最后一个候选 ${LASTEP:-无}) ====="
+            sudo wg show wgcf 2>&1 || true
+            for fam in $PROBES; do curl "-$fam" -sS --max-time 8 https://ip.sb 2>&1 | head -3 || true; done
+            echo "::error::WARP 未接管(试了 $n 个端点),终止"
+            exit 1
           fi
           # wopan 控制面两支都是软校验:panservice.mail.wo.cn 只有 A 记录(实测 type=AAAA 无应答),
           # curl -6 连名字都解不出来,拿它当硬闸等于每次必红。隧道本身的硬闸是上面的 warp_takeover。

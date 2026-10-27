@@ -411,8 +411,15 @@ jobs:
         if: inputs.mode != 'cleanup'
         run: |
           # 永不刷新:带 --yun139-no-refresh;token 由私有仓 launcher 续期,此处 401 即安全失败
-          rclone lsd yun139: --yun139-no-refresh > /dev/null 2>&1 || \
-            rclone lsf yun139: --yun139-no-refresh --max-depth 1 > /dev/null
+          # 但网关形状的 403/5xx 会偶发, 一发就红会把整桶掐死在开工前 => 有界重试。
+          ok=0
+          for i in 1 2 3 4 5; do
+            if ERRTXT=$(rclone lsd yun139: --yun139-no-refresh 2>&1 >/dev/null); then ok=1; break; fi
+            if ERRTXT=$(rclone lsf yun139: --yun139-no-refresh --max-depth 1 2>&1 >/dev/null); then ok=1; break; fi
+            echo "yun139 连通性第 $i 次失败: $(printf '%s' "$ERRTXT" | tr -d '\n' | cut -c1-160 | sed -E 's/(session[_-]?[Kk]ey|access[_-]?token|refresh[_-]?token|authorization|cookie)([=: ]+)[^,;&\"]+/\1\2***/g')"
+            [ "$i" -lt 5 ] && sleep 15
+          done
+          [ "$ok" = "1" ] || { echo "::error::yun139 不可达(5 次重试均未通, 最后一条见上)"; exit 1; }
           echo "yun139 OK (no-refresh)"
 
       - name: Preflight - CDN presigned GET probe

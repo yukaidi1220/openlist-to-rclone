@@ -496,28 +496,42 @@ jobs:
             SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
-            # 删除失败只在"这个对象后来确实 Deleted"时才算解释过: 没删掉的必须让它红。
-            # rclone 的删除本身没有低层重试, 所以 attempt 1 的这条 ERROR 与 attempt 2 的
-            # Deleted 行会同时留在日志里(2026-10-27 实测); 但只要有一条路径最后没删掉,
-            # UNSOLVED_DEL 就非空, Couldn't delete 行照旧进 OTHER 判红。
-            UNSOLVED_DEL=$(grep -a "Couldn't delete: " copy.log \
-              | sed -n 's/.*ERROR : \(.*\): Couldn.t delete:.*/\1/p' | sort -u \
-              | while IFS= read -r p; do grep -aqF -- "$p: Deleted" copy.log || echo "$p"; done || true)
-            DEL_MASK='ZZZ-no-such-line'
-            if [ -z "$UNSOLVED_DEL" ]; then DEL_MASK='Couldn.t delete: '; fi
+            # 删除失败只在"这一条删除后来确实删掉了"时才算解释过, 而且是逐行判定:
+            # 抽不出路径的报错行一律留在 OTHER(宁可红, 不许静默放过)。
+            # - 左边界 ": <路径>: Deleted" 挡住后缀误配(a/b/c 之于 b/c);
+            # - 只认错误行之后的行号, 挡住"先删成功、后来又被传上去"这种时序;
+            # - 用 -xF 整行比对, 只排除被证明解决的那几行, 不用通配符遮蔽一整类。
+            # 背景: rclone 的删除没有逐对象重试, attempt 1 的 Couldn't delete 与 attempt 2
+            # 的 Deleted 会同时留在日志里(2026-10-27 run 40467816460 实测)。
+            : > /tmp/del-resolved.txt
+            grep -an "Couldn't delete: " copy.log | while IFS= read -r hit; do
+              n=${hit%%:*}; line=${hit#*:}
+              # 撇号不能直接写进 ${p%%…}: bash 会把它当引号, 整段就解析不出来了(实测)
+              p=$(printf '%s\n' "$line" | sed -n 's/^.*ERROR : \(.*\): Couldn.t delete:.*$/\1/p')
+              [ -n "$p" ] || continue
+              if tail -n +"$((n + 1))" copy.log | grep -aqF -- ": $p: Deleted"; then
+                printf '%s\n' "$line" >> /tmp/del-resolved.txt
+              fi
+            done || true
+            DEL_ERRS=$(grep -ac "Couldn't delete: " copy.log || true)
+            DEL_OK=$(wc -l < /tmp/del-resolved.txt)
+            DEL_ALL_OK=0
+            if [ "$DEL_ERRS" -gt 0 ] && [ "$DEL_ERRS" -eq "$DEL_OK" ]; then DEL_ALL_OK=1; fi
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
             OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" \
-              | grep -av 'Attempt [0-9]*/[0-9]* failed with' | grep -avE "$DEL_MASK" | head -20 || true)
+              | grep -av 'Attempt [0-9]*/[0-9]* failed with' \
+              | { if [ "$DEL_OK" -gt 0 ]; then grep -avxF -f /tmp/del-resolved.txt; else cat; fi; } \
+              | head -20 || true)
             REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))
-            if [ -n "$OTHER" ] || [ -n "$REAL" ] || [ "$SKIPPED" -eq 0 ]; then
+            if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
               echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
               exit "$rc"
             fi
-            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5,交给 verify 判定)"
+            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
           fi
 
       - name: Copy - 阶段二 全量(不限制大小,size-only 跳过已传)
@@ -565,28 +579,42 @@ jobs:
             SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
-            # 删除失败只在"这个对象后来确实 Deleted"时才算解释过: 没删掉的必须让它红。
-            # rclone 的删除本身没有低层重试, 所以 attempt 1 的这条 ERROR 与 attempt 2 的
-            # Deleted 行会同时留在日志里(2026-10-27 实测); 但只要有一条路径最后没删掉,
-            # UNSOLVED_DEL 就非空, Couldn't delete 行照旧进 OTHER 判红。
-            UNSOLVED_DEL=$(grep -a "Couldn't delete: " copy.log \
-              | sed -n 's/.*ERROR : \(.*\): Couldn.t delete:.*/\1/p' | sort -u \
-              | while IFS= read -r p; do grep -aqF -- "$p: Deleted" copy.log || echo "$p"; done || true)
-            DEL_MASK='ZZZ-no-such-line'
-            if [ -z "$UNSOLVED_DEL" ]; then DEL_MASK='Couldn.t delete: '; fi
+            # 删除失败只在"这一条删除后来确实删掉了"时才算解释过, 而且是逐行判定:
+            # 抽不出路径的报错行一律留在 OTHER(宁可红, 不许静默放过)。
+            # - 左边界 ": <路径>: Deleted" 挡住后缀误配(a/b/c 之于 b/c);
+            # - 只认错误行之后的行号, 挡住"先删成功、后来又被传上去"这种时序;
+            # - 用 -xF 整行比对, 只排除被证明解决的那几行, 不用通配符遮蔽一整类。
+            # 背景: rclone 的删除没有逐对象重试, attempt 1 的 Couldn't delete 与 attempt 2
+            # 的 Deleted 会同时留在日志里(2026-10-27 run 40467816460 实测)。
+            : > /tmp/del-resolved.txt
+            grep -an "Couldn't delete: " copy.log | while IFS= read -r hit; do
+              n=${hit%%:*}; line=${hit#*:}
+              # 撇号不能直接写进 ${p%%…}: bash 会把它当引号, 整段就解析不出来了(实测)
+              p=$(printf '%s\n' "$line" | sed -n 's/^.*ERROR : \(.*\): Couldn.t delete:.*$/\1/p')
+              [ -n "$p" ] || continue
+              if tail -n +"$((n + 1))" copy.log | grep -aqF -- ": $p: Deleted"; then
+                printf '%s\n' "$line" >> /tmp/del-resolved.txt
+              fi
+            done || true
+            DEL_ERRS=$(grep -ac "Couldn't delete: " copy.log || true)
+            DEL_OK=$(wc -l < /tmp/del-resolved.txt)
+            DEL_ALL_OK=0
+            if [ "$DEL_ERRS" -gt 0 ] && [ "$DEL_ERRS" -eq "$DEL_OK" ]; then DEL_ALL_OK=1; fi
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
             OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" \
-              | grep -av 'Attempt [0-9]*/[0-9]* failed with' | grep -avE "$DEL_MASK" | head -20 || true)
+              | grep -av 'Attempt [0-9]*/[0-9]* failed with' \
+              | { if [ "$DEL_OK" -gt 0 ]; then grep -avxF -f /tmp/del-resolved.txt; else cat; fi; } \
+              | head -20 || true)
             REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))
-            if [ -n "$OTHER" ] || [ -n "$REAL" ] || [ "$SKIPPED" -eq 0 ]; then
+            if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
               echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
               exit "$rc"
             fi
-            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5,交给 verify 判定)"
+            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
           fi
 
       - name: Sync - 阶段一 小文件(≤1G)高并发
@@ -631,28 +659,42 @@ jobs:
             SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
-            # 删除失败只在"这个对象后来确实 Deleted"时才算解释过: 没删掉的必须让它红。
-            # rclone 的删除本身没有低层重试, 所以 attempt 1 的这条 ERROR 与 attempt 2 的
-            # Deleted 行会同时留在日志里(2026-10-27 实测); 但只要有一条路径最后没删掉,
-            # UNSOLVED_DEL 就非空, Couldn't delete 行照旧进 OTHER 判红。
-            UNSOLVED_DEL=$(grep -a "Couldn't delete: " copy.log \
-              | sed -n 's/.*ERROR : \(.*\): Couldn.t delete:.*/\1/p' | sort -u \
-              | while IFS= read -r p; do grep -aqF -- "$p: Deleted" copy.log || echo "$p"; done || true)
-            DEL_MASK='ZZZ-no-such-line'
-            if [ -z "$UNSOLVED_DEL" ]; then DEL_MASK='Couldn.t delete: '; fi
+            # 删除失败只在"这一条删除后来确实删掉了"时才算解释过, 而且是逐行判定:
+            # 抽不出路径的报错行一律留在 OTHER(宁可红, 不许静默放过)。
+            # - 左边界 ": <路径>: Deleted" 挡住后缀误配(a/b/c 之于 b/c);
+            # - 只认错误行之后的行号, 挡住"先删成功、后来又被传上去"这种时序;
+            # - 用 -xF 整行比对, 只排除被证明解决的那几行, 不用通配符遮蔽一整类。
+            # 背景: rclone 的删除没有逐对象重试, attempt 1 的 Couldn't delete 与 attempt 2
+            # 的 Deleted 会同时留在日志里(2026-10-27 run 40467816460 实测)。
+            : > /tmp/del-resolved.txt
+            grep -an "Couldn't delete: " copy.log | while IFS= read -r hit; do
+              n=${hit%%:*}; line=${hit#*:}
+              # 撇号不能直接写进 ${p%%…}: bash 会把它当引号, 整段就解析不出来了(实测)
+              p=$(printf '%s\n' "$line" | sed -n 's/^.*ERROR : \(.*\): Couldn.t delete:.*$/\1/p')
+              [ -n "$p" ] || continue
+              if tail -n +"$((n + 1))" copy.log | grep -aqF -- ": $p: Deleted"; then
+                printf '%s\n' "$line" >> /tmp/del-resolved.txt
+              fi
+            done || true
+            DEL_ERRS=$(grep -ac "Couldn't delete: " copy.log || true)
+            DEL_OK=$(wc -l < /tmp/del-resolved.txt)
+            DEL_ALL_OK=0
+            if [ "$DEL_ERRS" -gt 0 ] && [ "$DEL_ERRS" -eq "$DEL_OK" ]; then DEL_ALL_OK=1; fi
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
             OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" \
-              | grep -av 'Attempt [0-9]*/[0-9]* failed with' | grep -avE "$DEL_MASK" | head -20 || true)
+              | grep -av 'Attempt [0-9]*/[0-9]* failed with' \
+              | { if [ "$DEL_OK" -gt 0 ]; then grep -avxF -f /tmp/del-resolved.txt; else cat; fi; } \
+              | head -20 || true)
             REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))
-            if [ -n "$OTHER" ] || [ -n "$REAL" ] || [ "$SKIPPED" -eq 0 ]; then
+            if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
               echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
               exit "$rc"
             fi
-            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5,交给 verify 判定)"
+            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
           fi
 
       - name: Sync - 阶段二 全量(不限制大小,size-only 跳过已传)
@@ -698,28 +740,42 @@ jobs:
             SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
-            # 删除失败只在"这个对象后来确实 Deleted"时才算解释过: 没删掉的必须让它红。
-            # rclone 的删除本身没有低层重试, 所以 attempt 1 的这条 ERROR 与 attempt 2 的
-            # Deleted 行会同时留在日志里(2026-10-27 实测); 但只要有一条路径最后没删掉,
-            # UNSOLVED_DEL 就非空, Couldn't delete 行照旧进 OTHER 判红。
-            UNSOLVED_DEL=$(grep -a "Couldn't delete: " copy.log \
-              | sed -n 's/.*ERROR : \(.*\): Couldn.t delete:.*/\1/p' | sort -u \
-              | while IFS= read -r p; do grep -aqF -- "$p: Deleted" copy.log || echo "$p"; done || true)
-            DEL_MASK='ZZZ-no-such-line'
-            if [ -z "$UNSOLVED_DEL" ]; then DEL_MASK='Couldn.t delete: '; fi
+            # 删除失败只在"这一条删除后来确实删掉了"时才算解释过, 而且是逐行判定:
+            # 抽不出路径的报错行一律留在 OTHER(宁可红, 不许静默放过)。
+            # - 左边界 ": <路径>: Deleted" 挡住后缀误配(a/b/c 之于 b/c);
+            # - 只认错误行之后的行号, 挡住"先删成功、后来又被传上去"这种时序;
+            # - 用 -xF 整行比对, 只排除被证明解决的那几行, 不用通配符遮蔽一整类。
+            # 背景: rclone 的删除没有逐对象重试, attempt 1 的 Couldn't delete 与 attempt 2
+            # 的 Deleted 会同时留在日志里(2026-10-27 run 40467816460 实测)。
+            : > /tmp/del-resolved.txt
+            grep -an "Couldn't delete: " copy.log | while IFS= read -r hit; do
+              n=${hit%%:*}; line=${hit#*:}
+              # 撇号不能直接写进 ${p%%…}: bash 会把它当引号, 整段就解析不出来了(实测)
+              p=$(printf '%s\n' "$line" | sed -n 's/^.*ERROR : \(.*\): Couldn.t delete:.*$/\1/p')
+              [ -n "$p" ] || continue
+              if tail -n +"$((n + 1))" copy.log | grep -aqF -- ": $p: Deleted"; then
+                printf '%s\n' "$line" >> /tmp/del-resolved.txt
+              fi
+            done || true
+            DEL_ERRS=$(grep -ac "Couldn't delete: " copy.log || true)
+            DEL_OK=$(wc -l < /tmp/del-resolved.txt)
+            DEL_ALL_OK=0
+            if [ "$DEL_ERRS" -gt 0 ] && [ "$DEL_ERRS" -eq "$DEL_OK" ]; then DEL_ALL_OK=1; fi
             # || true: a grep that finds nothing exits 1, and under pipefail plus
             # bash -e that would end the step before anything is printed.
             OTHER=$(grep -a 'ERROR : ' copy.log | grep -av 'Failed to copy: ' | grep -av "Can't retry any of the errors" \
-              | grep -av 'Attempt [0-9]*/[0-9]* failed with' | grep -avE "$DEL_MASK" | head -20 || true)
+              | grep -av 'Attempt [0-9]*/[0-9]* failed with' \
+              | { if [ "$DEL_OK" -gt 0 ]; then grep -avxF -f /tmp/del-resolved.txt; else cat; fi; } \
+              | head -20 || true)
             REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))
-            if [ -n "$OTHER" ] || [ -n "$REAL" ] || [ "$SKIPPED" -eq 0 ]; then
+            if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
               echo "::error::rclone exit=$rc(存在不可吸收的错误,这是真实传输失败):"
               printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$' | head -20
               exit "$rc"
             fi
-            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5,交给 verify 判定)"
+            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
           fi
 
       # ---- 校验 ----

@@ -220,7 +220,12 @@ jobs:
             sudo ip -6 route add fc00::/7 dev "$DEV" 2>/dev/null || true
           fi
           sudo ip link add wgcf type wireguard
-          echo "$PRIVATE_KEY" | sudo wg set wgcf private-key /dev/stdin
+                    # ubuntu 26.04 (runner 镜像 ubuntu26,2026-10-27 起 ubuntu-latest 切过去) 上 wg 打不开
+          # stdin 那个设备节点,报 fopen: Permission denied 并 exit 1。改成 0600 临时文件,用完立刻删。
+          WG_KEY_TMP=$(mktemp)
+          ( umask 077; printf '%s\n' "$PRIVATE_KEY" > "$WG_KEY_TMP" )
+          sudo wg set wgcf private-key "$WG_KEY_TMP"
+          rm -f "$WG_KEY_TMP"
           WG_ENDPOINT="${EP_IP}:${EP_PORT}"
           if [ "$V4_WANT" = "1" ] && [ "$V6_WANT" = "1" ]; then
             sudo wg set wgcf peer "$PEER_KEY" endpoint "$WG_ENDPOINT" allowed-ips "0.0.0.0/0, ::/0"

@@ -743,12 +743,18 @@ echo "=== probe done: files_ok=$ok_files files_mismatch=$mism_files files_skip=$
 # 2026-10-27 run 775 就是这一类:50 个文件只比成 8 个(目标端 19 条链签失败),
 # 而它整条 run 报的是绿。半验不当绿,所以下面把 INCONCLUSIVE 做成真判红。
 verified_files=$((probed_files - mism_files - skip_files))
+# 阈值 80%（2026-10-27 用户拍板）。今天实测的健康轮次都在 75%~100%
+# （us-15 86%、电信 us-free 92%、联通 us-free 100%），而虚的是 52% 与 16%，
+# 50% 那条线正好放过了"只验了一半"。抽样不足 10 个文件的小桶仍用 50%:
+# 那种桶比例是噪声(实测 sg-04 只抽到 4 个,比成 3/4=75%),按 80% 会误红。
+verify_pct=80
+[ "$probed_files" -lt 10 ] && verify_pct=50
 inconclusive=0
-if [ "$probed_files" -gt 0 ] && [ $(( verified_files * 100 )) -lt $(( probed_files * 50 )) ]; then
+if [ "$probed_files" -gt 0 ] && [ $(( verified_files * 100 )) -lt $(( probed_files * verify_pct )) ]; then
   inconclusive=1
-  echo "::error::verdict=INCONCLUSIVE 可验证文件仅 $verified_files/$probed_files (<50%),源端不可用 src_empty=$skip_se 敏感词目录=$skip_nm 拉取失败片=$skip_ff;本结论不代表内容一致" >&2
+  echo "::error::verdict=INCONCLUSIVE 可验证文件仅 $verified_files/$probed_files (<${verify_pct}%),源端不可用 src_empty=$skip_se 敏感词目录=$skip_nm 拉取失败片=$skip_ff;本结论不代表内容一致" >&2
 else
-  echo "verdict=OK verified=$verified_files/$probed_files" >&2
+  echo "verdict=OK verified=$verified_files/$probed_files (阈值 ${verify_pct}%)" >&2
 fi
 
 # 保留诊断文件供 artifact(字节核对 sizes.tsv / lsjson.vv.log / 各片 rclone 日志 / result)

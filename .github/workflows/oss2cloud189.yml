@@ -557,8 +557,13 @@ jobs:
               # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
               # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
               { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
+              FLAGGED=1
             fi
-            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
+            if [ "${FLAGGED:-0}" -eq 0 ]; then
+              echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 与终局 Gate 判定)"
+            else
+              echo "::warning::rclone exit=$rc(有不可吸收的错误已记账,红由终局 Gate 步出;预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS)"
+            fi
           fi
 
       - name: Copy - 阶段二 全量(不限制大小,size-only 跳过已传)
@@ -648,8 +653,13 @@ jobs:
               # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
               # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
               { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
+              FLAGGED=1
             fi
-            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
+            if [ "${FLAGGED:-0}" -eq 0 ]; then
+              echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 与终局 Gate 判定)"
+            else
+              echo "::warning::rclone exit=$rc(有不可吸收的错误已记账,红由终局 Gate 步出;预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS)"
+            fi
           fi
 
       - name: Sync - 阶段一 小文件(≤1G)高并发
@@ -736,8 +746,13 @@ jobs:
               # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
               # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
               { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
+              FLAGGED=1
             fi
-            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
+            if [ "${FLAGGED:-0}" -eq 0 ]; then
+              echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 与终局 Gate 判定)"
+            else
+              echo "::warning::rclone exit=$rc(有不可吸收的错误已记账,红由终局 Gate 步出;预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS)"
+            fi
           fi
 
       - name: Sync - 阶段二 全量(不限制大小,size-only 跳过已传)
@@ -825,8 +840,13 @@ jobs:
               # 2026-10-27 run 40540933692 里 3 个对象的删除没自愈,这一步判红连带
               # 跳过了阶段二(>1G 大文件)和两个 verify —— 一整轮什么都没验。
               { echo "rclone exit=$rc(存在不可吸收的错误,明细见本步)"; printf '%s\n%s\n' "$OTHER" "$REAL" | grep -v '^$'; } >> /tmp/verdict-red.txt
+              FLAGGED=1
             fi
-            echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 判定)"
+            if [ "${FLAGGED:-0}" -eq 0 ]; then
+              echo "::warning::rclone exit=$rc(错误全部属于预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS,交给 verify 与终局 Gate 判定)"
+            else
+              echo "::warning::rclone exit=$rc(有不可吸收的错误已记账,红由终局 Gate 步出;预期跳过:空文件=$SKIP_EMPTY 必拒名字=$SKIP_NAME 敏感词名=$SKIP_AUDIT md5黑名单=$SKIP_MD5 删除已自愈=$DEL_OK/$DEL_ERRS)"
+            fi
           fi
 
       # ---- 校验 ----

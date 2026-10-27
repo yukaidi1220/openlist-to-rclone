@@ -524,7 +524,12 @@ jobs:
               echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
             else
               echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
-              exit "$rc"
+              if grep -aqE 'the account has no space left|资源配额不足' copy.log; then
+                # 空间/配额是账号态,一次运行里不会自己松开,继续跑只是让每个文件再撞一遍。
+                exit "$rc"
+              fi
+              # 其余只记账,红由终局的 Gate 步统一判:中途 exit 会把阶段二和两个 verify 全 skip 掉。
+              echo "rclone exit=$rc(copy.log 无 SKIP 行,明细见本步与 copy.log)" >> /tmp/verdict-red.txt
             fi
           fi
       - name: Copy - 阶段二 全量(不限制大小,size-only 跳过已传)
@@ -557,7 +562,12 @@ jobs:
               echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
             else
               echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
-              exit "$rc"
+              if grep -aqE 'the account has no space left|资源配额不足' copy.log; then
+                # 空间/配额是账号态,一次运行里不会自己松开,继续跑只是让每个文件再撞一遍。
+                exit "$rc"
+              fi
+              # 其余只记账,红由终局的 Gate 步统一判:中途 exit 会把阶段二和两个 verify 全 skip 掉。
+              echo "rclone exit=$rc(copy.log 无 SKIP 行,明细见本步与 copy.log)" >> /tmp/verdict-red.txt
             fi
           fi
 
@@ -584,7 +594,12 @@ jobs:
               echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
             else
               echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
-              exit "$rc"
+              if grep -aqE 'the account has no space left|资源配额不足' copy.log; then
+                # 空间/配额是账号态,一次运行里不会自己松开,继续跑只是让每个文件再撞一遍。
+                exit "$rc"
+              fi
+              # 其余只记账,红由终局的 Gate 步统一判:中途 exit 会把阶段二和两个 verify 全 skip 掉。
+              echo "rclone exit=$rc(copy.log 无 SKIP 行,明细见本步与 copy.log)" >> /tmp/verdict-red.txt
             fi
           fi
       - name: Sync - 阶段二 全量(不限制大小,size-only 跳过已传)
@@ -617,7 +632,12 @@ jobs:
               echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
             else
               echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
-              exit "$rc"
+              if grep -aqE 'the account has no space left|资源配额不足' copy.log; then
+                # 空间/配额是账号态,一次运行里不会自己松开,继续跑只是让每个文件再撞一遍。
+                exit "$rc"
+              fi
+              # 其余只记账,红由终局的 Gate 步统一判:中途 exit 会把阶段二和两个 verify 全 skip 掉。
+              echo "rclone exit=$rc(copy.log 无 SKIP 行,明细见本步与 copy.log)" >> /tmp/verdict-red.txt
             fi
           fi
 
@@ -664,7 +684,10 @@ jobs:
           bash bin/skipdiff.sh "$SKIP_SRC" check.log "$rc" | tee -a /tmp/skipdiff.out
           sdc=${PIPESTATUS[0]}
           head -1 /tmp/skipdiff.out >> "$GITHUB_STEP_SUMMARY"
-          if [ "$sdc" -ne 0 ]; then exit "$sdc"; fi
+          if [ "$sdc" -ne 0 ]; then
+            # 只记账不 exit:下一步的分片抽样是另一条独立判据,中途掐断就只剩半个验证。
+            echo "one-way check rc=$sdc(缺失/无法解释的明细见本步 skipdiff 输出)" >> /tmp/verdict-red.txt
+          fi
 
       - name: Verify - random sample content (分片抽样,不再整文件下载)
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
@@ -697,6 +720,20 @@ jobs:
           grep -a "probe done\|lsjson 失败\|阶段" sample.log 2>/dev/null | tail -20 | tee -a sample.log || true
           echo "WORKDIR artifact 路径: $WORKDIR" | tee -a sample.log
           exit $rc
+
+      # 终局判决。传输步与 one-way check 的红都只记账到这里,不再中途 exit,
+      # 这样阶段二和两个 verify 能在同一轮里全部跑完(2026-10-27 run 40540933692 的教训:
+      # 电信阶段一 exit 后,阶段二+两个 verify 全被 skip)。
+      # !cancelled() 是为了抽样步自己判红时,这里仍能把传输记账一起报出来。
+      - name: Gate - 终局判决(传输与校验记账汇总)
+        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify') && !cancelled() }}
+        run: |
+          if [ -s /tmp/verdict-red.txt ]; then
+            echo "::error::本轮有记账的红(每条对应它自己的步骤,明细在那一步的日志里):"
+            head -60 /tmp/verdict-red.txt
+            exit 1
+          fi
+          echo "终局判决:传输与 one-way check 没有记账红"
 
       - name: Upload logs (diagnostics)
         if: always()

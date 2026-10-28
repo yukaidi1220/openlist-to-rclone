@@ -47,6 +47,10 @@ on:
         type: boolean
         required: false
         default: false
+      writeback_conf:
+        description: "token 回写目标(私有仓路径)。launcher 传 targets/accounts/wopan-<acct>.conf;留空 = 根目录 oss2wopan.conf。仅 no_refresh=false 时生效"
+        required: false
+        default: "oss2wopan.conf"
       warp_mode:
         description: "WARP 出口模式(仅 copy/sync 生效)。v6-only=仅 v6 进隧道(默认:与 RCLONE_CONNECT_FAMILY=prefer-v4 配对,原生 v4 优先出网,v4 不通才借 WARP 的 v6);bare=不装 WARP(旧默认);v4-only=仅 v4 进隧道;dual=双栈都进隧道"
         type: choice
@@ -751,7 +755,7 @@ jobs:
           # 回写目标 = 根目录 oss2wopan.conf(launcher 每轮固定从它继承,链条不断;
           # 根目录成为唯一权威配置;master 组全局串行,无并发回写竞态)。
           # 仍只在「远端最新内容」上替换 token 行,绝不整份覆盖。
-          CONF_PATH="oss2wopan.conf"
+          CONF_PATH="${{ inputs.writeback_conf }}"; CONF_PATH="${CONF_PATH:-oss2wopan.conf}"
           if [ "${{ inputs.no_refresh }}" = "true" ]; then
             echo "no_refresh 模式:本 run 未持有 refresh_token 也未刷新,跳过回写"
             exit 0

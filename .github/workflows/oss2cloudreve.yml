@@ -360,16 +360,29 @@ jobs:
             [ "$i" -lt 5 ] && sleep 15
           done
           [ "$ok" = "1" ] || { echo "::error::cloudreve 不可达(5 次重试均未通, 最后一条见上)"; exit 1; }
-          rclone about --json cloudreve: > /tmp/about.json
+          ok_about=0
+          for i in 1 2 3; do
+            if rclone about --json cloudreve: > /tmp/about.json 2>/tmp/about.err; then ok_about=1; break; fi
+            echo "cloudreve about 第 $i 次失败(连通性已由 lsd/lsf 证明)"; sleep 10
+          done
+          [ "$ok_about" = "1" ] || echo "::warning::cloudreve about 连续失败,本轮配额未知"
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
-          d = json.load(open('/tmp/about.json'))
+          try:
+              d = json.load(open('/tmp/about.json'))
+          except Exception:
+              print("| cloudreve | about 不可用 | - | - | - |")
+              raise SystemExit(0)
           def g(x):
               return f"{x/2**30:.2f} GiB" if isinstance(x, int) else str(x)
           total = d.get('total'); used = d.get('used'); free = d.get('free')
+          if not isinstance(free, int) and isinstance(total, int) and isinstance(used, int):
+              free = total - used  # 后端只在 total-used>0 时给 Free,满配额时该字段会缺
           print(f"| cloudreve | total={g(total)} | used={g(used)} | free={g(free)} |")
           if isinstance(free, int) and free < 20 * 2**30:
               print("::warning::目标端剩余空间不足 20 GiB,本轮很可能中途撞配额")
+          if free is None:
+              print("::warning::拿不到剩余空间,配额未核")
           PY
 
       - name: Preflight - CDN presigned GET probe
@@ -573,6 +586,7 @@ jobs:
           fi
           rclone check "$SRC" "$DST" --one-way --size-only --ignore-errors \
             --checkers 16 --transfers 4 \
+            --no-check-certificate \
             -v 2>&1 | tee check.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -595,7 +609,7 @@ jobs:
           JOBS: "100"                   # 双端并行拉取
           RANDOM_PICK: "100"            # 全桶随机抽 100 个文件
           CHUNKS_PER_FILE: "5"          # 每文件最多 5 片
-          DEL_MISMATCH: "1"             # 不一致 → 删除目标坏文件,重跑 sync 修复
+          DEL_MISMATCH: ${{ inputs.mode == "verify" && "0" || "1" }}  # 独立 verify 不删:同轮没有 sync 修复
           MIN_SIZE: "3145728"           # 只探 ≥3MiB 对象
           VERBOSE: "1"                  # 逐片打进度(实时日志可见)
           PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件

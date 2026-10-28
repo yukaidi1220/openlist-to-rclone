@@ -1,0 +1,472 @@
+# OSS → Cloudreve 迁移执行器(公开仓运行,凭据经私有仓 conf 注入)
+#
+# 与 oss2cloud189.yml / oss2yun139.yml / oss2wopan.yml 同架构,目标端换成 Cloudreve:
+#   - 源桶:签名 API 做列目录/元数据,对象内容经 CDN 预签名下载
+#   - 目标端:cloudreve 直传;落盘 <dst_base>/<原 key>(launcher 默认 s3-bak/<源桶名>)
+#   - 令牌:cloudreve 后端没有 no_refresh 选项,续期并发安全(站点每次发新的一对,
+#     旧 refresh_token 到期前仍可用),所以这里不需要"一方刷新其余静态"的串行组。
+#     本 CI 不主动刷新、也不回写仓库;开 remote 时后端自己续,写到 runner 的 /tmp 副本里。
+#
+# cloudreve 的既有取舍(见 rclone docs/content/cloudreve.md):
+#   - API 不返回内容哈希,check 只能比 size+mtime;本文件沿用 size-only(与服务端不保证
+#     秒级以下的 mtime 精度相匹配),内容一致性由分片抽样兜底
+#   - 名字里的 \ " * : < > ? | 与 256 字节以上的名字,后端会转成全角存储并映射回来
+#   - 零字节文件也走上传会话,保留 mtime
+#   - 删除默认进回收站(skip_soft_delete=false),回收站仍占配额;sync 的删除也会进回收站
+#   - 同名覆盖走上传;服务端不提供 move/copy,所以没有服务端复制可用
+#
+# 配置:路径由 config_file 输入指定(launcher 每轮生成时间戳配置于私有仓
+#       oss2cloudreve-configs/ 并随 dispatch 传入,同名 .dstbase 存目标基路径)。
+
+name: OSS2cloudreve migrate
+run-name: OSS2cloudreve migrate (${{ inputs.src_bucket }} | ${{ inputs.cdn_base }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式"
+        type: choice
+        required: true
+        default: "dry-run"
+        options:
+          - dry-run
+          - copy
+          - sync
+          - verify
+      path:
+        description: "迁移路径前缀(留空=整个目标基路径,相对 <dst_base>)。须为目录/前缀作用域,勿传单个文件"
+        required: false
+        default: ""
+      src_bucket:
+        description: "源桶名(launcher 自动填入,用于并发分组与 dstbase 缺省;手动直触可空)"
+        required: false
+        default: ""
+      config_file:
+        description: "私有仓配置文件路径(相对仓库根。launcher 生成的时间戳配置在 oss2cloudreve-configs/ 下;留默认用根目录 oss2cloudreve.conf)"
+        required: false
+        default: "oss2cloudreve.conf"
+      cdn_base:
+        description: "源桶 CDN 下载域名(仅用于 run 标题辨识;实际下载域在 conf 的 download_host)"
+        required: false
+        default: ""
+      dump_trace:
+        description: "本轮给 rclone 加 --dump trace:打印每次请求的 DNS/拨号/TLS 与 GotConn 的本地->远端地址(reused 也打)。不打请求头故不会漏 token,但每请求约 8 行,只在复现那一轮勾"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  # 目标端续期并发安全,不存在 token 互踢:全部 run 按 桶+路径 分组即可并行
+  #(同桶同路径互斥,不同路径/不同桶可并行)。
+  group: oss2cloudreve-${{ inputs.src_bucket }}-${{ inputs.path }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      RCLONE_CONFIG: /tmp/oss2cloudreve.conf
+      PYTHON: python3
+      # 分阶段并发(与另三条链同形):阶段一先吃掉小文件,阶段二再补大文件。
+      CLOUDREVE_UPLOAD_CONCURRENCY: '16'        # 阶段二(全量)单文件分片并发
+      CLOUDREVE_UPLOAD_CONCURRENCY_STAGE1: '4'  # 阶段一(≤1G)单文件分片并发
+      CLOUDREVE_MT_CUTOFF: 256Mi                # ≥此大小走 源端 Range 并行下载 + 云端分片上传
+      CLOUDREVE_MT_STREAMS: '32'                # 源端并行 Range 数(stage2)
+      TZ: UTC
+    steps:
+      - name: 检出仓库(含 bin/chunk-probe.sh)
+        uses: actions/checkout@v6
+
+      - name: Fetch config from private repo
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          CONF_PATH: ${{ inputs.config_file }}
+        run: |
+          umask 077
+          CONF_PATH="${CONF_PATH:-oss2cloudreve.conf}"
+          # dstbase 与 conf 同目录同名(仅后缀不同)
+          DSTBASE_PATH="${CONF_PATH%.conf}.dstbase"
+          echo "config: $CONF_PATH / dstbase: $DSTBASE_PATH"
+          for i in {1..3}; do
+            if curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/$CONF_PATH" \
+              -o "$RCLONE_CONFIG" \
+              && curl -fsSL --connect-timeout 15 --max-time 30 --retry 2 --retry-delay 5 \
+              -H "Authorization: token $RCLONE_PAT" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/$DSTBASE_PATH" \
+              -o /tmp/dstbase; then
+              echo "配置获取成功"
+              break
+            fi
+            echo "获取失败,重试 $i/3..."
+            sleep $((i * 5))
+          done
+          [ -f "$RCLONE_CONFIG" ] || { echo "::error::无法获取 $CONF_PATH"; exit 1; }
+          [ -f /tmp/dstbase ] || { echo "::error::无法获取 $DSTBASE_PATH"; exit 1; }
+
+      - name: Parse config & set paths
+        env:
+          PATH_PREFIX: ${{ inputs.path }}
+        run: |
+          SRC_BUCKET=$(grep '^bucket' "$RCLONE_CONFIG" | tr -s ' ' | cut -d' ' -f3 | head -1)
+          [ -n "$SRC_BUCKET" ] || { echo "::error::conf 缺少 src.bucket"; exit 1; }
+          # 鉴权硬闸:cloudreve 段至少要有一条可用凭据,否则每个文件都会 401 后才失败。
+          awk '/^\[cloudreve\]/{f=1;next} /^\[/{f=0} f' "$RCLONE_CONFIG" | grep -qE '^url[ \t]*=[ \t]*https?://' \
+            || { echo "::error::conf [cloudreve] 缺少 url(须带 scheme)"; exit 1; }
+          awk '/^\[cloudreve\]/{f=1;next} /^\[/{f=0} f' "$RCLONE_CONFIG" | grep -qE '^(access_token|password)[ \t]*=[ \t]*[^ ]' \
+            || { echo "::error::conf [cloudreve] 既没有 access_token 也没有 password"; exit 1; }
+          DST_BASE=$(cat /tmp/dstbase)
+          PARAM_PREFIX="$PATH_PREFIX"
+          if [ -n "$PARAM_PREFIX" ]; then
+            SRC="src:$SRC_BUCKET/$PARAM_PREFIX"
+            DST="cloudreve:$DST_BASE/$PARAM_PREFIX"
+          else
+            SRC="src:$SRC_BUCKET"
+            DST="cloudreve:$DST_BASE"
+          fi
+          { echo "set -a"; echo "SRC=$SRC"; echo "DST=$DST"; echo "set +a"; } > /tmp/paths.src
+          echo "== paths.src =="
+          cat /tmp/paths.src
+          echo "== SRC token check =="
+          grep -c '^SRC=src' /tmp/paths.src
+
+      - name: "Install rclone (custom build: s3 download_host + cloudreve)"
+        run: |
+          URL="https://github.com/yukaidi1220/rclone/releases/latest/download/rclone-cdn-linux-amd64"
+          curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 5 \
+            -o /tmp/rclone "$URL" || { echo "::error::无法下载 rclone release"; exit 1; }
+          chmod +x /tmp/rclone
+          sudo mv /tmp/rclone /usr/local/bin/rclone
+          rclone version | head -2
+          # --dump trace 只打连接级事件(DNS、拨号、TLS、GotConn 的本地->远端地址、是否复用),
+          # 不打请求头,所以不会把凭据写进日志。代价是每请求约 8 行,默认关。
+          if [ "${{ inputs.dump_trace }}" = "true" ]; then
+            echo "RCLONE_DUMP=trace" >> "$GITHUB_ENV"
+            echo ">>> 本轮连接级 trace 已开:在 copy.log 里搜 \"Got connection\" 即见 local -> remote 与 reused"
+          else
+            echo ">>> 本轮连接级 trace 未开(dump_trace=false)"
+          fi
+
+      # ---- 预检 ----
+      - name: Preflight - source bucket scoped
+        run: |
+          . /tmp/paths.src
+          rclone size "$SRC" --json --no-check-certificate > /tmp/size.json
+          jq -r '"objects=\(.count // .files) bytes=\(.bytes)"' /tmp/size.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Preflight - cloudreve connectivity and space
+        run: |
+          # 一次开 remote 会顺带完成续期/登录(token 失效时)。网关形状的 403/5xx 会偶发,
+          # 一发就红会把整桶掐死在开工前 => 有界重试。
+          ok=0
+          for i in 1 2 3 4 5; do
+            if ERRTXT=$(rclone lsd cloudreve: 2>&1 >/dev/null); then ok=1; break; fi
+            if ERRTXT=$(rclone lsf cloudreve: --max-depth 1 2>&1 >/dev/null); then ok=1; break; fi
+            echo "cloudreve 连通性第 $i 次失败: $(printf '%s' "$ERRTXT" | tr -d '\n' | cut -c1-160 | sed -E 's/(access[_-]?token|refresh[_-]?token|password|authorization|cookie)([=: ]+)[^,;&\"]+/\1\2***/g')"
+            [ "$i" -lt 5 ] && sleep 15
+          done
+          [ "$ok" = "1" ] || { echo "::error::cloudreve 不可达(5 次重试均未通, 最后一条见上)"; exit 1; }
+          rclone about --json cloudreve: > /tmp/about.json
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open('/tmp/about.json'))
+          def g(x):
+              return f"{x/2**30:.2f} GiB" if isinstance(x, int) else str(x)
+          total = d.get('total'); used = d.get('used'); free = d.get('free')
+          print(f"| cloudreve | total={g(total)} | used={g(used)} | free={g(free)} |")
+          if isinstance(free, int) and free < 20 * 2**30:
+              print("::warning::目标端剩余空间不足 20 GiB,本轮很可能中途撞配额")
+          PY
+
+      - name: Preflight - CDN presigned GET probe
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          # 单文件源:rclone 对单文件路径禁用 filter(-R/--files-only/--min-size),lsjson 会
+          # CRITICAL "can't limit to single files"。单文件 CDN 预检不适用,内容完整性由 copy/verify 兜底。
+          if rclone lsjson "$SRC" --no-check-certificate --no-mimetype --no-modtime 2>/dev/null \
+            | jq -e 'length==1 and .[0].IsDir==false' >/dev/null 2>&1; then
+            echo "::warning::SRC 为单文件,跳过 CDN presigned probe(内容由 copy/verify 校验)"
+            exit 0
+          fi
+          probe=$(rclone lsjson "$SRC" -R --files-only --min-size 1M --max-size 8Mi \
+                    --no-mimetype --no-modtime \
+                    | jq -r '[ .[] | select(.Size != null) ] | sort_by(.Size) | .[0].Path // empty')
+          if [ -z "$probe" ]; then
+            echo "::warning::范围内没有小文件,跳过 CDN 探测"
+            exit 0
+          fi
+          expect=$(rclone lsjson "$SRC/$probe" --no-check-certificate --no-mimetype --no-modtime | jq -r '.[0].Size')
+          case "$expect" in ''|*[!0-9]*) echo "::warning::源端列表没给这个对象的字节数(Size=$expect),跳过 CDN 探测(内容由 copy/verify 校验)"; exit 0;; esac
+          echo "probing: $probe ($expect bytes)"
+          rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
+          got=$(rclone copy "$SRC/$probe" /tmp/vprobe --no-check-certificate \
+            --transfers 1 --checkers 2 --retries 3 --low-level-retries 3 \
+            --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
+            --stats 0 -q 2>/tmp/cat.err || true; \
+            probe_file=$(find /tmp/vprobe -type f | head -1); \
+            [ -n "$probe_file" ] && stat -c%s "$probe_file" || echo -1)
+          if [ -s /tmp/cat.err ]; then echo "--- cat stderr ---"; cat /tmp/cat.err; fi
+          echo "got: $got bytes"
+          if [ "$got" -ne "$expect" ]; then
+            echo "首次不符,视为 IP 脏瞬态失败,等待 20s(404 边缘缓存 TTL)后重试一次"
+            sleep 20
+            rm -rf /tmp/vprobe; mkdir -p /tmp/vprobe
+            got=$(rclone copy "$SRC/$probe" /tmp/vprobe --no-check-certificate \
+              --transfers 1 --checkers 2 --retries 3 --low-level-retries 3 \
+              --multi-thread-cutoff 64Mi --multi-thread-streams 8 \
+              --stats 0 -q 2>/tmp/cat.err || true; \
+              probe_file=$(find /tmp/vprobe -type f | head -1); \
+              [ -n "$probe_file" ] && stat -c%s "$probe_file" || echo -1)
+            if [ -s /tmp/cat.err ]; then echo "--- cat stderr (retry) ---"; cat /tmp/cat.err; fi
+            echo "got(retry): $got bytes"
+          fi
+          [ "$got" -eq "$expect" ] || { echo "::error::CDN 下载字节数不符"; exit 1; }
+          echo "CDN presigned GET OK"
+
+      - name: Preflight - 源必须是目录(progress copy/sync 拒绝单文件)
+        if: ${{ inputs.mode == 'dry-run' || inputs.mode == 'copy' || inputs.mode == 'sync' }}
+        run: |
+          . /tmp/paths.src
+          # rclone copy/sync 是目录→目录语义:SRC 若解析为单文件,会把 DST 当作目录静默建一个
+          # 与文件同名的目录。单文件精确复制需用 copyto,不在本工具的目录迁移能力内。
+          if rclone lsjson "$SRC" --no-check-certificate --no-mimetype --no-modtime 2>/dev/null \
+            | jq -e 'length==1 and .[0].IsDir==false' >/dev/null 2>&1; then
+            echo "::error::SRC 解析为单文件($SRC)。copy/sync 为目录→目录语义,请把 path 作用到目录/前缀而非单个文件"
+            exit 1
+          fi
+          echo "源为目录,OK"
+
+      # ---- 复制 ----
+      - name: Copy (dry-run)
+        if: inputs.mode == 'dry-run'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          rclone copy "$SRC" "$DST" --dry-run \
+            --size-only --ignore-checksum --no-check-certificate \
+            --transfers 4 --checkers 8 \
+            --stats 60s -v 2>&1 | tee copy.log
+          rclone sync "$SRC" "$DST" --dry-run \
+            --size-only --ignore-checksum --no-check-certificate \
+            --transfers 4 --checkers 8 \
+            --stats 60s -v 2>&1 | tee -a copy.log
+
+      - name: Copy - 阶段一 小文件(≤1G)高并发
+        if: inputs.mode == 'copy'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          set +e
+          rclone copy "$SRC" "$DST" \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --max-size 1G --transfers 15 --checkers 8 \
+            --cloudreve-upload-concurrency "$CLOUDREVE_UPLOAD_CONCURRENCY_STAGE1" \
+            --multi-thread-cutoff "$CLOUDREVE_MT_CUTOFF" \
+            --retries 2 --low-level-retries 3 \
+            --stats 30s -vv 2>&1 | tee copy.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if grep -aq 'SKIP ' copy.log; then
+              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
+            else
+              echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
+              echo "rclone exit=$rc(copy.log 无 SKIP 行,明细见本步与 copy.log)" >> /tmp/verdict-red.txt
+            fi
+          fi
+
+      - name: Copy - 阶段二 全量(不限制大小,size-only 跳过已传)
+        if: inputs.mode == 'copy'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          set +e
+          : > /tmp/resmon.log
+          chmod +x bin/resmon.sh
+          ./bin/resmon.sh &
+          SAMPLER_PID=$!
+          rclone copy "$SRC" "$DST" \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --transfers 4 --checkers 4 \
+            --cloudreve-upload-concurrency "$CLOUDREVE_UPLOAD_CONCURRENCY" \
+            --multi-thread-cutoff "$CLOUDREVE_MT_CUTOFF" \
+            --multi-thread-streams "$CLOUDREVE_MT_STREAMS" \
+            --retries 2 --low-level-retries 3 \
+            --stats 30s -vv 2>&1 | tee -a copy.log
+          rc=${PIPESTATUS[0]}
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if grep -aq 'SKIP ' copy.log; then
+              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
+            else
+              echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
+              echo "rclone exit=$rc(copy.log 无 SKIP 行,明细见本步与 copy.log)" >> /tmp/verdict-red.txt
+            fi
+          fi
+
+      - name: Sync - 阶段一 小文件(≤1G)高并发
+        if: inputs.mode == 'sync'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          set +e
+          rclone sync "$SRC" "$DST" \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --max-size 1G --transfers 15 --checkers 8 \
+            --cloudreve-upload-concurrency "$CLOUDREVE_UPLOAD_CONCURRENCY_STAGE1" \
+            --multi-thread-cutoff "$CLOUDREVE_MT_CUTOFF" \
+            --retries 2 --low-level-retries 3 \
+            --stats 30s -vv 2>&1 | tee copy.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if grep -aq 'SKIP ' copy.log; then
+              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
+            else
+              echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
+              echo "rclone exit=$rc(copy.log 无 SKIP 行,明细见本步与 copy.log)" >> /tmp/verdict-red.txt
+            fi
+          fi
+
+      - name: Sync - 阶段二 全量(不限制大小,size-only 跳过已传)
+        if: inputs.mode == 'sync'
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          set +e
+          : > /tmp/resmon.log
+          chmod +x bin/resmon.sh
+          ./bin/resmon.sh &
+          SAMPLER_PID=$!
+          rclone sync "$SRC" "$DST" \
+            --size-only --ignore-checksum --no-check-certificate --ignore-errors \
+            --transfers 4 --checkers 4 \
+            --cloudreve-upload-concurrency "$CLOUDREVE_UPLOAD_CONCURRENCY" \
+            --multi-thread-cutoff "$CLOUDREVE_MT_CUTOFF" \
+            --multi-thread-streams "$CLOUDREVE_MT_STREAMS" \
+            --retries 2 --low-level-retries 3 \
+            --stats 30s -vv 2>&1 | tee -a copy.log
+          rc=${PIPESTATUS[0]}
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if grep -aq 'SKIP ' copy.log; then
+              echo "::warning::rclone exit=$rc(有 SKIP 行,交给 verify 判定;详见 copy.log)"
+            else
+              echo "::error::rclone exit=$rc(copy.log 无 SKIP 行,这是真实传输失败)"
+              echo "rclone exit=$rc(copy.log 无 SKIP 行,明细见本步与 copy.log)" >> /tmp/verdict-red.txt
+            fi
+          fi
+
+      # ---- 校验 ----
+      - name: Verify - full one-way check (size, cloudreve 无内容哈希→size-only)
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          set +e
+          # 名单不喂 --exclude-from(glob 语义会误排真文件)。check 照常全跑,
+          # 再由 bin/skipdiff.sh 把"目标缺失集合"与"明确不传集合"做纯字符串相减。
+          # cloudreve 这条链没有"明确不传"的类别(无会员单文件上限、无敏感词目录),
+          # 所以独立 verify 模式给一个空名单:任何缺失都是真缺失。
+          SKIP_SRC=copy.log
+          if [ ! -f copy.log ]; then
+            : > /tmp/expected-skip.txt
+            export EXPECTED_SKIP=/tmp/expected-skip.txt
+            SKIP_SRC=-
+          fi
+          rclone check "$SRC" "$DST" --one-way --size-only --ignore-errors \
+            --checkers 16 --transfers 4 \
+            -v 2>&1 | tee check.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "full one-way size check done (rc=$rc)" >> "$GITHUB_STEP_SUMMARY"
+          chmod +x bin/skipdiff.sh
+          set +e
+          bash bin/skipdiff.sh "$SKIP_SRC" check.log "$rc" | tee -a /tmp/skipdiff.out
+          sdc=${PIPESTATUS[0]}
+          set -e
+          head -1 /tmp/skipdiff.out >> "$GITHUB_STEP_SUMMARY"
+          if [ "$sdc" -ne 0 ]; then
+            echo "one-way check rc=$sdc(缺失/无法解释的明细见本步 skipdiff 输出)" >> /tmp/verdict-red.txt
+          fi
+
+      - name: Verify - random sample content (分片抽样,不再整文件下载)
+        if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
+        env:
+          RCLONE: rclone
+          SLICE: "3145728"              # 3MiB 片
+          JOBS: "100"                   # 双端并行拉取
+          RANDOM_PICK: "100"            # 全桶随机抽 100 个文件
+          CHUNKS_PER_FILE: "5"          # 每文件最多 5 片
+          DEL_MISMATCH: "1"             # 不一致 → 删除目标坏文件,重跑 sync 修复
+          MIN_SIZE: "3145728"           # 只探 ≥3MiB 对象
+          VERBOSE: "1"                  # 逐片打进度(实时日志可见)
+          PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件
+          FETCH_MODE: "rclone"          # cloudreve 无 publiclink,固定走 rclone cat
+        run: |
+          . /tmp/paths.src
+          set -o pipefail
+          chmod +x bin/chunk-probe.sh
+          export RCLONE_CONFIG PYTHON
+          if bin/chunk-probe.sh "$SRC" "$DST" 2>&1 | tee sample.log; then
+            echo "random sample content PASSED" | tee -a sample.log
+            rc=0
+          else
+            rc=$?
+            echo "random sample content FAILED(chunk-probe exit=$rc)" | tee -a sample.log
+          fi
+          echo "--- 探针汇总(探针尾部 summary 行) ---" | tee -a sample.log
+          grep -a "probe done\|lsjson 失败\|阶段" sample.log 2>/dev/null | tail -20 | tee -a sample.log || true
+          echo "WORKDIR artifact 路径: $WORKDIR" | tee -a sample.log
+          exit $rc
+
+      # 终局判决。传输步与 one-way check 的红都只记账到这里,不再中途 exit。
+      - name: Gate - 终局判决(传输与校验记账汇总)
+        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify') && !cancelled() }}
+        run: |
+          if [ -s /tmp/verdict-red.txt ]; then
+            echo "::error::本轮有记账的红(每条对应它自己的步骤,明细在那一步的日志里):"
+            head -60 /tmp/verdict-red.txt
+            exit 1
+          fi
+          echo "终局判决:传输与 one-way check 没有记账红"
+
+      - name: Upload logs (diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss2cloudreve-diag-${{ github.run_number }}
+          path: |
+            copy.log
+            check.log
+            sample.log
+            /tmp/resmon.log
+            /tmp/probe-artifact/diag/
+          if-no-files-found: ignore
+
+      - name: Upload probe chunks (大体积分片本体,取证才拉)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss2cloudreve-chunks-${{ github.run_number }}
+          path: |
+            /tmp/probe-artifact/chunks/
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Remove fetched config
+        if: always()
+        run: |
+          if [ -f "$RCLONE_CONFIG" ]; then shred -u "$RCLONE_CONFIG" || rm -f "$RCLONE_CONFIG"; fi

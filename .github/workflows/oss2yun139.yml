@@ -698,16 +698,16 @@ jobs:
         if: ${{ inputs.mode == 'copy' || inputs.mode == 'sync' || inputs.mode == 'verify' }}
         env:
           RCLONE: rclone
-          SLICE: "2097152"              # 2MiB 片
+          SLICE: "3145728"              # 3MiB 片
           JOBS: "100"                   # 双端并行拉取
-          RANDOM_PICK: "50"             # 全桶随机抽 50 个文件
-          CHUNKS_PER_FILE: "10"         # 每文件 10 片
+          RANDOM_PICK: "100"            # 全桶随机抽 100 个文件
+          CHUNKS_PER_FILE: "5"          # 每文件最多 5 片
           DEL_MISMATCH: "1"             # 不一致 → 删除目标坏文件,重跑 sync 修复
-          MIN_SIZE: "1048576"           # 只探 ≥1MiB 对象
+          MIN_SIZE: "3145728"           # 只探 ≥3MiB 对象
           VERBOSE: "1"                  # 逐片打进度(实时日志可见)
           PROBE_MAX_SIZE: ${{ env.YUN139_CAP_BYTES }}   # 跟随探测到的会员单文件上限;探不到就留空=不设上限,全量入池
                                         # (必须带 i 二进单位),避免抽到被后端动态会员 SKIP(目标端不存在)的超限文件产生 DSTFAIL warning
-          PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件(固定种子会让多轮只验同 50 个)
+          PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件(固定种子会让多轮只验同 100 个)
           FETCH_MODE: ${{ inputs.fetch_mode }}  # rclone|aria2, 见 bin/chunk-probe.sh 的阶段2
         run: |
           . /tmp/paths.src

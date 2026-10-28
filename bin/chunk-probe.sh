@@ -93,7 +93,7 @@ CURL_RETRY="${CURL_RETRY:-2}"
 ARIA2_TRIES="${ARIA2_TRIES:-2}"
 CHUNK_TIMEOUT="${CHUNK_TIMEOUT:-20}"          # aria2 单连接静默超时(秒)
 CHUNK_CONNECT_TIMEOUT="${CHUNK_CONNECT_TIMEOUT:-10}"
-STAGE2_DEADLINE="${STAGE2_DEADLINE:-900}"     # 整个取数阶段的墙钟上限(秒)
+STAGE2_DEADLINE="${STAGE2_DEADLINE:-1500}"    # 整个取数阶段的墙钟上限(秒); 抽样上限上调后请求最多 1000 条, 900 不够(用户拍板 1500)
 # rclone 取数臂的硬上限。2026-10-26 三次生产 run 实测:单个 Range 读挂死后 rclone 既不退出也不报错,
 # fetch_one 的 wait 与 run_pool 收尾的 wait 双双无限等,分别被拖 3403/3273/6280 秒只能人工取消。
 # aria2/curl 两个臂本来就有 timeout 包着,只有默认臂(rclone)漏了。

@@ -609,7 +609,7 @@ jobs:
           JOBS: "100"                   # 双端并行拉取
           RANDOM_PICK: "100"            # 全桶随机抽 100 个文件
           CHUNKS_PER_FILE: "5"          # 每文件最多 5 片
-          DEL_MISMATCH: ${{ inputs.mode == "verify" && "0" || "1" }}  # 独立 verify 不删:同轮没有 sync 修复
+          DEL_MISMATCH: ${{ inputs.mode == 'verify' && '0' || '1' }}  # 独立 verify 不删:同轮没有 sync 修复
           MIN_SIZE: "3145728"           # 只探 ≥3MiB 对象
           VERBOSE: "1"                  # 逐片打进度(实时日志可见)
           PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件

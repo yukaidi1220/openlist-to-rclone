@@ -55,6 +55,29 @@ on:
         type: boolean
         required: false
         default: false
+      warp_probe_bad_first:
+        description: "自检用: 往 WARP 端点候选表最前面塞一个必然不应答的地址(192.0.2.1, TEST-NET-1), 用来证明换端点这条支路真的会执行。默认 false 不塞, 正常路径行为不变; 勾上这一发在 WARP 步多花约 36 秒。"
+        type: boolean
+        required: false
+        default: false
+      warp_mode:
+        description: "WARP 出口模式(仅 copy/sync 生效)。bare=不装 WARP(默认);v6-only=仅 v6 进隧道;v4-only=仅 v4 进隧道;dual=双栈都进隧道"
+        type: choice
+        required: false
+        default: "bare"
+        options:
+          - bare
+          - v6-only
+          - v4-only
+          - dual
+      fetch_mode:
+        description: "抽样取数方式。rclone=每片一个 rclone cat(默认);curl=每文件签一次直链、每片恰好一条 curl -r,单片有 --max-time 硬上限。仅 verify 抽样步生效"
+        type: choice
+        required: false
+        default: "rclone"
+        options:
+          - rclone
+          - curl
 
 concurrency:
   # 目标端续期并发安全,不存在 token 互踢:全部 run 按 桶+路径 分组即可并行
@@ -138,6 +161,168 @@ jobs:
           cat /tmp/paths.src
           echo "== SRC token check =="
           grep -c '^SRC=src' /tmp/paths.src
+
+      - name: Setup Cloudflare WARP
+        if: ${{ (inputs.mode == 'copy' || inputs.mode == 'sync') && inputs.warp_mode != 'bare' }}
+        env:
+          RCLONE_PAT: ${{ secrets.RCLONE_PAT }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          WARP_BAD_FIRST: ${{ inputs.warp_probe_bad_first }}
+        run: |
+          set -e
+          MODE="${{ inputs.warp_mode }}"
+          case "$MODE" in
+            v6-only|v4-only|dual) ;;
+            "") echo "warp_mode 未指定,按 bare 跳过(兼容旧 launcher)"; exit 0 ;;
+            *) echo "::error::未知 warp_mode: $MODE"; exit 1 ;;
+          esac
+          V4_WANT=0; V6_WANT=0
+          case "$MODE" in
+            v6-only) V6_WANT=1 ;;
+            v4-only) V4_WANT=1 ;;
+            dual)    V4_WANT=1; V6_WANT=1 ;;
+          esac
+          echo ">>> WARP 模式: $MODE (V4_WANT=$V4_WANT V6_WANT=$V6_WANT)"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools tcpdump
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o /tmp/wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
+          chmod +x /tmp/wgcf && sudo mv /tmp/wgcf /usr/local/bin/wgcf
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -H "Authorization: token $RCLONE_PAT" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/$REPO_OWNER/rclone-action/contents/wgcf/wgcf-account.toml" \
+            -o wgcf-account.toml || { echo "::error::拉取 wgcf-account.toml 失败"; exit 1; }
+          wgcf generate
+          echo "===== wgcf-profile.conf(PrivateKey 已打码)====="
+          sed 's/^PrivateKey.*/PrivateKey = ***REDACTED***/' wgcf-profile.conf
+          PRIVATE_KEY=$(grep 'PrivateKey' wgcf-profile.conf | awk '{print $NF}')
+          ADDR_V4=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep -v ':' | head -1)
+          ADDR_V6=$(grep -i '^Address' wgcf-profile.conf | sed 's/^[Aa]ddress[ \t]*=[ \t]*//' | tr ',' '\n' | tr -d ' ' | grep ':' | head -1)
+          PEER_KEY=$(grep 'PublicKey' wgcf-profile.conf | awk '{print $NF}')
+          ENDPOINT=$(grep 'Endpoint' wgcf-profile.conf | awk '{print $NF}')
+          DEV=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+          GW=$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -1)
+          echo "ADDR_V4=$ADDR_V4 ADDR_V6=$ADDR_V6 DEV=$DEV GW=$GW"
+          [ "$V4_WANT" = "1" ] && [ -z "$ADDR_V4" ] && { echo "::error::WARP 未分配 IPv4 地址"; exit 1; }
+          [ "$V6_WANT" = "1" ] && [ -z "$ADDR_V6" ] && { echo "::error::WARP 未分配 IPv6 地址"; exit 1; }
+          ENDPOINT_HOST=${ENDPOINT%%:*}
+          EP_PORT=${ENDPOINT##*:}
+          EP_IP=$(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null | head -1)
+          [ -n "$EP_IP" ] || { echo "::error::无法解析 WARP 端点,按要求终止"; exit 1; }
+          echo ">>> 钉扎:endpoint $EP_IP/32、Azure 平台服务 168.63.129.16/32 via $GW ($DEV)"
+          sudo ip route add "$EP_IP/32" via "$GW" dev "$DEV" 2>/dev/null || true
+          sudo ip route add 168.63.129.16/32 via "$GW" dev "$DEV" 2>/dev/null || true
+          if [ "$V4_WANT" = "1" ]; then
+            for NET in 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 \
+                       20.0.0.0/8 13.0.0.0/8 52.0.0.0/8 168.0.0.0/8 \
+                       140.0.0.0/8 185.199.0.0/16; do
+              sudo ip route add "$NET" via "$GW" dev "$DEV" 2>/dev/null || \
+                sudo ip route add "$NET" via "$GW" 2>/dev/null || true
+            done
+          fi
+          if [ "$V6_WANT" = "1" ]; then
+            sudo ip -6 route add fc00::/7 dev "$DEV" 2>/dev/null || true
+          fi
+          # ---- 建接口 + 探接管: 探不中就换端点, 不再原地重试同一个 ----
+          # 2026-10-27 实测: 挂在接管探针上的每一发, wg show 都是 "transfer: 0 B received,
+          # 1.59 KiB sent" —— 握手包出得去, 一个回包都没有。对同一个 162.159.192.1:2408
+          # 原样重试 4 次全是同一个形状, 所以要换的是重试对象, 不是重试次数。
+          # 端口取 WARP 认的 2408/500/1701/4500; 端点取 engage.cloudflareclient.com 解析到的
+          # 全部 A 记录(只要 v4, 与改动前一致); 每个候选重建一次接口, 顺带换新 socket 与源端口。
+          # 成功时打印用的是第几个候选 —— 跨 run 攒下来就能分清"某端点被丢"和"账号被限"。
+          warp_build() {  # $1 = ip:port
+            local ep="$1" eip keytmp
+            eip="${ep%%:*}"
+            sudo ip link del wgcf 2>/dev/null || true
+            sudo ip route add "$eip/32" via "$GW" dev "$DEV" 2>/dev/null || true
+            sudo ip link add wgcf type wireguard
+            keytmp=$(mktemp)
+            ( umask 077; printf '%s\n' "$PRIVATE_KEY" > "$keytmp" )
+            sudo wg set wgcf private-key "$keytmp"
+            rm -f "$keytmp"
+            if [ "$V4_WANT" = "1" ] && [ "$V6_WANT" = "1" ]; then
+              sudo wg set wgcf peer "$PEER_KEY" endpoint "$ep" allowed-ips "0.0.0.0/0, ::/0" persistent-keepalive 15
+            elif [ "$V4_WANT" = "1" ]; then
+              sudo wg set wgcf peer "$PEER_KEY" endpoint "$ep" allowed-ips "0.0.0.0/0" persistent-keepalive 15
+            else
+              sudo wg set wgcf peer "$PEER_KEY" endpoint "$ep" allowed-ips "::/0" persistent-keepalive 15
+            fi
+            sudo ip link set mtu 1280 up dev wgcf
+            [ "$V4_WANT" = "1" ] && sudo ip addr add "$ADDR_V4" dev wgcf  || true
+            [ "$V6_WANT" = "1" ] && sudo ip addr add "$ADDR_V6" dev wgcf  || true
+            [ "$V4_WANT" = "1" ] && sudo ip -4 route replace 0.0.0.0/0 dev wgcf  || true
+            [ "$V6_WANT" = "1" ] && sudo ip -6 route replace ::/0 dev wgcf  || true
+            [ "$V4_WANT" = "1" ] && sudo iptables -t mangle -A OUTPUT -o wgcf -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+            [ "$V6_WANT" = "1" ] && sudo ip6tables -t mangle -A OUTPUT -o wgcf -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+            return 0
+          }
+
+          # 接管判定必须重试:WireGuard 首包握手经常超过 10s,单发一次会把已经建好的隧道
+          # 误判成"未接管"(2026-10-08 实测 18 桶里 4 次这种假失败)。每个候选 3 次 x 10s,
+          # 上限由候选数决定,最坏 4 端点 x 3 次 = 约 2 分钟/族,相对 350min 的墙可忽略。
+          warp_takeover() {
+            local fam=$1 body w i
+            for i in 1 2 3; do
+              body=$(curl "-$fam" -sS --max-time 10 "https://dash.cloudflare.com/cdn-cgi/trace" || true)
+              w=$(printf '%s\n' "$body" | sed -n 's/^warp=//p')
+              case "$w" in
+                on|plus)
+                  printf '%s\n' "$body" | grep -E '^(ip|warp|colo|loc)=' || true
+                  echo "WARP v$fam 接管 OK (第 $i 次)"
+                  return 0 ;;
+              esac
+              echo "WARP v$fam 第 $i 次未接管(${w:-curl 无响应}),重试"
+              if [ "$i" -lt 3 ]; then sleep 3; fi
+            done
+            return 1
+          }
+
+          EP_HOSTS=""
+          for h in $(dig +short +time=3 +tries=1 "$ENDPOINT_HOST" 2>/dev/null; echo "$EP_IP"); do
+            case "$h" in ""|*[!0-9.]*) continue ;; esac
+            case " $EP_HOSTS " in *" $h "*) continue ;; esac
+            EP_HOSTS="$EP_HOSTS $h"
+          done
+          CANDS=""
+          for h in $EP_HOSTS; do
+            for p in 2408 500 1701 4500; do CANDS="$CANDS $h:$p"; done
+          done
+          # 自检开关: 默认空, 正常路径一个字节都不变。勾上后 192.0.2.1 排第一,
+          # 它不应答, 只有换到真端点才算接管 —— 这条支路否则永远跑不到。
+          if [ "${WARP_BAD_FIRST:-false}" = "true" ]; then
+            CANDS=" 192.0.2.1:2408$CANDS"
+            echo ">>> [自检] 已在候选表最前面塞入不应答地址 192.0.2.1:2408"
+          fi
+          PROBES=""
+          [ "$V4_WANT" = "1" ] && PROBES="$PROBES 4" || true
+          [ "$V6_WANT" = "1" ] && PROBES="$PROBES 6" || true
+          echo "===== IP 出口探测 候选端点:$CANDS 探针:$PROBES ====="
+          if [ "$V6_WANT" = "1" ]; then
+            echo ">>> 基线 eth0 直连(不进隧道)"; curl -4 -sS --max-time 10 "https://www.cloudflare.com/cdn-cgi/trace" 2>&1 | grep -E '^(ip|colo|loc|warp)=' || echo "(v4 直连靶不通)"
+          fi
+          NCAND=$(echo $CANDS | wc -w)
+          n=0; WARP_OK=0; LASTEP=""
+          for ep in $CANDS; do
+            n=$((n+1)); LASTEP="$ep"
+            warp_build "$ep" || echo "::warning::端点 $ep 建接口失败,换下一个"
+            all=1
+            for fam in $PROBES; do
+              warp_takeover "$fam" || all=0
+            done
+            if [ "$all" = "1" ]; then
+              echo "WARP 接管 OK endpoint=$ep (候选 $n/$NCAND)"
+              WARP_OK=1; break
+            fi
+            echo ">>> 候选 $n/$NCAND 端点 $ep 未接管, 重建接口换下一个"
+          done
+          if [ "$WARP_OK" -ne 1 ]; then
+            echo "===== WARP 未接管 失败现场(最后一个候选 ${LASTEP:-无}) ====="
+            sudo wg show wgcf 2>&1 || true
+            for fam in $PROBES; do curl "-$fam" -sS --max-time 8 https://ip.sb 2>&1 | head -3 || true; done
+            echo "::error::WARP 未接管(试了 $n 个端点),终止"
+            exit 1
+          fi
 
       - name: "Install rclone (custom build: s3 download_host + cloudreve)"
         run: |
@@ -414,7 +599,7 @@ jobs:
           MIN_SIZE: "3145728"           # 只探 ≥3MiB 对象
           VERBOSE: "1"                  # 逐片打进度(实时日志可见)
           PROBE_SEED: "${{ github.run_id }}"  # 每个 run 换一批抽样文件
-          FETCH_MODE: "rclone"          # cloudreve 无 publiclink,固定走 rclone cat
+          FETCH_MODE: ${{ inputs.fetch_mode }}  # rclone|curl, 见 bin/chunk-probe.sh 的阶段2
         run: |
           . /tmp/paths.src
           set -o pipefail

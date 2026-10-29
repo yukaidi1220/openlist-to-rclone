@@ -74,6 +74,16 @@ on:
         type: boolean
         required: false
         default: false
+      connect_family:
+        description: "地址族偏好,直接映射到 rclone --connect-family。prefer-v4=现网默认;prefer-v6=优先 v6;v4/v6=只用该族。只影响 rclone 出网拨号,不改 WARP 隧道"
+        type: choice
+        required: false
+        default: "prefer-v4"
+        options:
+          - prefer-v4
+          - prefer-v6
+          - v4
+          - v6
       fetch_mode:
         description: "透传执行器:抽样校验步的取数方式。rclone=每片一个 rclone cat(默认);curl=每文件签一次直链、每片恰好一条 curl -r,单片有 --max-time 硬上限"
         type: choice
@@ -103,7 +113,9 @@ jobs:
     env:
       TZ: Asia/Shanghai
       RCLONE_CONFIG: /tmp/oss2wopan.conf
-      RCLONE_CONNECT_FAMILY: prefer-v4   # 先走 runner 原生 v4;配 warp_mode=v6-only 时 v4 不通才降级到 WARP 的 v6(族实现见 cdn.11+)
+      # 地址族:输入优先,留空维持原来的 prefer-v4。rclone 对 RCLONE_<FLAG> 的环境变量形态不保证生效,
+      # 所以下面每条 rclone 命令还显式带了 --connect-family。
+      RCLONE_CONNECT_FAMILY: ${{ inputs.connect_family || 'prefer-v4' }}
       # wopan 并发分片上传参数(指引:wopan-review/20-单流下载并发上传实施指引.md §5)
       # 仅对新版 rclone(含 uploadPartsConcurrent 的 release)有效;旧 binary 会报 unknown flag
       # 内存预算:阶段一 ≤1G 小文件 32Mi×30×15 ≈ 14GiB;阶段二全量 32Mi×64×4 ≈ 8GiB(runner 16GiB;实测 72 并发峰值 RSS 14.8GiB/剩 56MiB,故再降)
@@ -432,8 +444,8 @@ jobs:
           #   http 403 Forbidden: <!DOCTYPE html>..., 另外三发同凭据同刻通过 => 瞬时, 该重试而不是该红。
           ok=0; ERRTXT=''
           for i in 1 2 3 4 5; do
-            if ERRTXT=$(rclone lsd wopan: 2>&1 >/dev/null); then ok=1; break; fi
-            if ERRTXT=$(rclone lsf wopan: --max-depth 1 2>&1 >/dev/null); then ok=1; break; fi
+            if ERRTXT=$(rclone lsd wopan: ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY} 2>&1 >/dev/null); then ok=1; break; fi
+            if ERRTXT=$(rclone lsf wopan: --max-depth 1 ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY} 2>&1 >/dev/null); then ok=1; break; fi
             echo "wopan 连通性第 $i 次失败: $(printf '%s' "$ERRTXT" | tr -d '\n' | cut -c1-160 | sed -E 's/(session[_-]?[Kk]ey|access[_-]?token|refresh[_-]?token|authorization|cookie)([=: ]+)[^,;&\"]+/\1\2***/g')"
             [ "$i" -lt 5 ] && sleep 15
           done
@@ -493,11 +505,11 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           # dry-run 展示:sync 模式显示 Would delete 清单,copy 模式显示 Would copy;流式 stats 便于观察
-          rclone copy "$SRC" "$DST" --dry-run \
+          rclone copy "$SRC" "$DST" --dry-run ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY} \
             --size-only --ignore-checksum --no-check-certificate \
             --transfers 4 --checkers 8 \
             --stats 60s -v 2>&1 | tee copy.log
-          rclone sync "$SRC" "$DST" --dry-run \
+          rclone sync "$SRC" "$DST" --dry-run ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY} \
             --size-only --ignore-checksum --no-check-certificate \
             --transfers 4 --checkers 8 \
             --stats 60s -v 2>&1 | tee -a copy.log
@@ -510,7 +522,7 @@ jobs:
           # 阶段一:只处理 ≤1G 小文件,--transfers 15 高并发(小文件多,提升吞吐)。
           # --max-size 1G = 只传严格小于 1G 的文件;≥1G 的留给阶段二。
           set +e
-          rclone copy "$SRC" "$DST" \
+          rclone copy "$SRC" "$DST" ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY} \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --max-size 1G --transfers 15 --checkers 8 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
@@ -540,7 +552,7 @@ jobs:
           chmod +x bin/resmon.sh
           ./bin/resmon.sh &
           SAMPLER_PID=$!
-          rclone copy "$SRC" "$DST" \
+          rclone copy "$SRC" "$DST" ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY} \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 4 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
@@ -567,7 +579,7 @@ jobs:
           # sync = 源→目标单向镜像:目标前缀下不在源桶的文件会被删除(wopan 默认进回收站)。
           # 阶段一:只处理 ≤1G 小文件,--transfers 15 高并发(小文件多,提升吞吐)。
           set +e
-          rclone sync "$SRC" "$DST" \
+          rclone sync "$SRC" "$DST" ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY} \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --max-size 1G --transfers 15 --checkers 8 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
@@ -597,7 +609,7 @@ jobs:
           chmod +x bin/resmon.sh
           ./bin/resmon.sh &
           SAMPLER_PID=$!
-          rclone sync "$SRC" "$DST" \
+          rclone sync "$SRC" "$DST" ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY} \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 4 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
@@ -629,7 +641,7 @@ jobs:
           . /tmp/paths.src
           set -o pipefail
           set +e
-          rclone check "$SRC" "$DST" --one-way --size-only --ignore-errors -v 2>&1 | tee check.log
+          rclone check "$SRC" "$DST" ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY} --one-way --size-only --ignore-errors -v 2>&1 | tee check.log
           rc=${PIPESTATUS[0]}
           set -e
           # 敏感词目录目标缺失等会令 check 非 0;放行并警告(随机样本 md5 校验兜底完整性)

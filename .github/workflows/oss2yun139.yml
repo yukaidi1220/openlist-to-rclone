@@ -67,7 +67,7 @@ on:
         description: "抽样取数方式。rclone=每片一个 rclone cat(默认,现网行为);aria2=每文件签一次直链再并行拉。仅 verify 抽样步生效"
         type: choice
         required: false
-        default: "rclone"
+        default: "curl"
         options:
           - rclone
           - aria2

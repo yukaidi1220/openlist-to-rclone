@@ -78,7 +78,7 @@ on:
         description: "透传执行器:抽样校验步的取数方式。rclone=每片一个 rclone cat(默认);curl=每文件签一次直链、每片恰好一条 curl -r,单片有 --max-time 硬上限"
         type: choice
         required: false
-        default: "rclone"
+        default: "curl"
         options:
           - rclone
           - curl

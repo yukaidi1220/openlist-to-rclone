@@ -118,7 +118,7 @@ jobs:
       CLOUD189_UPLOAD_CONCURRENCY: '16'        # 阶段二(全量)单文件分片并发
       CLOUD189_UPLOAD_CONCURRENCY_STAGE1: '4'  # 阶段一(≤1G)单文件分片并发
       CLOUD189_MT_CUTOFF: 256Mi                # ≥此大小走 源端 Range 并行下载 + 云端分片上传
-      CLOUD189_MT_STREAMS: '24'                # 源端并行 Range 数(stage2);多文件少线程:尾部 straggler 少一半,内存≈8×24×20Mi≈3.8GiB
+      CLOUD189_MT_STREAMS: '96'                # 源端并行 Range 数(stage2);内存≈6×96×片大小(10Mi 约 5.6GiB,20Mi 约 11.3GiB),runner 总内存实测 16GiB
     steps:
       - name: 检出仓库(含 bin/skipdiff.sh、bin/resmon.sh、bin/chunk-probe.sh)
         uses: actions/checkout@v6
@@ -591,7 +591,7 @@ jobs:
           SAMPLER_PID=$!
           rclone copy ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --transfers 8 --checkers 4 \
+            --transfers 6 --checkers 4 \
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$CLOUD189_MT_CUTOFF" \
             --multi-thread-streams "$CLOUD189_MT_STREAMS" \
@@ -778,7 +778,7 @@ jobs:
           SAMPLER_PID=$!
           rclone sync ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --transfers 8 --checkers 4 \
+            --transfers 6 --checkers 4 \
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY" \
             --multi-thread-cutoff "$CLOUD189_MT_CUTOFF" \
             --multi-thread-streams "$CLOUD189_MT_STREAMS" \

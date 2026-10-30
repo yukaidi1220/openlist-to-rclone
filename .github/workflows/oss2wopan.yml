@@ -134,6 +134,7 @@ jobs:
       # 多线程复制触发阈值:≥此大小的文件走 源端 Range 并行下载 + OpenChunkWriter 并发上传
       # (源码核实:分片边界= wopan chunk_size,streams 取大逻辑自动用 backend concurrency,无需传 --multi-thread-streams)
       WOPAN_MT_CUTOFF: 256Mi
+      WOPAN_MT_STREAMS: '32'                   # 阶段二下载流数;要大于 backend upload-concurrency(16) 才生效,multiThreadCopy 取两者较大值
     steps:
       - name: 检出仓库(含 bin/chunk-probe.sh)
         uses: actions/checkout@v6
@@ -554,12 +555,13 @@ jobs:
           SAMPLER_PID=$!
           rclone copy "$SRC" "$DST" ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY} \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --transfers 4 --checkers 2 \
+            --transfers 8 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
             --wopan-fatal-if-no-space \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
+            --multi-thread-streams "$WOPAN_MT_STREAMS" \
             --retries 2 --low-level-retries 3 \
             --timeout 45s --contimeout 10s \
             --stats 30s -vv 2>&1 | tee -a copy.log
@@ -611,12 +613,13 @@ jobs:
           SAMPLER_PID=$!
           rclone sync "$SRC" "$DST" ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY} \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
-            --transfers 4 --checkers 2 \
+            --transfers 8 --checkers 2 \
             --wopan-upload-cutoff "$WOPAN_UPLOAD_CUTOFF" \
             --wopan-chunk-size "$WOPAN_CHUNK_SIZE" \
             --wopan-upload-concurrency "$WOPAN_UPLOAD_CONCURRENCY" \
             --wopan-fatal-if-no-space \
             --multi-thread-cutoff "$WOPAN_MT_CUTOFF" \
+            --multi-thread-streams "$WOPAN_MT_STREAMS" \
             --retries 2 --low-level-retries 3 \
             --timeout 45s --contimeout 10s \
             --stats 30s -vv 2>&1 | tee -a copy.log

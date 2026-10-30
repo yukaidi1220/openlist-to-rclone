@@ -66,6 +66,16 @@ on:
           - v6-only
           - v4-only
           - dual
+      connect_family:
+        description: "地址族偏好,直接映射到 rclone --connect-family。prefer-v4=现网默认;prefer-v6=优先 v6;v4/v6=只用该族。只影响 rclone 出网拨号,不改 WARP 隧道"
+        type: choice
+        required: false
+        default: "prefer-v4"
+        options:
+          - prefer-v4
+          - prefer-v6
+          - v4
+          - v6
       fetch_mode:
         description: "抽样取数方式。rclone=每片一个 rclone cat(默认,现网行为);aria2=每文件签一次直链再并行拉;curl=每文件签一次直链、每片恰好一条 curl -r,单片有 --max-time 硬上限。仅 verify 抽样步生效"
         type: choice
@@ -98,7 +108,7 @@ jobs:
     env:
       TZ: Asia/Shanghai
       RCLONE_CONFIG: /tmp/oss2cloud189.conf
-      RCLONE_CONNECT_FAMILY: prefer-v6   # 双栈时优先 v6，某族停滞时降另一族
+      RCLONE_CONNECT_FAMILY: ${{ inputs.connect_family || 'prefer-v4' }}   # env 形态会被 pflag 忽略,所以下面每条 rclone 命令还显式带 --connect-family
       # 分片大小不是本端的自由参数:服务端按文件大小规定唯一一个 sliceSize,
       # chunkPlan 只是复述那条规则(chunk_size 是它的锚,默认 10Mi),所以这里不覆盖。
       # 能调的是"同时传几个文件"和"单文件内部同时传几片":
@@ -342,6 +352,7 @@ jobs:
           chmod +x /tmp/rclone
           sudo mv /tmp/rclone /usr/local/bin/rclone
           rclone version | head -2
+          echo "RCLONE_CONNECT_FAMILY=${RCLONE_CONNECT_FAMILY:-<unset>}"
           # --dump trace 只打连接级事件,不打请求头,不会把 access_token 写进日志。
           if [ "${{ inputs.dump_trace }}" = "true" ]; then
             echo "RCLONE_DUMP=trace" >> "$GITHUB_ENV"
@@ -367,7 +378,7 @@ jobs:
         run: |
           . /tmp/paths.src
           set -o pipefail
-          rclone size "$SRC" --json --no-check-certificate > /tmp/size.json
+          rclone size ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  "$SRC" --json --no-check-certificate > /tmp/size.json
           jq -r '"objects=\(.count // .files) bytes=\(.bytes)"' /tmp/size.json | tee -a "$GITHUB_STEP_SUMMARY"
           echo "SRC_BYTES=$(jq -r '.bytes // 0' /tmp/size.json)" >> "$GITHUB_ENV"
 
@@ -382,7 +393,7 @@ jobs:
             [ "$i" -lt 5 ] && sleep 15
           done
           [ "$ok" = "1" ] || { echo "::error::cloud189 不可达(access_token 失效或接口变更), 5 次重试均未通"; exit 1; }
-          rclone about --json cloud189: > /tmp/about.json
+          rclone about ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  --json cloud189: > /tmp/about.json
           TOTAL=$(jq -r '.total // 0' /tmp/about.json)
           FREE=$(jq -r '.free // 0' /tmp/about.json)
           jq -r '"target total=\(.total // "?") used=\(.used // "?") free=\(.free // "?")"' /tmp/about.json | tee -a "$GITHUB_STEP_SUMMARY"
@@ -462,11 +473,11 @@ jobs:
         run: |
           . /tmp/paths.src
           set -o pipefail
-          rclone copy "$SRC" "$DST" --dry-run \
+          rclone copy ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  "$SRC" "$DST" --dry-run \
             --size-only --ignore-checksum --no-check-certificate \
             --transfers 4 --checkers 8 \
             --stats 60s -v 2>&1 | sed -uE 's/(session[_-]?[Kk]ey=)[^,"[:space:]]+/\1***/g' | tee copy.log
-          rclone sync "$SRC" "$DST" --dry-run \
+          rclone sync ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  "$SRC" "$DST" --dry-run \
             --size-only --ignore-checksum --no-check-certificate \
             --transfers 4 --checkers 8 \
             --stats 60s -v 2>&1 | sed -uE 's/(session[_-]?[Kk]ey=)[^,"[:space:]]+/\1***/g' | tee -a copy.log
@@ -482,7 +493,7 @@ jobs:
           chmod +x bin/resmon.sh
           ./bin/resmon.sh &
           SAMPLER_PID=$!
-          rclone copy "$SRC" "$DST" \
+          rclone copy ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --max-size 1G --transfers 15 --checkers 8 \
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY_STAGE1" \
@@ -578,7 +589,7 @@ jobs:
           chmod +x bin/resmon.sh
           ./bin/resmon.sh &
           SAMPLER_PID=$!
-          rclone copy "$SRC" "$DST" \
+          rclone copy ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 3 --checkers 4 \
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY" \
@@ -673,7 +684,7 @@ jobs:
           chmod +x bin/resmon.sh
           ./bin/resmon.sh &
           SAMPLER_PID=$!
-          rclone sync "$SRC" "$DST" \
+          rclone sync ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --max-size 1G --transfers 15 --checkers 8 \
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY_STAGE1" \
@@ -765,7 +776,7 @@ jobs:
           chmod +x bin/resmon.sh
           ./bin/resmon.sh &
           SAMPLER_PID=$!
-          rclone sync "$SRC" "$DST" \
+          rclone sync ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  "$SRC" "$DST" \
             --size-only --ignore-checksum --no-check-certificate --ignore-errors \
             --transfers 3 --checkers 4 \
             --cloud189-upload-concurrency "$CLOUD189_UPLOAD_CONCURRENCY" \
@@ -862,7 +873,7 @@ jobs:
           # 独立 verify 轮没有 copy 阶段,按源端 Size==0 反推。
           SKIP_SRC=copy.log
           if [ ! -f copy.log ]; then
-            rclone lsjson "$SRC" -R --files-only --no-mimetype --no-modtime --no-check-certificate -vv \
+            rclone lsjson ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  "$SRC" -R --files-only --no-mimetype --no-modtime --no-check-certificate -vv \
               2>/dev/null | jq -r '.[] | select(.Size == 0) | .Path' | sort -u > /tmp/expected-skip.txt
             export EXPECTED_SKIP=/tmp/expected-skip.txt
             echo "expected-skip(空文件)= $(wc -l < /tmp/expected-skip.txt)"
@@ -874,7 +885,7 @@ jobs:
             echo "expected-skip(空文件+必拒名字+敏感词名+md5黑名单,来自 copy.log)= $(wc -l < /tmp/expected-skip.txt)"
             SKIP_SRC=-
           fi
-          rclone check "$SRC" "$DST" --one-way --size-only --ignore-errors \
+          rclone check ${RCLONE_CONNECT_FAMILY:+--connect-family $RCLONE_CONNECT_FAMILY}  "$SRC" "$DST" --one-way --size-only --ignore-errors \
             --checkers 16 --transfers 4 --no-check-certificate -v 2>&1 | sed -uE 's/(session[_-]?[Kk]ey=)[^,"[:space:]]+/\1***/g' | tee check.log
           rc=${PIPESTATUS[0]}
           set -e

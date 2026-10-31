@@ -115,10 +115,10 @@ jobs:
       #   stage1(≤1G 小文件)以文件数取胜;stage2(全量)单文件并发取大。
       # 两个后端都是上传前把整个文件落到临时盘算摘要,所以这里直接对齐 yun139 的
       # 并发档位(阶段的 --transfers/--checkers 也一样),不再另设一套。
-      CLOUD189_UPLOAD_CONCURRENCY: '16'        # 阶段二(全量)单文件分片并发
+      CLOUD189_UPLOAD_CONCURRENCY: '32'        # 阶段二(全量)单文件分片并发
       CLOUD189_UPLOAD_CONCURRENCY_STAGE1: '4'  # 阶段一(≤1G)单文件分片并发
       CLOUD189_MT_CUTOFF: 256Mi                # ≥此大小走 源端 Range 并行下载 + 云端分片上传
-      CLOUD189_MT_STREAMS: '24'                # 源端并行 Range 数(stage2);配 download_chunk_size 64Mi,内存≈(24+1)×64Mi×6≈9.4GiB 缓冲
+      CLOUD189_MT_STREAMS: '24'                # 源端并行 Range 数(stage2);引擎取 max(本值,upload_concurrency)=32,故实际 32 路,内存≈(32+1)×64Mi×6≈12.6GiB 缓冲
       CLOUD189_DOWNLOAD_CHUNK_SIZE: '64Mi'     # 只影响读源的分片(引擎 ChunkSize),上传分片仍是服务端阶梯(10Mi/20Mi)
     steps:
       - name: 检出仓库(含 bin/skipdiff.sh、bin/resmon.sh、bin/chunk-probe.sh)

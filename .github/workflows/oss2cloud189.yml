@@ -524,7 +524,7 @@ jobs:
             # 同理 "Attempt N/M failed with K errors and: <最后一条错因>" 也是重试汇总行:
             # 2026-10-27 us-free 一轮 181 个错误全是可吸收类,却被这两行汇总判红(实测复现)。
             SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
-            SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
+            SKIP_NAME=$(grep -ac 'Failed to copy: .*\(change it locally\|rename it locally\)' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
             # 删除失败只在"这一条删除后来确实删掉了"时才算解释过, 而且是逐行判定:
@@ -554,7 +554,7 @@ jobs:
               | grep -av 'Attempt [0-9]*/[0-9]* failed with' \
               | { if [ "$DEL_OK" -gt 0 ]; then grep -avxF -f /tmp/del-resolved.txt; else cat; fi; } \
               | head -20 || true)
-            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
+            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'change it locally\|rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))
             if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
@@ -621,7 +621,7 @@ jobs:
             # 同理 "Attempt N/M failed with K errors and: <最后一条错因>" 也是重试汇总行:
             # 2026-10-27 us-free 一轮 181 个错误全是可吸收类,却被这两行汇总判红(实测复现)。
             SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
-            SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
+            SKIP_NAME=$(grep -ac 'Failed to copy: .*\(change it locally\|rename it locally\)' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
             # 删除失败只在"这一条删除后来确实删掉了"时才算解释过, 而且是逐行判定:
@@ -651,7 +651,7 @@ jobs:
               | grep -av 'Attempt [0-9]*/[0-9]* failed with' \
               | { if [ "$DEL_OK" -gt 0 ]; then grep -avxF -f /tmp/del-resolved.txt; else cat; fi; } \
               | head -20 || true)
-            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
+            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'change it locally\|rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))
             if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
@@ -714,7 +714,7 @@ jobs:
             # 同理 "Attempt N/M failed with K errors and: <最后一条错因>" 也是重试汇总行:
             # 2026-10-27 us-free 一轮 181 个错误全是可吸收类,却被这两行汇总判红(实测复现)。
             SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
-            SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
+            SKIP_NAME=$(grep -ac 'Failed to copy: .*\(change it locally\|rename it locally\)' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
             # 删除失败只在"这一条删除后来确实删掉了"时才算解释过, 而且是逐行判定:
@@ -744,7 +744,7 @@ jobs:
               | grep -av 'Attempt [0-9]*/[0-9]* failed with' \
               | { if [ "$DEL_OK" -gt 0 ]; then grep -avxF -f /tmp/del-resolved.txt; else cat; fi; } \
               | head -20 || true)
-            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
+            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'change it locally\|rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))
             if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
@@ -809,7 +809,7 @@ jobs:
             # 同理 "Attempt N/M failed with K errors and: <最后一条错因>" 也是重试汇总行:
             # 2026-10-27 us-free 一轮 181 个错误全是可吸收类,却被这两行汇总判红(实测复现)。
             SKIP_EMPTY=$(grep -ac 'Failed to copy: .*empty files' copy.log || true)
-            SKIP_NAME=$(grep -ac 'Failed to copy: .*rename it locally' copy.log || true)
+            SKIP_NAME=$(grep -ac 'Failed to copy: .*\(change it locally\|rename it locally\)' copy.log || true)
             SKIP_AUDIT=$(grep -ac 'Failed to copy: .*fileName security check not pass' copy.log || true)
             SKIP_MD5=$(grep -ac 'Failed to copy: .*file md5 is in black list' copy.log || true)
             # 删除失败只在"这一条删除后来确实删掉了"时才算解释过, 而且是逐行判定:
@@ -839,7 +839,7 @@ jobs:
               | grep -av 'Attempt [0-9]*/[0-9]* failed with' \
               | { if [ "$DEL_OK" -gt 0 ]; then grep -avxF -f /tmp/del-resolved.txt; else cat; fi; } \
               | head -20 || true)
-            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'rename it locally' \
+            REAL=$(grep -a 'Failed to copy: ' copy.log | grep -av 'empty files' | grep -av 'change it locally\|rename it locally' \
               | grep -av 'fileName security check not pass' | grep -av 'file md5 is in black list' | head -20 || true)
             SKIPPED=$(( SKIP_EMPTY + SKIP_NAME + SKIP_AUDIT + SKIP_MD5 ))
             if [ -n "$OTHER" ] || [ -n "$REAL" ] || { [ "$SKIPPED" -eq 0 ] && [ "$DEL_ALL_OK" -eq 0 ]; }; then
@@ -882,7 +882,7 @@ jobs:
             echo "expected-skip(空文件)= $(wc -l < /tmp/expected-skip.txt)"
             SKIP_SRC=-
           else
-            grep -aoE 'ERROR : .*: Failed to copy: .*(empty files|rename it locally|fileName security check not pass|file md5 is in black list)' copy.log \
+            grep -aoE 'ERROR : .*: Failed to copy: .*(empty files|rename it locally|change it locally|fileName security check not pass|file md5 is in black list)' copy.log \
               | sed -E 's/^ERROR : //; s/: Failed to copy: .*//' | sort -u > /tmp/expected-skip.txt
             export EXPECTED_SKIP=/tmp/expected-skip.txt
             echo "expected-skip(空文件+必拒名字+敏感词名+md5黑名单,来自 copy.log)= $(wc -l < /tmp/expected-skip.txt)"
